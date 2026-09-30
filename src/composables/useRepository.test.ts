@@ -150,6 +150,19 @@ async function openReady(
   await flush()
 }
 
+async function openDisplayed(
+  state: ReturnType<typeof useRepository>,
+  transport: ReturnType<typeof delayedClient>,
+) {
+  await openReady(state, transport, repository('repo', 3), fullPage(0, 3))
+  transport
+    .take('commit_details', { sha: 'commit-0' })
+    .resolve(details('commit-0', [file(0), file(1)]))
+  await flush()
+  transport.take('file_diff', { sha: 'commit-0', fileIndex: 0 }).resolve(diff(3))
+  await flush()
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   cleanup = []
@@ -212,22 +225,25 @@ describe('repository navigation', () => {
     const initialDetails = transport.take('commit_details')
     const second = state.select(row(1), 1)
     const secondDetails = transport.take('commit_details', { sha: 'commit-1' })
-    secondDetails.resolve(details('commit-1', [file(0), file(1)]))
+    secondDetails.resolve(details('commit-1', [file(0), file(1), file(2)]))
+    await flush()
+    transport.take('file_diff', { sha: 'commit-1', fileIndex: 0 }).resolve(diff(3))
     await second
-    const initialDiff = transport.take('file_diff', { fileIndex: 0 })
-    const selectingFile = state.selectFile(file(1))
-    transport.take('file_diff', { fileIndex: 1 }).resolve(diff(42))
+    const oldSelection = state.selectFile(file(1))
+    const initialDiff = transport.take('file_diff', { fileIndex: 1 })
+    const selectingFile = state.selectFile(file(2))
+    transport.take('file_diff', { fileIndex: 2 }).resolve(diff(42))
     await selectingFile
     initialDetails.reject(new Error('Old details failed'))
     initialDiff.resolve(diff(999))
-    await flush()
+    await oldSelection
 
     expect(initialDetails.signal?.aborted).toBe(true)
     expect(initialDiff.signal?.aborted).toBe(true)
     expect(state.selectedSha.value).toBe('commit-1')
     expect(state.selectedIndex.value).toBe(1)
     expect(state.details.value?.sha).toBe('commit-1')
-    expect(state.selectedFile.value?.path).toBe('file-1.ts')
+    expect(state.selectedFile.value?.path).toBe('file-2.ts')
     expect(state.diff.value?.additions).toBe(42)
     expect(state.detailError.value).toBe('')
     expect(state.diffError.value).toBe('')
@@ -286,6 +302,225 @@ describe('repository navigation', () => {
     expect(state.total.value).toBe(0)
     expect(state.selectedSha.value).toBe('')
   })
+})
+
+describe('displayed selection transitions', () => {
+  it('keeps the old metadata, file and patch together until the next commit and its first patch are ready', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const oldDetails = state.details.value
+    const oldFile = state.selectedFile.value
+    const oldDiff = state.diff.value
+    const selecting = state.select(row(1), 1)
+
+    expect(state.selectedSha.value).toBe('commit-1')
+    expect(state.selectedIndex.value).toBe(1)
+    expect(state.detailLoading.value).toBe(true)
+    expect(state.details.value).toBe(oldDetails)
+    expect(state.selectedFile.value).toBe(oldFile)
+    expect(state.diff.value).toBe(oldDiff)
+    await state.selectFile(file(1))
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(1)
+
+    transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1', [file(5)]))
+    await flush()
+    expect(state.details.value).toBe(oldDetails)
+    expect(state.selectedFile.value).toBe(oldFile)
+    expect(state.diff.value).toBe(oldDiff)
+    expect(state.detailLoading.value).toBe(true)
+    expect(state.diffLoading.value).toBe(true)
+    await state.selectFile(file(1))
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(2)
+    transport.take('file_diff', { sha: 'commit-1', fileIndex: 5 }).resolve(diff(17))
+    await selecting
+
+    expect(state.details.value?.sha).toBe('commit-1')
+    expect(state.selectedFile.value?.path).toBe('file-5.ts')
+    expect(state.diff.value?.additions).toBe(17)
+    expect(state.detailLoading.value).toBe(false)
+    expect(state.diffLoading.value).toBe(false)
+  })
+
+  it('ignores an old first patch after a newer commit has replaced the displayed snapshot', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const first = state.select(row(1), 1)
+    transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1', [file(1)]))
+    await flush()
+    const oldPatch = transport.take('file_diff', { sha: 'commit-1', fileIndex: 1 })
+    const latest = state.select(row(2), 2)
+    transport.take('commit_details', { sha: 'commit-2' }).resolve(details('commit-2', [file(2)]))
+    await flush()
+    transport.take('file_diff', { sha: 'commit-2', fileIndex: 2 }).resolve(diff(22))
+    await latest
+    oldPatch.resolve(diff(999))
+    await first
+
+    expect(oldPatch.signal?.aborted).toBe(true)
+    expect(state.selectedSha.value).toBe('commit-2')
+    expect(state.details.value?.sha).toBe('commit-2')
+    expect(state.selectedFile.value?.path).toBe('file-2.ts')
+    expect(state.diff.value?.additions).toBe(22)
+    expect(state.detailError.value).toBe('')
+    expect(state.diffError.value).toBe('')
+  })
+
+  it('keeps the displayed file and its patch unchanged while another file is being read', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const displayedDetails = state.details.value
+    const oldFile = state.selectedFile.value
+    const oldPatch = state.diff.value
+    const selecting = state.selectFile(file(1))
+
+    expect(state.selectedFile.value).toBe(oldFile)
+    expect(state.diff.value).toBe(oldPatch)
+    expect(state.diffLoading.value).toBe(true)
+    transport.take('file_diff', { sha: 'commit-0', fileIndex: 1 }).resolve(diff(42))
+    await selecting
+
+    expect(state.details.value).toBe(displayedDetails)
+    expect(state.selectedFile.value?.path).toBe('file-1.ts')
+    expect(state.diff.value?.additions).toBe(42)
+    expect(state.diffLoading.value).toBe(false)
+  })
+
+  it('cancels a pending file request when the user returns to the file already displayed', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const shownPatch = state.diff.value
+    const oldSelection = state.selectFile(file(1))
+    const oldPatch = transport.take('file_diff', { sha: 'commit-0', fileIndex: 1 })
+
+    await state.selectFile(file(0))
+    expect(oldPatch.signal?.aborted).toBe(true)
+    expect(state.diffLoading.value).toBe(false)
+    expect(state.selectedFile.value?.path).toBe('file-0.ts')
+    expect(state.diff.value).toBe(shownPatch)
+    oldPatch.resolve(diff(999))
+    await oldSelection
+
+    expect(state.selectedFile.value?.path).toBe('file-0.ts')
+    expect(state.diff.value).toBe(shownPatch)
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(2)
+  })
+
+  it('clears the old patch together with file identity when the next commit has no changed files', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const selecting = state.select(row(1), 1)
+    transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1'))
+    await selecting
+
+    expect(state.details.value?.sha).toBe('commit-1')
+    expect(state.selectedFile.value).toBeNull()
+    expect(state.diff.value).toBeNull()
+    expect(state.diffError.value).toBe('')
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(1)
+  })
+
+  it('associates a failed metadata request with its intended commit and clears the stale snapshot', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const selecting = state.select(row(1), 1)
+    transport.take('commit_details', { sha: 'commit-1' }).reject(new Error('Object unavailable'))
+    await selecting
+
+    expect(state.selectedSha.value).toBe('commit-1')
+    expect(state.detailError.value).toContain('commit-1')
+    expect(state.detailError.value).toContain('Object unavailable')
+    expect(state.details.value).toBeNull()
+    expect(state.selectedFile.value).toBeNull()
+    expect(state.diff.value).toBeNull()
+    expect(state.detailLoading.value).toBe(false)
+  })
+
+  it('publishes new metadata and the first-file error together without reusing an old patch', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const selecting = state.select(row(1), 1)
+    transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1', [file(1)]))
+    await flush()
+    transport
+      .take('file_diff', { sha: 'commit-1', fileIndex: 1 })
+      .reject(new Error('Patch unavailable'))
+    await selecting
+
+    expect(state.details.value?.sha).toBe('commit-1')
+    expect(state.selectedFile.value?.path).toBe('file-1.ts')
+    expect(state.diff.value).toBeNull()
+    expect(state.diffError.value).toContain('file-1.ts')
+    expect(state.diffError.value).toContain('commit-1')
+    expect(state.detailError.value).toBe('')
+    expect(state.detailLoading.value).toBe(false)
+    expect(state.diffLoading.value).toBe(false)
+  })
+
+  it('associates a file error with the requested file instead of leaving the previous patch beneath it', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const selecting = state.selectFile(file(1))
+    transport
+      .take('file_diff', { sha: 'commit-0', fileIndex: 1 })
+      .reject(new Error('Patch unavailable'))
+    await selecting
+
+    expect(state.details.value?.sha).toBe('commit-0')
+    expect(state.selectedFile.value?.path).toBe('file-1.ts')
+    expect(state.diff.value).toBeNull()
+    expect(state.diffError.value).toContain('file-1.ts')
+    expect(state.diffError.value).toContain('commit-0')
+    expect(state.diffLoading.value).toBe(false)
+  })
+
+  it('ignores a pending file failure after a search has cleared the displayed snapshot', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const selecting = state.selectFile(file(1))
+    const oldPatch = transport.take('file_diff', { sha: 'commit-0', fileIndex: 1 })
+    state.query.value = 'different'
+    oldPatch.reject(new Error('Late file failure'))
+    await selecting
+
+    expect(oldPatch.signal?.aborted).toBe(true)
+    expect(state.selectedSha.value).toBe('')
+    expect(state.details.value).toBeNull()
+    expect(state.selectedFile.value).toBeNull()
+    expect(state.diff.value).toBeNull()
+    expect(state.diffLoading.value).toBe(false)
+    expect(state.diffError.value).toBe('')
+  })
+
+  it.each(['search', 'open', 'reference', 'dispose'] as const)(
+    'clears the entire snapshot on %s and ignores the outstanding first patch',
+    async (change) => {
+      const { state, transport, scope } = setup()
+      await openDisplayed(state, transport)
+      const selecting = state.select(row(1), 1)
+      transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1', [file(1)]))
+      await flush()
+      const oldPatch = transport.take('file_diff', { sha: 'commit-1', fileIndex: 1 })
+
+      if (change === 'search') state.query.value = 'different'
+      else if (change === 'open') {
+        const opening = state.open('/tmp/invalid')
+        transport.take('open_repository').reject(new Error('Not a repository'))
+        await opening
+      } else if (change === 'reference') void state.jump('different')
+      else scope.stop()
+
+      oldPatch.resolve(diff(999))
+      await selecting
+      expect(oldPatch.signal?.aborted).toBe(true)
+      expect(state.details.value).toBeNull()
+      expect(state.selectedFile.value).toBeNull()
+      expect(state.diff.value).toBeNull()
+      expect(state.detailLoading.value).toBe(false)
+      expect(state.diffLoading.value).toBe(false)
+      expect(state.detailError.value).toBe('')
+      expect(state.diffError.value).toBe('')
+    },
+  )
 })
 
 describe('progressive loading and search', () => {

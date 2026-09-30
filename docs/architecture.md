@@ -28,6 +28,10 @@ FTS5 indexe messages, auteurs et emails, avec tokenisation Unicode et préfixes 
 
 Les fichiers et patches sont lus uniquement à la sélection. Un merge est comparé à son premier parent. L’affichage est borné : 5 000 fichiers, blobs de 2 Mio, patches de 2 000 lignes ou 512 Kio ; l’interface annonce les données binaires et les résultats tronqués. Ces bornes limitent la taille des réponses ; le calcul Git sous-jacent doit encore être mesuré sur les merges et arbres extrêmes.
 
+La sélection dans l’historique exprime immédiatement l’intention de l’utilisateur. Les détails, le fichier et son patch affichés appartiennent à un même snapshot, remplacé quand la nouvelle lecture est complète. Les générations et annulations empêchent les réponses précédentes de remplacer ce snapshot. Aucun loader animé ne remplace le contenu pendant la lecture ; `aria-busy` indique le travail en cours.
+
+Par défaut, un clic explicite sur un fichier affiche le diff au centre, avec les détails et la liste des fichiers à droite. Le composant `DiffViewer` est partagé avec la vue compacte. La liste de commits reste montée pendant la lecture du diff, pour conserver ses pages et sa position lorsqu’on revient à l’historique. Les deux vues utilisent le fond sombre du thème.
+
 ## Préférences d’interface
 
 Les trois thèmes utilisent les mêmes tokens CSS, y compris les couleurs du Canvas et des diffs. Le thème Classique, gris avec accents bleus, est le défaut ; Mangrove conserve la palette verte, et Macchiato reprend la palette officielle Catppuccin. Le choix est restauré avant le montage de l’interface. Un changement recolore le graphe sans rouvrir le dépôt.

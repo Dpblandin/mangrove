@@ -1,4 +1,4 @@
-import { onScopeDispose, ref, shallowRef, watch } from 'vue'
+import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { request, type GitClient } from '../lib/api'
 import type {
   ChangedFile,
@@ -14,6 +14,19 @@ export const PAGE_SIZE = 128
 const PAGE_CACHE_SIZE = 12
 
 type PendingPage = { controller: AbortController; promise: Promise<void> }
+type SelectionSnapshot = {
+  details: CommitDetails | null
+  file: ChangedFile | null
+  diff: FileDiff | null
+  error: string
+}
+
+const emptySnapshot = (): SelectionSnapshot => ({
+  details: null,
+  file: null,
+  diff: null,
+  error: '',
+})
 
 export function useRepository(client: GitClient = request) {
   const repository = shallowRef<RepositoryInfo | null>(null)
@@ -27,13 +40,14 @@ export function useRepository(client: GitClient = request) {
   const error = ref('')
   const selectedSha = ref('')
   const selectedIndex = ref(0)
-  const details = shallowRef<CommitDetails | null>(null)
+  const snapshot = shallowRef(emptySnapshot())
+  const details = computed(() => snapshot.value.details)
   const detailLoading = ref(false)
   const detailError = ref('')
-  const selectedFile = shallowRef<ChangedFile | null>(null)
-  const diff = shallowRef<FileDiff | null>(null)
+  const selectedFile = computed(() => snapshot.value.file)
+  const diff = computed(() => snapshot.value.diff)
   const diffLoading = ref(false)
-  const diffError = ref('')
+  const diffError = computed(() => snapshot.value.error)
   let epoch = 0
   let pageEpoch = 0
   let selectionEpoch = 0
@@ -72,20 +86,21 @@ export function useRepository(client: GitClient = request) {
     navigationController?.abort()
   }
 
-  function clearSelection() {
+  function cancelSelectionReads() {
     selectionEpoch += 1
     diffEpoch += 1
     detailController?.abort()
     diffController?.abort()
-    selectedSha.value = ''
-    selectedIndex.value = 0
-    details.value = null
-    selectedFile.value = null
-    diff.value = null
     detailLoading.value = false
     diffLoading.value = false
     detailError.value = ''
-    diffError.value = ''
+  }
+
+  function clearSelection() {
+    cancelSelectionReads()
+    selectedSha.value = ''
+    selectedIndex.value = 0
+    snapshot.value = emptySnapshot()
   }
 
   function mergeProgress(status: IndexProgress) {
@@ -256,7 +271,7 @@ export function useRepository(client: GitClient = request) {
     const repo = repository.value
     if (!repo) return
     cancelNavigation()
-    clearSelection()
+    cancelSelectionReads()
     const generation = selectionEpoch
     const controller = new AbortController()
     detailController = controller
@@ -270,37 +285,81 @@ export function useRepository(client: GitClient = request) {
         controller,
       )
       if (generation !== selectionEpoch || repo.id !== repository.value?.id) return
-      details.value = value
-      if (value.files[0]) void selectFile(value.files[0])
+      const file = value.files[0] ?? null
+      let patch: FileDiff | null = null
+      let patchError = ''
+      if (file) {
+        const patchController = new AbortController()
+        diffController = patchController
+        diffLoading.value = true
+        const result = await readFile(repo.id, row.sha, file, patchController)
+        if (generation !== selectionEpoch || repo.id !== repository.value?.id) return
+        patch = result.diff
+        patchError = result.error
+      }
+      // Metadata, file identity and patch share one displayed snapshot. The list
+      // can express a newer intent while this coherent snapshot remains visible.
+      snapshot.value = { details: value, file, diff: patch, error: patchError }
     } catch (cause) {
-      if (generation === selectionEpoch && !controller.signal.aborted)
-        detailError.value = String(cause)
+      if (generation === selectionEpoch && !controller.signal.aborted) {
+        snapshot.value = emptySnapshot()
+        detailError.value = `Impossible de lire le commit ${row.sha.slice(0, 8)} : ${String(cause)}`
+      }
     } finally {
-      if (generation === selectionEpoch) detailLoading.value = false
+      if (generation === selectionEpoch) {
+        detailLoading.value = false
+        diffLoading.value = false
+      }
+    }
+  }
+
+  async function readFile(
+    repositoryId: string,
+    sha: string,
+    file: ChangedFile,
+    controller: AbortController,
+  ) {
+    try {
+      const value = await call<FileDiff>(
+        'file_diff',
+        { sessionId: repositoryId, sha, fileIndex: file.index },
+        controller,
+      )
+      return { diff: value, error: '' }
+    } catch (cause) {
+      return {
+        diff: null,
+        error: `Impossible de lire ${file.path} (${sha.slice(0, 8)}) : ${String(cause)}`,
+      }
     }
   }
 
   async function selectFile(file: ChangedFile) {
     const repo = repository.value
-    const sha = selectedSha.value
-    if (!repo || !sha) return
+    const displayed = snapshot.value.details
+    if (!repo || !displayed || detailLoading.value || selectedSha.value !== displayed.sha) return
+    const target = displayed.files.find(
+      (candidate) => candidate.index === file.index && candidate.path === file.path,
+    )
+    if (!target) return
+    const sha = displayed.sha
     const generation = ++diffEpoch
     diffController?.abort()
+    if (snapshot.value.file === target && snapshot.value.diff && !snapshot.value.error) {
+      diffLoading.value = false
+      return
+    }
     const controller = new AbortController()
     diffController = controller
-    selectedFile.value = file
-    diff.value = null
-    diffError.value = ''
     diffLoading.value = true
     try {
-      const value = await call<FileDiff>(
-        'file_diff',
-        { sessionId: repo.id, sha, fileIndex: file.index },
-        controller,
+      const result = await readFile(repo.id, sha, target, controller)
+      if (
+        generation === diffEpoch &&
+        repo.id === repository.value?.id &&
+        !controller.signal.aborted
       )
-      if (generation === diffEpoch && repo.id === repository.value?.id) diff.value = value
-    } catch (cause) {
-      if (generation === diffEpoch && !controller.signal.aborted) diffError.value = String(cause)
+        snapshot.value = { ...snapshot.value, file: target, diff: result.diff, error: result.error }
     } finally {
       if (generation === diffEpoch) diffLoading.value = false
     }

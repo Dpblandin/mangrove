@@ -21,6 +21,7 @@ import {
 } from '@lucide/vue'
 import CommitList from './components/CommitList.vue'
 import CommitDetailsPanel from './components/CommitDetailsPanel.vue'
+import DiffWorkspace from './components/DiffWorkspace.vue'
 import OpenRepositoryDialog from './components/OpenRepositoryDialog.vue'
 import PaneDivider from './components/PaneDivider.vue'
 import { useRepository } from './composables/useRepository'
@@ -28,7 +29,7 @@ import { usePaneLayout } from './composables/usePaneLayout'
 import { chooseFolder, desktop } from './lib/api'
 import { count, provider } from './lib/format'
 import { themes, getStoredTheme, setTheme, type ThemeId } from './lib/themes'
-import type { Reference } from './lib/types'
+import type { ChangedFile, Reference } from './lib/types'
 
 const state = useRepository()
 const {
@@ -57,6 +58,26 @@ const layout = usePaneLayout(layoutRoot)
 const { leftWidth, rightWidth, leftBounds, rightBounds, resizing } = layout
 const theme = ref<ThemeId>(getStoredTheme())
 watch(theme, setTheme)
+const diffMode = ref<'central' | 'compact'>('central')
+const diffOpen = ref(false)
+const showCentralDiff = computed(() => diffMode.value === 'central' && diffOpen.value)
+watch(selectedSha, (sha) => {
+  if (!sha) diffOpen.value = false
+})
+
+function openFile(file: ChangedFile) {
+  diffOpen.value = true
+  void state.selectFile(file)
+}
+function changeDiffMode(mode: 'central' | 'compact') {
+  diffMode.value = mode
+  if (mode === 'central' && selectedFile.value) diffOpen.value = true
+}
+async function closeDiff() {
+  diffOpen.value = false
+  await nextTick()
+  list.value?.focus()
+}
 const search = ref<HTMLInputElement>()
 const showDialog = ref(false)
 const referenceFilter = ref('')
@@ -155,6 +176,12 @@ watch(filter, async () => {
   list.value?.scrollToIndex(0)
 })
 function keyboard(event: KeyboardEvent) {
+  if (event.defaultPrevented) return
+  if (event.key === 'Escape' && showCentralDiff.value && !resizing.value && !showDialog.value) {
+    event.preventDefault()
+    void closeDiff()
+    return
+  }
   if (!event.metaKey && !event.ctrlKey) return
   if (event.key.toLowerCase() === 'o') {
     event.preventDefault()
@@ -162,7 +189,8 @@ function keyboard(event: KeyboardEvent) {
   }
   if (event.key.toLowerCase() === 'k' && repository.value) {
     event.preventDefault()
-    search.value?.focus()
+    diffOpen.value = false
+    void nextTick(() => search.value?.focus())
   }
 }
 onMounted(() => window.addEventListener('keydown', keyboard))
@@ -297,78 +325,93 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard))
           class="workspace-content grid min-h-0 flex-1"
           :style="{ gridTemplateColumns: `minmax(0, 1fr) 6px ${rightWidth}px` }"
         >
-          <section
-            class="history-panel flex min-h-0 min-w-0 flex-col bg-bg"
-            aria-label="Historique du dépôt"
-          >
-            <div class="history-toolbar">
-              <div class="history-title">
-                <GitBranch :size="17" />
-                <h1>Historique</h1>
-                <span class="branch-chip">{{ repository.headName }}</span>
-              </div>
-              <button
-                class="icon-button"
-                aria-label="Actualiser le dépôt"
-                title="Relire les références locales"
-                :disabled="opening"
-                @click="openPath(repository.path)"
-              >
-                <RefreshCw :size="14" />
-              </button>
-            </div>
-            <div class="search-toolbar">
-              <label class="commit-search"
-                ><Search :size="15" />
-                <input
-                  ref="search"
-                  v-model="query"
-                  maxlength="256"
-                  aria-label="Rechercher des commits"
-                  placeholder="Message, auteur, SHA, référence…"
-                  spellcheck="false"
-                />
+          <div class="relative flex min-h-0 min-w-0 overflow-hidden">
+            <section
+              class="history-panel flex min-h-0 min-w-0 flex-1 flex-col bg-bg"
+              :class="{ invisible: showCentralDiff }"
+              :inert="showCentralDiff"
+              :aria-hidden="showCentralDiff"
+              aria-label="Historique du dépôt"
+            >
+              <div class="history-toolbar">
+                <div class="history-title">
+                  <GitBranch :size="17" />
+                  <h1>Historique</h1>
+                  <span class="branch-chip">{{ repository.headName }}</span>
+                </div>
                 <button
-                  v-if="query"
-                  class="search-clear"
-                  aria-label="Effacer la recherche"
-                  @click="query = ''"
+                  class="icon-button"
+                  aria-label="Actualiser le dépôt"
+                  title="Relire les références locales"
+                  :disabled="opening"
+                  @click="openPath(repository.path)"
                 >
-                  <X :size="12" />
+                  <RefreshCw :size="14" />
                 </button>
-                <kbd v-else>{{ shortcut }} K</kbd>
-              </label>
-              <span class="result-count"
-                >{{ count(total) }} <span>{{ filter ? 'résultats' : 'commits' }}</span></span
-              >
-            </div>
-            <CommitList
-              ref="list"
-              :session-id="repository.id"
-              :pages="pages"
-              :total="total"
-              :selected-sha="selectedSha"
-              :selected-index="selectedIndex"
-              :references="repository.references"
-              :filtered="Boolean(filter)"
-              :loading="loadingPages > 0"
-              :indexing="!progress.complete"
-              @range="state.loadRange"
-              @select="state.select"
-              @navigate="navigate"
+              </div>
+              <div class="search-toolbar">
+                <label class="commit-search"
+                  ><Search :size="15" />
+                  <input
+                    ref="search"
+                    v-model="query"
+                    maxlength="256"
+                    aria-label="Rechercher des commits"
+                    placeholder="Message, auteur, SHA, référence…"
+                    spellcheck="false"
+                  />
+                  <button
+                    v-if="query"
+                    class="search-clear"
+                    aria-label="Effacer la recherche"
+                    @click="query = ''"
+                  >
+                    <X :size="12" />
+                  </button>
+                  <kbd v-else>{{ shortcut }} K</kbd>
+                </label>
+                <span class="result-count"
+                  >{{ count(total) }} <span>{{ filter ? 'résultats' : 'commits' }}</span></span
+                >
+              </div>
+              <CommitList
+                ref="list"
+                :session-id="repository.id"
+                :pages="pages"
+                :total="total"
+                :selected-sha="selectedSha"
+                :selected-index="selectedIndex"
+                :references="repository.references"
+                :filtered="Boolean(filter)"
+                :loading="loadingPages > 0 || opening || query.trim().slice(0, 256) !== filter"
+                :indexing="!progress.complete"
+                @range="state.loadRange"
+                @select="state.select"
+                @navigate="navigate"
+              />
+              <footer class="history-footer">
+                <span v-if="!progress.complete"
+                  ><CircleDot :size="11" />Indexation · {{ count(progress.indexed) }} commits</span
+                >
+                <span v-else-if="progress.error"
+                  ><CircleDot :size="11" />Indexation interrompue</span
+                >
+                <span v-else><span class="ready-dot"></span>Index local prêt</span>
+                <span class="footer-hint"
+                  ><Command :size="11" />{{ shortcut }} K pour rechercher</span
+                >
+              </footer>
+            </section>
+            <DiffWorkspace
+              v-if="showCentralDiff"
+              class="absolute inset-0"
+              :file="selectedFile"
+              :diff="diff"
+              :loading="detailLoading || diffLoading"
+              :error="detailError || diffError"
+              @close="closeDiff"
             />
-            <footer class="history-footer">
-              <span v-if="!progress.complete"
-                ><span class="spinner small"></span>Indexation ·
-                {{ count(progress.indexed) }} commits</span
-              >
-              <span v-else-if="progress.error"><CircleDot :size="11" />Indexation interrompue</span>
-              <span v-else><span class="ready-dot"></span>Index local prêt</span>
-              <span class="footer-hint"
-                ><Command :size="11" />{{ shortcut }} K pour rechercher</span
-              >
-            </footer>
-          </section>
+          </div>
           <PaneDivider
             :value="rightWidth"
             :min="rightBounds.min"
@@ -390,7 +433,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard))
             :diff="diff"
             :diff-loading="diffLoading"
             :diff-error="diffError"
-            @select-file="state.selectFile"
+            :diff-mode="diffMode"
+            @select-file="openFile"
+            @diff-mode-changed="changeDiffMode"
           />
         </div>
         <div v-if="error && !showDialog" class="error-toast" role="alert">

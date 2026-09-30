@@ -42,7 +42,7 @@ Le générateur de fixtures pouvait hériter de variables Git dirigeant ses écr
 
 ## Validation
 
-Les commandes de validation sont dans le README. Elles couvrent le typage, le lint et formatage, 32 tests TypeScript, 16 tests Rust et 6 tests du générateur. Le paquet macOS est construit avec le frontend embarqué. La QA native porte sur l’ouverture d’un dossier, l’indexation, la recherche Unicode et sans résultat, les références, les détails, diffs et la navigation clavier au-delà d’une page de commits. Les validations des autres OS et les intégrations authentifiées restent à réaliser.
+Les commandes de validation sont dans le README. Elles couvrent le typage, le lint et formatage, 45 tests TypeScript, 16 tests Rust et 6 tests du générateur. Le paquet macOS est construit avec le frontend embarqué. La QA native porte sur l’ouverture d’un dossier, l’indexation, la recherche Unicode et sans résultat, les références, les détails, diffs et la navigation clavier au-delà d’une page de commits. La compilation native passe aussi en CI Linux, macOS et Windows ; la QA visuelle sur les autres OS et les intégrations authentifiées restent à réaliser.
 
 ## Thèmes et redimensionnement ajoutés ensuite
 
@@ -51,3 +51,11 @@ Les nouvelles préférences de thème et de panneaux ont reçu une revue ciblée
 La revue a trouvé un débordement quand le panneau historique était réduit dans une grande fenêtre : ses colonnes dépendaient d’une media query sur la fenêtre. Des container queries adaptent maintenant ces colonnes au panneau ; à 340 px, le message conserve 152 px. La QA native a aussi révélé des badges de références qui pouvaient déborder sur l’auteur à 638 px. Les badges sont désormais réductibles, leurs libellés tronqués et la cellule limitée à sa colonne. Les tests de préférences vérifient leur restauration, leurs bornes et l’annulation du redimensionnement.
 
 Les trois palettes, le graphe et les diffs ont été vérifiés dans le paquet natif. Les deux séparateurs répondent au glissement, le séparateur des détails répond aux flèches, et le double clic restaure les tailles par défaut. L’historique a été contrôlé à 340 et 638 px. Une fenêtre réduite de 1440 × 920 à 1200 × 800 conserve la largeur minimale de l’historique ; son agrandissement restaure la largeur souhaitée des détails. Le thème et les largeurs personnalisées persistent après fermeture et relance.
+
+## Vue centrale et stabilité des lectures
+
+Le rendu unifié est partagé par les vues centrale et compacte. Les changements de commit et de fichier conservent un snapshot cohérent jusqu’à réception de la nouvelle lecture, sans remplacer le contenu par un loader. Les régressions couvrent les transitions différées, réponses obsolètes, erreurs et annulations, ainsi que le retour vers le fichier affiché pendant qu’un autre fichier est encore en lecture.
+
+La revue a confirmé que masquer la liste avec `display: none` pouvait ramener à zéro l’offset lu par un timer de la bibliothèque de virtualisation. L’historique conserve maintenant ses dimensions avec `visibility: hidden`, `inert` et `aria-hidden`, sous la vue du diff. Une simulation avec la bibliothèque réelle vérifie la conservation de 5 000 px de défilement avant, pendant et après ce masquage.
+
+La QA native vérifie les deux modes, l’ouverture d’un fichier source au centre, le fond sombre, trente déplacements clavier successifs et la fermeture par Échap. Après trois pages de défilement, ouvrir puis fermer le diff conserve les mêmes lignes aux mêmes positions et rend le focus à l’historique.

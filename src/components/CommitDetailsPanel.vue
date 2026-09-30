@@ -1,13 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import {
-  AlertCircle,
-  FileText,
-  GitCommitHorizontal,
-  GitMerge,
-  LoaderCircle,
-  ShieldCheck,
-} from '@lucide/vue'
+import { AlertCircle, FileText, GitCommitHorizontal, GitMerge, ShieldCheck } from '@lucide/vue'
+import DiffViewer from './DiffViewer.vue'
 import type { ChangedFile, CommitDetails, FileDiff } from '../lib/types'
 import { commitDate, count, filename, fileStatusLabel, initials, shortSha } from '../lib/format'
 
@@ -19,10 +13,12 @@ const props = defineProps<{
   diff: FileDiff | null
   diffLoading: boolean
   diffError: string
+  diffMode: 'central' | 'compact'
 }>()
 
 const emit = defineEmits<{
   selectFile: [file: ChangedFile]
+  diffModeChanged: [mode: 'central' | 'compact']
 }>()
 
 const title = computed(() => props.details?.message.split('\n')[0] || 'Sans message')
@@ -51,6 +47,7 @@ function selected(file: ChangedFile) {
   <aside
     class="details-panel flex h-full min-h-0 flex-col border-l border-border bg-panel text-text"
     aria-label="Détails du commit"
+    :aria-busy="loading"
   >
     <header
       class="flex h-12 shrink-0 items-center justify-between border-b border-border px-[19px]"
@@ -63,16 +60,12 @@ function selected(file: ChangedFile) {
       >
     </header>
 
-    <div v-if="loading" class="panel-state" role="status">
-      <LoaderCircle class="animate-spin motion-reduce:animate-none" :size="24" />
-      <span>Lecture du commit…</span>
-    </div>
-    <div v-else-if="error" class="panel-state" role="alert">
+    <div v-if="error && !loading" class="panel-state" role="alert">
       <AlertCircle :size="24" class="text-danger" />
       <strong>Impossible de lire le commit</strong>
       <p>{{ error }}</p>
     </div>
-    <div v-else-if="!details" class="panel-state">
+    <div v-else-if="!details && !loading" class="panel-state">
       <span
         class="mb-2 grid size-16 place-items-center rounded-[18px] border border-border bg-surface text-accent"
         ><GitCommitHorizontal :size="30" :stroke-width="1.4"
@@ -81,7 +74,7 @@ function selected(file: ChangedFile) {
       <p>Sélectionnez un commit pour découvrir son message, ses fichiers et ses modifications.</p>
     </div>
 
-    <template v-else>
+    <template v-else-if="details">
       <section class="max-h-[38%] shrink-0 overflow-y-auto p-5 pb-4">
         <h2 class="mb-4 text-[15px] leading-relaxed font-medium [overflow-wrap:anywhere]">
           {{ title }}
@@ -134,7 +127,8 @@ function selected(file: ChangedFile) {
       </section>
 
       <section
-        class="flex max-h-[30%] min-h-0 shrink-0 flex-col border-t border-border"
+        class="flex min-h-0 flex-col border-t border-border"
+        :class="diffMode === 'compact' ? 'max-h-[30%] shrink-0' : 'flex-1'"
         aria-label="Fichiers modifiés"
       >
         <div
@@ -148,7 +142,7 @@ function selected(file: ChangedFile) {
             >
           </h3>
           <span
-            v-if="diff && !diffLoading && !diffError"
+            v-if="diff && !diffError"
             class="flex shrink-0 gap-2 font-mono text-[10px]"
             aria-label="Modifications du fichier sélectionné"
           >
@@ -156,11 +150,34 @@ function selected(file: ChangedFile) {
             <span class="text-danger">−{{ count(diff.deletions) }}</span>
           </span>
         </div>
-        <div class="overflow-y-auto px-[7px] pb-[9px]">
+        <div
+          class="flex shrink-0 items-center gap-1 border-b border-border px-[18px] pb-2"
+          role="group"
+          aria-label="Affichage du diff"
+        >
+          <button
+            type="button"
+            class="diff-mode-button"
+            :aria-pressed="diffMode === 'central'"
+            @click="emit('diffModeChanged', 'central')"
+          >
+            Vue centrale
+          </button>
+          <button
+            type="button"
+            class="diff-mode-button"
+            :aria-pressed="diffMode === 'compact'"
+            @click="emit('diffModeChanged', 'compact')"
+          >
+            Vue compacte
+          </button>
+        </div>
+        <div class="min-h-0 overflow-y-auto px-[7px] pb-[9px]">
           <button
             v-for="file in details.files"
             :key="file.index"
-            class="flex w-full cursor-pointer items-center gap-2.5 rounded-[5px] border border-transparent bg-transparent px-2.5 py-[9px] text-left text-text hover:bg-surface focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent aria-pressed:border-accent/25 aria-pressed:bg-accent/10"
+            class="flex w-full cursor-pointer items-center gap-2.5 rounded-[5px] border border-transparent bg-transparent px-2.5 py-[9px] text-left text-text hover:bg-surface focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent aria-pressed:border-accent/25 aria-pressed:bg-accent/10 disabled:cursor-default disabled:opacity-100"
+            :disabled="loading"
             :aria-pressed="selected(file)"
             :title="file.oldPath ? `${file.oldPath} → ${file.path}` : file.path"
             @click="emit('selectFile', file)"
@@ -193,9 +210,9 @@ function selected(file: ChangedFile) {
       </section>
 
       <section
+        v-if="diffMode === 'compact'"
         class="flex min-h-[110px] flex-1 flex-col border-t border-border bg-bg"
         aria-label="Modifications du fichier"
-        :aria-busy="diffLoading"
       >
         <div
           class="diff-heading flex min-h-10 shrink-0 items-center justify-between gap-2.5 border-b border-border bg-panel px-[18px]"
@@ -208,89 +225,7 @@ function selected(file: ChangedFile) {
             >DIFF</span
           >
         </div>
-        <div v-if="diffLoading" class="diff-state" role="status">
-          <LoaderCircle class="animate-spin motion-reduce:animate-none" :size="20" /><span
-            >Lecture des modifications…</span
-          >
-        </div>
-        <div v-else-if="diffError" class="diff-state" role="alert">
-          <AlertCircle :size="20" class="text-danger" />
-          <p>{{ diffError }}</p>
-        </div>
-        <div v-else-if="!selectedFile" class="diff-state">
-          <FileText :size="22" :stroke-width="1.5" />
-          <p>Sélectionnez un fichier pour voir ses modifications.</p>
-        </div>
-        <div v-else-if="diff?.binary" class="diff-state">
-          <FileText :size="24" :stroke-width="1.5" /><strong>Fichier binaire</strong>
-          <p>Le contenu de ce fichier ne peut pas être affiché sous forme de diff texte.</p>
-        </div>
-        <div
-          v-else-if="diff"
-          class="min-h-0 flex-1 overflow-auto pb-3 focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-accent"
-          tabindex="0"
-          aria-label="Diff du fichier, défilement horizontal et vertical"
-        >
-          <div
-            v-if="selectedFile.oldPath && selectedFile.oldPath !== selectedFile.path"
-            class="border-b border-border px-[17px] py-[13px] text-[11px] leading-relaxed text-muted [overflow-wrap:anywhere]"
-          >
-            Renommé depuis <code class="font-mono text-[10px]">{{ selectedFile.oldPath }}</code>
-          </div>
-          <div
-            v-for="(hunk, hunkIndex) in diff.hunks"
-            :key="hunkIndex"
-            class="diff-hunk min-w-max font-mono text-[10px] leading-5"
-          >
-            <div
-              class="hunk-header min-w-full border-t border-border bg-surface px-[13px] py-[5px] whitespace-pre text-accent"
-            >
-              {{ hunk.header.trimEnd() }}
-            </div>
-            <div
-              v-for="(line, lineIndex) in hunk.lines"
-              :key="lineIndex"
-              class="diff-line flex min-h-5 min-w-max whitespace-pre"
-              :class="line.kind"
-            >
-              <span
-                class="inline-block w-[30px] shrink-0 border-r border-border pr-[5px] text-right text-muted select-none"
-                aria-hidden="true"
-                >{{ line.oldLine }}</span
-              >
-              <span
-                class="inline-block w-[30px] shrink-0 border-r border-border pr-[5px] text-right text-muted select-none"
-                aria-hidden="true"
-                >{{ line.newLine }}</span
-              >
-              <span
-                class="line-sign inline-block w-5 shrink-0 text-center text-muted select-none"
-                aria-hidden="true"
-                >{{ line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' ' }}</span
-              >
-              <code class="pr-[15px] [font:inherit]">{{ line.content.replace(/\r?\n$/, '') }}</code>
-            </div>
-          </div>
-          <div
-            v-if="!diff.hunks.length && !diff.truncated"
-            class="px-[17px] py-[13px] text-[11px] leading-relaxed text-muted [overflow-wrap:anywhere]"
-          >
-            Aucune différence de contenu texte. Le changement peut concerner le nom ou les
-            permissions du fichier.
-          </div>
-          <div
-            v-if="diff.truncated"
-            class="sticky left-0 flex max-w-full items-start gap-2 bg-bg px-[17px] py-[13px] text-[10px] leading-relaxed text-warning"
-          >
-            <AlertCircle :size="14" class="mt-0.5 shrink-0" /><span
-              >Aperçu limité pour préserver la réactivité. Le fichier est volumineux ou le diff
-              dépasse la limite d’affichage.</span
-            >
-          </div>
-        </div>
-        <div v-else class="diff-state">
-          <span>Le diff de ce fichier n’est pas disponible.</span>
-        </div>
+        <DiffViewer :file="selectedFile" :diff="diff" :loading="diffLoading" :error="diffError" />
       </section>
     </template>
   </aside>
@@ -323,30 +258,7 @@ function selected(file: ChangedFile) {
 .parent-note code {
   @apply font-mono text-text;
 }
-.diff-state {
-  @apply flex flex-1 flex-col items-center justify-center gap-2.5 p-[22px] text-center text-[11px] text-muted;
-}
-.diff-state p {
-  @apply m-0 max-w-[260px] leading-relaxed [overflow-wrap:anywhere];
-}
-.diff-state strong {
-  @apply font-medium text-text;
-}
-.diff-hunk:first-child .hunk-header {
-  border-top: 0;
-}
-.diff-line.addition {
-  background: color-mix(in srgb, var(--success) 9%, var(--bg));
-}
-.diff-line.deletion {
-  background: color-mix(in srgb, var(--danger) 9%, var(--bg));
-}
-.addition .line-sign,
-.addition code {
-  color: var(--success);
-}
-.deletion .line-sign,
-.deletion code {
-  color: var(--danger);
+.diff-mode-button {
+  @apply cursor-pointer rounded border border-transparent bg-transparent px-2 py-1 text-[10px] text-muted hover:bg-surface aria-pressed:border-accent/30 aria-pressed:bg-accent/10 aria-pressed:text-accent;
 }
 </style>

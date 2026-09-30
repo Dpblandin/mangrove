@@ -98,7 +98,10 @@ onBeforeUnmount(() => observer?.disconnect())
 function scrollToIndex(index: number) {
   virtualizer.value.scrollToIndex(index, { align: 'auto' })
 }
-defineExpose({ scrollToIndex })
+function focus() {
+  container.value?.focus({ preventScroll: true })
+}
+defineExpose({ scrollToIndex, focus })
 
 function chooseRow(commit: CommitRow, index: number) {
   container.value?.focus({ preventScroll: true })
@@ -145,6 +148,7 @@ function keydown(event: KeyboardEvent) {
         role="listbox"
         aria-label="Historique des commits"
         :aria-activedescendant="activeDescendant"
+        :aria-busy="loading || indexing"
         tabindex="0"
         @scroll="scrollTop = container?.scrollTop ?? 0"
         @keydown="keydown"
@@ -192,15 +196,6 @@ function keydown(event: KeyboardEvent) {
               <span class="date-column">{{ shortDate(row(item.index)!.time) }}</span>
               <span class="sha-column">{{ shortSha(row(item.index)!.sha) }}</span>
             </button>
-            <div
-              v-else
-              class="commit-grid commit-row skeleton-row"
-              :style="{ transform: 'translateY(' + item.start + 'px)' }"
-              aria-hidden="true"
-            >
-              <span></span><span class="skeleton"></span
-              ><span class="author-column skeleton"></span>
-            </div>
           </template>
         </div>
       </div>
@@ -214,12 +209,8 @@ function keydown(event: KeyboardEvent) {
         :filtered="filtered"
         :lane-offset="laneOffset"
       />
-      <div v-if="total === 0" class="history-empty">
-        <template v-if="loading || indexing">
-          <span class="spinner"></span><strong>Lecture de l’historique…</strong>
-          <span>Les commits apparaissent au fil de l’indexation.</span>
-        </template>
-        <template v-else-if="filtered">
+      <div v-if="total === 0 && !loading && !indexing" class="history-empty">
+        <template v-if="filtered">
           <SearchX :size="30" /><strong>Aucun commit trouvé</strong
           ><span>Essayez un autre message, auteur ou SHA.</span>
         </template>
@@ -402,14 +393,6 @@ function keydown(event: KeyboardEvent) {
 .merge-icon {
   color: var(--muted);
   flex-shrink: 0;
-}
-.skeleton-row {
-  pointer-events: none;
-  padding-right: 30px;
-}
-.skeleton-row .skeleton {
-  height: 8px;
-  width: 75%;
 }
 .history-empty {
   position: absolute;

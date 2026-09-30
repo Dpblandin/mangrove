@@ -730,24 +730,9 @@ kbd {
   animation: spin 1s linear infinite;
   flex-shrink: 0;
 }
-.spinner.small {
-  height: 10px;
-  width: 10px;
-  border-width: 1px;
-}
-.skeleton {
-  background: var(--surface);
-  border-radius: 5px;
-  animation: pulse 1.5s ease-in-out infinite;
-}
 @keyframes spin {
   to {
     transform: rotate(360deg);
-  }
-}
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
   }
 }
 @media (max-width: 1280px) {
