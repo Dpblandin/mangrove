@@ -20,11 +20,48 @@ export function useDiffHighlighting(
   file: () => ChangedFile | null,
   diff: () => FileDiff | null,
   factory: DiffHighlightWorkerFactory = createWorker,
+  timeoutMs = TIMEOUT_MS,
+  selectionRoot?: () => HTMLElement | undefined,
 ) {
   const tokens = shallowRef<HighlightedDiff | null>(null)
   let worker: DiffHighlightWorker | undefined
   let active: { id: number; timer: ReturnType<typeof setTimeout> } | undefined
   let nextId = 0
+  let deferredTokens: HighlightedDiff | null | undefined
+  let selectionDocument: Document | undefined
+
+  function selectionTouchesViewer() {
+    const element = selectionRoot?.()
+    const selection = element?.ownerDocument.getSelection()
+    if (!element || !selection || selection.isCollapsed) return false
+    for (let index = 0; index < selection.rangeCount; index++)
+      if (selection.getRangeAt(index).intersectsNode(element)) return true
+    return false
+  }
+
+  function publish(value: HighlightedDiff | null) {
+    if (selectionTouchesViewer()) deferredTokens = value
+    else {
+      deferredTokens = undefined
+      tokens.value = value
+    }
+  }
+
+  function selectionChanged() {
+    if (deferredTokens !== undefined && !selectionTouchesViewer()) publish(deferredTokens)
+  }
+
+  if (selectionRoot)
+    watch(
+      selectionRoot,
+      (element) => {
+        selectionDocument?.removeEventListener('selectionchange', selectionChanged)
+        selectionDocument = element?.ownerDocument
+        selectionDocument?.addEventListener('selectionchange', selectionChanged)
+        selectionChanged()
+      },
+      { immediate: true, flush: 'post' },
+    )
 
   function discardWorker() {
     if (active) clearTimeout(active.timer)
@@ -42,12 +79,13 @@ export function useDiffHighlighting(
       if (worker !== created || !active || data.id !== active.id) return
       clearTimeout(active.timer)
       active = undefined
-      tokens.value = data.tokens
+      publish(data.tokens)
     }
     const failure = () => {
       if (worker === created) {
         discardWorker()
         tokens.value = null
+        deferredTokens = undefined
       }
     }
     created.onerror = failure
@@ -59,6 +97,7 @@ export function useDiffHighlighting(
     [file, diff],
     ([currentFile, currentDiff]) => {
       tokens.value = null
+      deferredTokens = undefined
       // A running worker is terminated instead of accumulating requests behind its parser.
       if (active) discardWorker()
       if (!currentFile || !currentDiff) {
@@ -79,7 +118,7 @@ export function useDiffHighlighting(
           id,
           timer: setTimeout(() => {
             if (active?.id === id) discardWorker()
-          }, TIMEOUT_MS),
+          }, timeoutMs),
         }
         // Vue may proxy native data. Send only bounded primitive fields, never its proxies.
         const request: SyntaxRequest = {
@@ -107,6 +146,8 @@ export function useDiffHighlighting(
   onScopeDispose(() => {
     discardWorker()
     tokens.value = null
+    deferredTokens = undefined
+    selectionDocument?.removeEventListener('selectionchange', selectionChanged)
   })
   return tokens
 }

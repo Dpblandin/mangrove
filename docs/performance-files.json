@@ -1,0 +1,115 @@
+{
+  "date": "2026-09-30",
+  "platform": "Apple M4 Pro, macOS ARM, 48 GiB RAM, Rust release ThinLTO",
+  "protocol": "31 reads in one process per operation: first separately, then 30 warm samples; application cache created outside source, index completed before timing; peak RSS includes engine and index. Source paths, SHAs, authors and contents excluded.",
+  "datasets": [
+    {
+      "dataset": "synthetic",
+      "fileLines": 6,
+      "operations": [
+        {
+          "commits": 10007,
+          "firstMs": 0.0025840000000000004,
+          "limited": false,
+          "operation": "baseline",
+          "p50Ms": 4.1e-5,
+          "p95Ms": 4.2e-5,
+          "rows": 0,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 29196288
+        },
+        {
+          "commits": 10007,
+          "firstMs": 0.50325,
+          "limited": false,
+          "operation": "content",
+          "p50Ms": 0.231042,
+          "p95Ms": 0.287959,
+          "rows": 6,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 29147136
+        },
+        {
+          "commits": 10007,
+          "firstMs": 1.119959,
+          "limited": true,
+          "operation": "history",
+          "p50Ms": 0.66625,
+          "p95Ms": 0.8089580000000001,
+          "rows": 40,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 29016064
+        },
+        {
+          "commits": 10007,
+          "firstMs": 19.409167,
+          "limited": true,
+          "operation": "blame",
+          "p50Ms": 20.16525,
+          "p95Ms": 21.543416999999998,
+          "rows": 3,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 29081600
+        }
+      ]
+    },
+    {
+      "dataset": "real",
+      "fileLines": 32,
+      "operations": [
+        {
+          "commits": 12075,
+          "firstMs": 0.00025,
+          "limited": false,
+          "operation": "baseline",
+          "p50Ms": 0.0,
+          "p95Ms": 4.2e-5,
+          "rows": 0,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 47562752
+        },
+        {
+          "commits": 12075,
+          "firstMs": 1.073375,
+          "limited": false,
+          "operation": "content",
+          "p50Ms": 0.760917,
+          "p95Ms": 0.865083,
+          "rows": 32,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 47955968
+        },
+        {
+          "commits": 12075,
+          "firstMs": 6.182417,
+          "limited": true,
+          "operation": "history",
+          "p50Ms": 5.048042,
+          "p95Ms": 5.738333,
+          "rows": 36,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 47595520
+        },
+        {
+          "commits": 12075,
+          "firstMs": 106.826167,
+          "limited": true,
+          "operation": "blame",
+          "p50Ms": 107.557792,
+          "p95Ms": 115.91775,
+          "rows": 3,
+          "samples": 30,
+          "scope": "Native engine only; no UI, IPC or syntax worker. Fresh application cache, warm OS cache. No source content, path, SHA or author emitted.",
+          "peakRssBytes": 61784064
+        }
+      ]
+    }
+  ]
+}

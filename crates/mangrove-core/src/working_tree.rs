@@ -57,7 +57,7 @@ pub(crate) fn status(repository: &Repository) -> Result<WorkingTreeStatus> {
     })
 }
 
-fn file_key(path: &[u8]) -> String {
+pub(crate) fn file_key(path: &[u8]) -> String {
     const HEX: &[u8] = b"0123456789abcdef";
     let mut key = String::with_capacity(path.len() * 2);
     for byte in path {
@@ -67,7 +67,7 @@ fn file_key(path: &[u8]) -> String {
     key
 }
 
-fn key_bytes(key: &str) -> Result<Vec<u8>> {
+pub(crate) fn key_bytes(key: &str) -> Result<Vec<u8>> {
     if key.is_empty()
         || !key.len().is_multiple_of(2)
         || !key.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -89,15 +89,10 @@ fn key_bytes(key: &str) -> Result<Vec<u8>> {
 }
 
 fn working_file(index: usize, delta: &DiffDelta<'_>) -> WorkingTreeFile {
+    let file = changed_file(index, delta);
     WorkingTreeFile {
-        key: file_key(
-            delta
-                .new_file()
-                .path_bytes()
-                .or_else(|| delta.old_file().path_bytes())
-                .unwrap_or_default(),
-        ),
-        file: changed_file(index, delta),
+        key: file.file_key.clone(),
+        file,
     }
 }
 

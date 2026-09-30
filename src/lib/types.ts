@@ -66,6 +66,7 @@ export type FileStatus =
 
 export interface ChangedFile {
   index: number
+  fileKey?: string
   path: string
   oldPath: string | null
   status: FileStatus
@@ -111,4 +112,49 @@ export interface FileDiff {
       content: string
     }[]
   }[]
+}
+
+export interface FileContent {
+  sha: string
+  path: string
+  fileKey: string
+  kind: 'text' | 'binary' | 'deleted' | 'submodule' | 'large' | 'unsupported'
+  size: number
+  lines: string[]
+  truncated: boolean
+  endsWithNewline: boolean
+  parentSha: string | null
+}
+
+export interface FileHistoryEntry {
+  sha: string
+  path: string
+  fileKey: string
+  oldPath: string | null
+  status: FileStatus
+  summary: string
+  author: string
+  time: number
+  merge: boolean
+}
+
+export interface FileHistoryPage {
+  entries: FileHistoryEntry[]
+  nextCursor: string | null
+  scanned: number
+  limitation: string | null
+}
+
+export interface BlameGroup {
+  startLine: number
+  lines: number
+  sha: string
+  author: string
+  time: number
+  boundary: boolean
+}
+
+export interface FileBlame {
+  groups: BlameGroup[]
+  limitation: string | null
 }

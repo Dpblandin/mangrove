@@ -72,6 +72,51 @@ async fn file_diff(
 }
 
 #[tauri::command]
+async fn file_content(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    sha: String,
+    file_key: String,
+) -> Result<FileContent> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.file_content(&session_id, &sha, &file_key)).await
+}
+
+#[tauri::command]
+async fn file_blame(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    sha: String,
+    file_key: String,
+) -> Result<FileBlame> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.file_blame(&session_id, &sha, &file_key)).await
+}
+
+#[tauri::command]
+async fn file_revision_diff(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    sha: String,
+    file_key: String,
+) -> Result<FileDiff> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.file_revision_diff(&session_id, &sha, &file_key)).await
+}
+
+#[tauri::command]
+async fn file_history(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    sha: String,
+    file_key: String,
+    cursor: Option<String>,
+) -> Result<FileHistoryPage> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.file_history(&session_id, &sha, &file_key, cursor.as_deref())).await
+}
+
+#[tauri::command]
 async fn working_tree_status(
     state: State<'_, Arc<Workspace>>,
     session_id: String,
@@ -107,6 +152,10 @@ fn main() {
             commit_position,
             commit_details,
             file_diff,
+            file_content,
+            file_history,
+            file_blame,
+            file_revision_diff,
             working_tree_status,
             working_tree_diff,
         ])

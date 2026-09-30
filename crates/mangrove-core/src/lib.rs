@@ -1,4 +1,5 @@
 mod cache;
+mod file_browser;
 mod graph;
 pub mod model;
 mod working_tree;
@@ -596,6 +597,36 @@ impl Workspace {
         working_tree::status(&repository)
     }
 
+    pub fn file_content(&self, id: &str, sha: &str, file_key: &str) -> Result<FileContent> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        file_browser::content(&repository, sha, file_key)
+    }
+
+    pub fn file_history(
+        &self,
+        id: &str,
+        sha: &str,
+        file_key: &str,
+        cursor: Option<&str>,
+    ) -> Result<FileHistoryPage> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        file_browser::history(&repository, sha, file_key, cursor)
+    }
+
+    pub fn file_blame(&self, id: &str, sha: &str, file_key: &str) -> Result<FileBlame> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        file_browser::blame(&repository, sha, file_key)
+    }
+
+    pub fn file_revision_diff(&self, id: &str, sha: &str, file_key: &str) -> Result<FileDiff> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        file_browser::revision_diff(&repository, sha, file_key)
+    }
+
     pub fn working_tree_diff(&self, id: &str, area: &str, file_key: &str) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
@@ -920,6 +951,7 @@ fn changed_file(index: usize, delta: &git2::DiffDelta<'_>) -> ChangedFile {
         .or_else(|| delta.old_file().path_bytes());
     ChangedFile {
         index,
+        file_key: working_tree::file_key(path.unwrap_or_default()),
         path: path
             .map(|path| String::from_utf8_lossy(path).into_owned())
             .unwrap_or_else(|| "(sans nom)".into()),

@@ -74,6 +74,7 @@ pub struct CommitPage {
 #[serde(rename_all = "camelCase")]
 pub struct ChangedFile {
     pub index: usize,
+    pub file_key: String,
     pub path: String,
     pub old_path: Option<String>,
     pub status: String,
@@ -135,4 +136,59 @@ pub struct FileDiff {
     pub additions: usize,
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileContent {
+    pub sha: String,
+    pub path: String,
+    pub file_key: String,
+    pub kind: String,
+    pub size: usize,
+    pub lines: Vec<String>,
+    pub truncated: bool,
+    pub ends_with_newline: bool,
+    pub parent_sha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryEntry {
+    pub sha: String,
+    pub path: String,
+    pub file_key: String,
+    pub old_path: Option<String>,
+    pub status: String,
+    pub summary: String,
+    pub author: String,
+    pub time: i64,
+    pub merge: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryPage {
+    pub entries: Vec<FileHistoryEntry>,
+    pub next_cursor: Option<String>,
+    pub scanned: usize,
+    pub limitation: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameGroup {
+    pub start_line: usize,
+    pub lines: usize,
+    pub sha: String,
+    pub author: String,
+    pub time: i64,
+    pub boundary: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBlame {
+    pub groups: Vec<BlameGroup>,
+    pub limitation: Option<String>,
 }
