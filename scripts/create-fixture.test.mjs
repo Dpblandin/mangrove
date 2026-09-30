@@ -62,9 +62,57 @@ function snapshot(directory) {
   visit(directory)
   return files
 }
-function generate(cwd, env = cleanEnv) {
-  return spawnSync(process.execPath, [generator, '--commits', '10'], { cwd, env, encoding: 'utf8' })
+function generate(cwd, env = cleanEnv, options = []) {
+  return spawnSync(process.execPath, [generator, '--commits', '10', ...options], {
+    cwd,
+    env,
+    encoding: 'utf8',
+  })
 }
+
+test('the optional large commit exposes mixed statuses and difficult diff cases', (t) => {
+  const root = temporary(t)
+  assert.equal(generate(root).status, 0)
+  const fixture = join(root, '.mangrove-dev', 'fixture-10')
+  const originalHead = git(fixture, 'rev-parse', 'HEAD')
+  const result = generate(root, cleanEnv, ['--large-change'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(git(fixture, 'rev-parse', 'HEAD~2'), originalHead)
+  assert.equal(git(fixture, 'rev-list', '--count', '--all'), '17')
+  const changes = git(fixture, 'diff-tree', '-r', '--no-commit-id', '--name-status', '-M', 'HEAD')
+    .split('\n')
+    .map((line) => line.split('\t'))
+  const counts = {}
+  for (const [status] of changes) counts[status[0]] = (counts[status[0]] ?? 0) + 1
+  assert.deepEqual(counts, { M: 18, A: 12, R: 6, T: 2, D: 8 })
+  assert.equal(changes.filter(([status]) => status === 'R100').length, 4)
+  assert.equal(changes.filter(([status]) => status.startsWith('R') && status !== 'R100').length, 2)
+  assert.match(git(fixture, 'diff', 'HEAD~', 'HEAD', '--', 'assets/preview.bin'), /Binary files/)
+  assert.equal(git(fixture, 'show', 'HEAD:tests/fixtures/empty.txt'), '')
+  assert.match(git(fixture, 'show', 'HEAD:docs/échantillons/résumé.md'), /Résumé des changements/)
+  assert.match(git(fixture, 'show', 'HEAD:src/generated/catalog.ts'), /entry2399/)
+  assert.match(git(fixture, 'ls-tree', 'HEAD', 'scripts/inspect.sh'), /^100755/)
+  assert.match(git(fixture, 'ls-tree', 'HEAD', 'docs/current-guide'), /^120000/)
+  assert.equal(git(fixture, 'status', '--porcelain'), '')
+  const before = snapshot(fixture)
+  assert.equal(generate(root, cleanEnv, ['--large-change']).status, 0)
+  assert.deepEqual(snapshot(fixture), before, 'the optional demonstration is added only once')
+})
+
+test('the large-change option preserves uncommitted fixture work', (t) => {
+  const root = temporary(t)
+  assert.equal(generate(root).status, 0)
+  const fixture = join(root, '.mangrove-dev', 'fixture-10')
+  const originalHead = git(fixture, 'rev-parse', 'HEAD')
+  const path = join(fixture, 'src', 'history.ts')
+  const content = 'uncommitted fixture work\n'
+  writeFileSync(path, content)
+  const result = generate(root, cleanEnv, ['--large-change'])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /requires a clean fixture on main/)
+  assert.equal(git(fixture, 'rev-parse', 'HEAD'), originalHead)
+  assert.equal(readFileSync(path, 'utf8'), content)
+})
 
 test('inherited Git location and configuration cannot redirect fixture writes', (t) => {
   const root = temporary(t)
