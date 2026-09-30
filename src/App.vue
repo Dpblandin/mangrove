@@ -183,7 +183,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard))
     >
       <div class="brand">
         <img src="/favicon.svg" width="31" height="31" alt="" />
-        <span>Mangrove<small>Git, en lecture seule.</small></span>
+        <span>Mangrove</span>
       </div>
       <div class="workspace-heading">
         <span>ESPACE DE TRAVAIL</span><span class="local-dot"></span>

@@ -67,18 +67,18 @@ describe('pane layout', () => {
   })
 
   it('adapts to a smaller window and restores preferred widths on expansion without overwriting preferences', () => {
-    const store = preferences(JSON.stringify({ left: 400, right: 700 }))
-    const { layout, observer } = setup(1600, store)
+    const store = preferences(JSON.stringify({ left: 400, right: 1600 }))
+    const { layout, observer } = setup(2560, store)
     expect(layout.leftWidth.value).toBe(400)
-    expect(layout.rightWidth.value).toBe(700)
+    expect(layout.rightWidth.value).toBe(1600)
 
     observer.measure(980)
     expect(layout.leftWidth.value).toBe(348)
     expect(layout.rightWidth.value).toBe(280)
     expect(980 - layout.leftWidth.value - layout.rightWidth.value - 12).toBe(340)
-    observer.measure(1600)
+    observer.measure(2560)
     expect(layout.leftWidth.value).toBe(400)
-    expect(layout.rightWidth.value).toBe(700)
+    expect(layout.rightWidth.value).toBe(1600)
     expect(store.setItem).not.toHaveBeenCalled()
   })
 
@@ -87,14 +87,14 @@ describe('pane layout', () => {
     layout.resize('left', 300)
     layout.startResize('right')
     layout.resize('right', 420)
-    layout.resize('right', 510)
+    layout.resize('right', 750)
     expect(store.setItem).toHaveBeenCalledTimes(1)
     layout.finishResize()
     expect(store.setItem).toHaveBeenCalledTimes(2)
 
     const restored = setup(1440, store).layout
     expect(restored.leftWidth.value).toBe(300)
-    expect(restored.rightWidth.value).toBe(510)
+    expect(restored.rightWidth.value).toBe(750)
     expect(store.values.get('unrelated:setting')).toBe('preserved')
   })
 

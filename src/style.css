@@ -146,14 +146,6 @@ button {
   font-weight: 620;
   letter-spacing: -0.4px;
 }
-.brand small {
-  display: block;
-  font-size: 10px;
-  font-weight: 400;
-  margin-top: 5px;
-  color: var(--muted);
-  letter-spacing: 0.02em;
-}
 .workspace-heading {
   display: flex;
   align-items: center;

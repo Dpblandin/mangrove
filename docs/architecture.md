@@ -32,7 +32,7 @@ Les fichiers et patches sont lus uniquement à la sélection. Un merge est compa
 
 Les trois thèmes utilisent les mêmes tokens CSS, y compris les couleurs du Canvas et des diffs. Le thème Classique, gris avec accents bleus, est le défaut ; Mangrove conserve la palette verte, et Macchiato reprend la palette officielle Catppuccin. Le choix est restauré avant le montage de l’interface. Un changement recolore le graphe sans rouvrir le dépôt.
 
-Le module `usePaneLayout` conserve les largeurs préférées des panneaux branches et détails dans les préférences de l’application. Les dimensions affichées sont bornées selon la fenêtre, avec un historique d’au moins 340 px ; réduire la fenêtre ne détruit pas la préférence pour une fenêtre plus grande. Les séparateurs proposent capture du pointeur, annulation, clavier et réinitialisation. Les colonnes d’historique utilisent des container queries, car la largeur d’un panneau peut changer indépendamment de la fenêtre.
+Le module `usePaneLayout` conserve les largeurs préférées des panneaux branches et détails dans les préférences de l’application. Le panneau des détails peut occuper tout l’espace restant après les branches et un historique d’au moins 340 px, sans plafond fixe ; réduire la fenêtre ne détruit pas la préférence pour une fenêtre plus grande. Les séparateurs proposent capture du pointeur, annulation, clavier et réinitialisation. Les colonnes d’historique utilisent des container queries, car la largeur d’un panneau peut changer indépendamment de la fenêtre.
 
 ## Intégrations à venir
 

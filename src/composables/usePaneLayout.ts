@@ -7,7 +7,7 @@ type PreferenceStore = Pick<Storage, 'getItem' | 'setItem'>
 const STORAGE_KEY = 'mangrove:panes'
 const DEFAULTS: Preferences = { left: 226, right: 390 }
 const MINIMUMS: Preferences = { left: 180, right: 280 }
-const MAXIMUMS: Preferences = { left: 400, right: 700 }
+const LEFT_MAXIMUM = 400
 const HISTORY_MINIMUM = 340
 const DIVIDERS_WIDTH = 12
 const APP_MINIMUM = 880
@@ -32,7 +32,10 @@ function storedPreferences(store: PreferenceStore | null): Preferences {
       for (const pane of ['left', 'right'] as const) {
         const value = (saved as Record<string, unknown>)[pane]
         if (typeof value === 'number' && Number.isFinite(value))
-          result[pane] = clamp(value, MINIMUMS[pane], MAXIMUMS[pane])
+          result[pane] =
+            pane === 'left'
+              ? clamp(value, MINIMUMS.left, LEFT_MAXIMUM)
+              : Math.max(MINIMUMS.right, Math.round(value))
       }
     }
   } catch {
@@ -54,7 +57,7 @@ export function usePaneLayout(
   const leftBounds = computed(() => ({
     min: MINIMUMS.left,
     max: Math.min(
-      MAXIMUMS.left,
+      LEFT_MAXIMUM,
       available.value - MINIMUMS.right - HISTORY_MINIMUM - DIVIDERS_WIDTH,
     ),
   }))
@@ -63,10 +66,7 @@ export function usePaneLayout(
   )
   const rightBounds = computed(() => ({
     min: MINIMUMS.right,
-    max: Math.min(
-      MAXIMUMS.right,
-      available.value - leftWidth.value - HISTORY_MINIMUM - DIVIDERS_WIDTH,
-    ),
+    max: available.value - leftWidth.value - HISTORY_MINIMUM - DIVIDERS_WIDTH,
   }))
   const rightWidth = computed(() =>
     clamp(preferred.value.right, rightBounds.value.min, rightBounds.value.max),
