@@ -3142,3 +3142,534 @@ fn file_blame_stops_before_a_rename_to_an_unsafe_older_pathspec() {
     assert!(blame.groups[0].boundary);
     assert!(blame.limitation.unwrap().contains("attribution littérale"));
 }
+
+#[test]
+fn solo_walk_uses_selected_roots_all_merge_parents_and_shared_ancestors() {
+    let fixture = Fixture::new();
+    let root = commit(&fixture.repository, "common root", &[], &[], Some("HEAD"));
+    let main = commit(
+        &fixture.repository,
+        "main exclusive",
+        &[root],
+        &[],
+        Some("HEAD"),
+    );
+    let left = commit(
+        &fixture.repository,
+        "feature left",
+        &[root],
+        &[],
+        Some("refs/heads/feature"),
+    );
+    let right = commit(
+        &fixture.repository,
+        "merged side",
+        &[root],
+        &[],
+        Some("refs/heads/side"),
+    );
+    let merge = commit(
+        &fixture.repository,
+        "feature merge",
+        &[left, right],
+        &[],
+        Some("refs/heads/feature"),
+    );
+    let remote = commit(
+        &fixture.repository,
+        "remote exclusive",
+        &[root],
+        &[],
+        Some("refs/remotes/origin/topic"),
+    );
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let solo = workspace
+        .open_repository_with_solo(
+            fixture.source.to_str().unwrap(),
+            &["refs/heads/feature".into()],
+        )
+        .unwrap();
+    finish(&workspace, &solo.id);
+    assert_eq!(solo.head, Some(main.to_string()));
+    assert_eq!(solo.solo_refs, ["refs/heads/feature"]);
+    let page = workspace.list_commits(&solo.id, 0, 256, "").unwrap();
+    let ids: Vec<_> = page
+        .commits
+        .iter()
+        .map(|commit| commit.sha.clone())
+        .collect();
+    assert_eq!(page.total, 4);
+    for id in [root, left, right, merge] {
+        assert!(ids.contains(&id.to_string()));
+    }
+    for id in [main, remote] {
+        assert!(!ids.contains(&id.to_string()));
+    }
+    assert_eq!(page.commits[0].sha, merge.to_string());
+    assert_eq!(
+        page.commits[0]
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == "parent")
+            .count(),
+        2
+    );
+    assert_eq!(page.commits.last().unwrap().graph.width, 1);
+    assert_eq!(
+        workspace
+            .list_commits(&solo.id, 0, 10, "exclusive")
+            .unwrap()
+            .total,
+        0
+    );
+    assert!(workspace
+        .commit_position(&solo.id, &main.to_string())
+        .unwrap()
+        .is_none());
+    let first = workspace.list_commits(&solo.id, 0, 2, "").unwrap();
+    let second = workspace.list_commits(&solo.id, 2, 2, "").unwrap();
+    assert_eq!(first.commits.len() + second.commits.len(), 4);
+    assert_ne!(first.commits[1].sha, second.commits[0].sha);
+    let union = workspace
+        .open_repository_with_solo(
+            fixture.source.to_str().unwrap(),
+            &[
+                "refs/heads/feature".into(),
+                "refs/remotes/origin/topic".into(),
+            ],
+        )
+        .unwrap();
+    assert!(workspace.list_commits(&solo.id, 0, 1, "").is_err());
+    finish(&workspace, &union.id);
+    assert_eq!(
+        workspace.list_commits(&union.id, 0, 20, "").unwrap().total,
+        5
+    );
+    assert_eq!(
+        workspace
+            .list_commits(&union.id, 0, 20, "exclusive")
+            .unwrap()
+            .total,
+        1
+    );
+    let full = fixture.open(&workspace);
+    finish(&workspace, &full.id);
+    assert!(full.solo_refs.is_empty());
+    assert_eq!(
+        workspace.list_commits(&full.id, 0, 20, "").unwrap().total,
+        6
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn solo_refresh_tracks_external_branch_moves_and_deletions() {
+    let fixture = Fixture::new();
+    let root = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
+    fixture
+        .repository
+        .reference("refs/heads/topic", root, false, "setup")
+        .unwrap();
+    let workspace = fixture.workspace();
+    let first = workspace
+        .open_repository_with_solo(
+            fixture.source.to_str().unwrap(),
+            &["refs/heads/topic".into()],
+        )
+        .unwrap();
+    finish(&workspace, &first.id);
+    commit(
+        &fixture.repository,
+        "external topic update",
+        &[root],
+        &[],
+        Some("refs/heads/topic"),
+    );
+    let second = workspace
+        .open_repository_with_solo(
+            fixture.source.to_str().unwrap(),
+            &["refs/heads/topic".into()],
+        )
+        .unwrap();
+    finish(&workspace, &second.id);
+    assert_ne!(first.id, second.id);
+    assert_eq!(
+        workspace.list_commits(&second.id, 0, 10, "").unwrap().total,
+        2
+    );
+    fixture
+        .repository
+        .find_reference("refs/heads/topic")
+        .unwrap()
+        .delete()
+        .unwrap();
+    let before = snapshot(&fixture.source);
+    let refreshed = workspace
+        .open_repository_with_solo(
+            fixture.source.to_str().unwrap(),
+            &["refs/heads/topic".into()],
+        )
+        .unwrap();
+    finish(&workspace, &refreshed.id);
+    assert!(refreshed.solo_refs.is_empty());
+    assert_eq!(
+        workspace
+            .list_commits(&refreshed.id, 0, 10, "")
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn worktree_listing_from_a_linked_tree_preserves_missing_locked_and_detached_states() {
+    let fixture = Fixture::new();
+    let head = commit(
+        &fixture.repository,
+        "root",
+        &[],
+        &[("file.txt", b"base\n")],
+        Some("HEAD"),
+    );
+    let linked_path = fixture.root.path().join("linked");
+    let linked = fixture
+        .repository
+        .worktree("linked", &linked_path, None)
+        .unwrap();
+    linked.lock(Some("keep this tree")).unwrap();
+    Repository::open(&linked_path)
+        .unwrap()
+        .set_head_detached(head)
+        .unwrap();
+    let missing_path = fixture.root.path().join("missing");
+    fixture
+        .repository
+        .worktree("missing", &missing_path, None)
+        .unwrap();
+    fs::remove_dir_all(&missing_path).unwrap();
+    let before = snapshot(&fixture.source);
+    let before_linked = snapshot(&linked_path);
+    let workspace = fixture.workspace();
+    let info = workspace
+        .open_repository(linked_path.to_str().unwrap())
+        .unwrap();
+    finish(&workspace, &info.id);
+    let list = workspace.list_worktrees(&info.id).unwrap();
+    assert_eq!(list.worktrees.len(), 3);
+    let primary = list.worktrees.iter().find(|item| item.primary).unwrap();
+    assert_eq!(
+        primary.path,
+        fixture.source.canonicalize().unwrap().to_string_lossy()
+    );
+    assert!(!primary.current);
+    let linked = list
+        .worktrees
+        .iter()
+        .find(|item| item.name == "linked")
+        .unwrap();
+    assert!(linked.available && linked.current && linked.detached);
+    assert_eq!(linked.locked.as_deref(), Some("keep this tree"));
+    let missing = list
+        .worktrees
+        .iter()
+        .find(|item| item.name == "missing")
+        .unwrap();
+    assert!(!missing.available);
+    assert_eq!(
+        missing.path,
+        missing_path
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join("missing")
+            .to_string_lossy()
+    );
+    assert!(missing.reason.is_some());
+    let main = workspace.open_repository(&primary.path).unwrap();
+    assert_eq!(
+        main.path,
+        fixture.source.canonicalize().unwrap().to_string_lossy()
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+    assert_eq!(before_linked, snapshot(&linked_path));
+}
+
+#[test]
+fn stash_zones_use_distinct_saved_trees_and_do_not_touch_the_source() {
+    let mut fixture = Fixture::new();
+    let base = commit(
+        &fixture.repository,
+        "baseline",
+        &[],
+        &[("both.txt", b"base\n")],
+        Some("HEAD"),
+    );
+    fixture
+        .repository
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    fs::write(fixture.source.join("both.txt"), b"staged\n").unwrap();
+    let mut index = fixture.repository.index().unwrap();
+    index.add_path(Path::new("both.txt")).unwrap();
+    index.write().unwrap();
+    drop(index);
+    fs::write(fixture.source.join("both.txt"), b"unstaged\n").unwrap();
+    fs::write(fixture.source.join("non suivi.txt"), b"untracked\n").unwrap();
+    let signature = Signature::now("Stash Author", "stash@example.test").unwrap();
+    let sha = fixture
+        .repository
+        .stash_save(
+            &signature,
+            "three zones",
+            Some(git2::StashFlags::INCLUDE_UNTRACKED),
+        )
+        .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let list = workspace.list_stashes(&info.id).unwrap();
+    assert_eq!(list.stashes.len(), 1);
+    assert_eq!(list.stashes[0].sha, sha.to_string());
+    assert_eq!(list.stashes[0].base_sha, base.to_string());
+    let details = workspace.stash_details(&info.id, &sha.to_string()).unwrap();
+    assert_eq!(details.groups.len(), 3);
+    for (area, expected_old, expected_new) in [
+        ("index", Some("base"), "staged"),
+        ("worktree", Some("staged"), "unstaged"),
+        ("untracked", None, "untracked"),
+    ] {
+        let group = details
+            .groups
+            .iter()
+            .find(|group| group.area == area)
+            .unwrap();
+        assert_eq!(group.file_count, 1);
+        let diff = workspace
+            .stash_diff(&info.id, &sha.to_string(), area, &group.files[0].file_key)
+            .unwrap();
+        let lines: Vec<_> = diff.hunks.iter().flat_map(|hunk| &hunk.lines).collect();
+        assert!(lines
+            .iter()
+            .any(|line| line.kind == "addition" && line.content == expected_new));
+        if let Some(old) = expected_old {
+            assert!(lines
+                .iter()
+                .any(|line| line.kind == "deletion" && line.content == old));
+        }
+    }
+    assert!(workspace
+        .stash_diff(&info.id, &sha.to_string(), "invalid", "626f74682e747874")
+        .is_err());
+    assert!(workspace
+        .stash_details(&info.id, &base.to_string())
+        .is_err());
+    assert_eq!(
+        workspace.list_commits(&info.id, 0, 10, "").unwrap().total,
+        1
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+    fixture.repository.stash_drop(0).unwrap();
+    let after_external_drop = snapshot(&fixture.source);
+    assert!(workspace.list_stashes(&info.id).unwrap().stashes.is_empty());
+    assert!(workspace.stash_details(&info.id, &sha.to_string()).is_err());
+    assert_eq!(after_external_drop, snapshot(&fixture.source));
+}
+
+#[test]
+fn empty_stashes_and_bare_worktrees_have_explicit_read_only_states() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    assert!(workspace.list_stashes(&info.id).unwrap().stashes.is_empty());
+    let bare_path = fixture.root.path().join("bare.git");
+    Repository::init_bare(&bare_path).unwrap();
+    let before = snapshot(&bare_path);
+    let bare = workspace
+        .open_repository(bare_path.to_str().unwrap())
+        .unwrap();
+    let trees = workspace.list_worktrees(&bare.id).unwrap();
+    assert_eq!(trees.worktrees.len(), 1);
+    assert!(!trees.worktrees[0].available);
+    assert!(trees.worktrees[0].reason.is_some());
+    assert_eq!(before, snapshot(&bare_path));
+}
+
+#[test]
+fn worktree_listing_preserves_separate_git_directory_and_unborn_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    let administration = root.path().join("administration");
+    git_at(
+        root.path(),
+        &[
+            "init",
+            "--separate-git-dir",
+            administration.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+        ],
+    );
+    Repository::open(&worktree)
+        .unwrap()
+        .set_head("refs/heads/main")
+        .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let before = snapshot(root.path());
+    let workspace = Workspace::new(cache.path()).unwrap();
+    let info = workspace
+        .open_repository(worktree.to_str().unwrap())
+        .unwrap();
+    finish(&workspace, &info.id);
+    let list = workspace.list_worktrees(&info.id).unwrap();
+    assert_eq!(list.worktrees.len(), 1);
+    let primary = &list.worktrees[0];
+    assert_eq!(primary.path, info.path);
+    assert!(primary.primary && primary.available && primary.current);
+    assert_eq!(primary.head_name, "main");
+    assert!(primary.head.is_none());
+    assert_eq!(before, snapshot(root.path()));
+}
+
+#[test]
+fn worktree_listing_handles_non_utf8_lock_reason_and_missing_head_metadata() {
+    let fixture = Fixture::new();
+    let head = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
+    let linked_path = fixture.root.path().join("linked");
+    fixture
+        .repository
+        .worktree("linked", &linked_path, None)
+        .unwrap();
+    let registration = fixture.repository.commondir().join("worktrees/linked");
+    fs::write(registration.join("locked"), b"keep \xff\n").unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let before_linked = snapshot(&linked_path);
+    let list = workspace.list_worktrees(&info.id).unwrap();
+    let linked = list
+        .worktrees
+        .iter()
+        .find(|item| item.name == "linked")
+        .unwrap();
+    assert!(linked.available);
+    assert_eq!(linked.locked.as_deref(), Some("keep �"));
+    assert_eq!(before, snapshot(&fixture.source));
+    assert_eq!(before_linked, snapshot(&linked_path));
+
+    fs::remove_dir_all(&linked_path).unwrap();
+    let before = snapshot(&fixture.source);
+    let list = workspace.list_worktrees(&info.id).unwrap();
+    let linked = list
+        .worktrees
+        .iter()
+        .find(|item| item.name == "linked")
+        .unwrap();
+    assert!(!linked.available);
+    assert_eq!(linked.head.as_deref(), Some(head.to_string().as_str()));
+    assert_eq!(linked.head_name, "linked");
+    assert!(!linked.detached);
+    assert_eq!(linked.locked.as_deref(), Some("keep �"));
+    assert_eq!(before, snapshot(&fixture.source));
+
+    fs::write(registration.join("HEAD"), format!("{head}\n")).unwrap();
+    let before = snapshot(&fixture.source);
+    let list = workspace.list_worktrees(&info.id).unwrap();
+    let linked = list
+        .worktrees
+        .iter()
+        .find(|item| item.name == "linked")
+        .unwrap();
+    assert!(!linked.available && linked.detached);
+    assert_eq!(linked.head.as_deref(), Some(head.to_string().as_str()));
+    assert_eq!(linked.head_name, "HEAD détachée");
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn two_parent_stashes_preserve_binary_and_large_diff_limits_without_untracked_group() {
+    let mut fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "baseline",
+        &[],
+        &[
+            ("binary.bin", b"\0before"),
+            ("large.txt", b"small\n"),
+            ("text.txt", b"before\n"),
+        ],
+        Some("HEAD"),
+    );
+    fixture
+        .repository
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    fs::write(fixture.source.join("binary.bin"), b"\0after").unwrap();
+    fs::write(
+        fixture.source.join("large.txt"),
+        vec![b'x'; 2 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    fs::write(fixture.source.join("text.txt"), b"after\n").unwrap();
+    fs::write(fixture.source.join("not-stashed.txt"), b"untracked\n").unwrap();
+    let signature = Signature::now("Stash Author", "stash@example.test").unwrap();
+    let sha = fixture
+        .repository
+        .stash_save(&signature, "two parents", None)
+        .unwrap();
+    assert_eq!(
+        fixture.repository.find_commit(sha).unwrap().parent_count(),
+        2
+    );
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let details = workspace.stash_details(&info.id, &sha.to_string()).unwrap();
+    assert_eq!(details.groups.len(), 2);
+    assert_eq!(
+        details
+            .groups
+            .iter()
+            .find(|group| group.area == "index")
+            .unwrap()
+            .file_count,
+        0
+    );
+    let group = details
+        .groups
+        .iter()
+        .find(|group| group.area == "worktree")
+        .unwrap();
+    assert_eq!(group.file_count, 3);
+    for (path, binary, truncated) in [
+        ("binary.bin", true, false),
+        ("large.txt", false, true),
+        ("text.txt", false, false),
+    ] {
+        let file = group.files.iter().find(|file| file.path == path).unwrap();
+        let diff = workspace
+            .stash_diff(&info.id, &sha.to_string(), "worktree", &file.file_key)
+            .unwrap();
+        assert_eq!(diff.binary, binary);
+        assert_eq!(diff.truncated, truncated);
+        if binary || truncated {
+            assert!(diff.hunks.is_empty());
+        } else {
+            assert!(patch_text(&diff).contains("addition:after"));
+        }
+    }
+    assert!(workspace
+        .stash_diff(
+            &info.id,
+            &sha.to_string(),
+            "untracked",
+            &group.files[0].file_key,
+        )
+        .is_err());
+    assert_eq!(before, snapshot(&fixture.source));
+}

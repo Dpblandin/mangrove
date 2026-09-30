@@ -18,6 +18,7 @@ pub struct RepositoryInfo {
     pub head: Option<String>,
     pub head_name: String,
     pub references: Vec<Reference>,
+    pub solo_refs: Vec<String>,
     pub remotes: Vec<String>,
     pub index: IndexProgress,
 }
@@ -197,4 +198,66 @@ pub struct FileBlame {
 #[serde(rename_all = "camelCase")]
 pub struct FetchResult {
     pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeInfo {
+    pub name: String,
+    pub path: String,
+    pub primary: bool,
+    pub current: bool,
+    pub available: bool,
+    pub head: Option<String>,
+    pub head_name: String,
+    pub detached: bool,
+    pub locked: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeList {
+    pub worktrees: Vec<WorktreeInfo>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashInfo {
+    pub sha: String,
+    pub index: usize,
+    pub message: String,
+    pub author: String,
+    pub time: i64,
+    pub base_sha: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashList {
+    pub stashes: Vec<StashInfo>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashGroup {
+    pub area: String,
+    pub comparison: String,
+    pub old_sha: Option<String>,
+    pub new_sha: String,
+    pub files: Vec<ChangedFile>,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashDetails {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub time: i64,
+    pub base_sha: String,
+    pub groups: Vec<StashGroup>,
 }

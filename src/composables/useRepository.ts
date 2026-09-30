@@ -14,8 +14,10 @@ import type {
 
 export const PAGE_SIZE = 128
 const PAGE_CACHE_SIZE = 12
+const NAVIGATION_INDEX_TIMEOUT_MS = 30_000
 
 type PendingPage = { controller: AbortController; promise: Promise<void> }
+type JumpOptions = { waitForIndex?: boolean; reportMissing?: boolean }
 type SelectionSnapshot = {
   details: CommitDetails | null
   file: ChangedFile | null
@@ -317,20 +319,60 @@ export function useRepository(client: GitClient = request) {
     opening.value = false
   }
 
-  async function open(path: string) {
+  async function loadOpenedRepository(info: RepositoryInfo, generation: number, initialQuery = '') {
+    repository.value = info
+    progress.value = info.index
+    total.value = info.index.indexed
+    query.value = initialQuery
+    await loadPage(0)
+    if (generation !== epoch) return false
+    if (!progress.value.complete) void readProgress(generation)
+    return true
+  }
+
+  async function open(path: string, soloRefs: string[] = [], initialQuery = '') {
     close()
     const generation = epoch
     opening.value = true
     try {
-      const info = await call<RepositoryInfo>('open_repository', { path })
+      const info = await call<RepositoryInfo>('open_repository', { path, soloRefs })
       if (generation !== epoch) return false
-      repository.value = info
-      progress.value = info.index
-      total.value = info.index.indexed
-      await loadPage(0)
+      return await loadOpenedRepository(info, generation, initialQuery)
+    } catch (cause) {
+      if (generation === epoch) error.value = String(cause)
+      return false
+    } finally {
+      if (generation === epoch) opening.value = false
+    }
+  }
+
+  async function refresh() {
+    const current = repository.value
+    if (!current || opening.value) return false
+    let generation = epoch
+    opening.value = true
+    try {
+      const info = await call<RepositoryInfo>('open_repository', {
+        path: current.path,
+        soloRefs: current.soloRefs ?? [],
+      })
       if (generation !== epoch) return false
-      if (!progress.value.complete) void readProgress(generation)
-      return true
+      // An unchanged native session retains its walk and immutable commit diffs.
+      // Mutable worktree and stash lists are refreshed by their own readers.
+      if (info.id === current.id) {
+        repository.value = info
+        mergeProgress(info.index)
+        if (!filter.value && debounce === undefined) total.value = progress.value.indexed
+        await loadPage(0)
+        if (generation !== epoch) return false
+        await revalidatePages()
+        return generation === epoch
+      }
+      const currentQuery = query.value
+      close()
+      generation = epoch
+      opening.value = true
+      return await loadOpenedRepository(info, generation, currentQuery)
     } catch (cause) {
       if (generation === epoch) error.value = String(cause)
       return false
@@ -538,7 +580,28 @@ export function useRepository(client: GitClient = request) {
     return selectIndex(current + direction)
   }
 
-  async function jump(sha: string): Promise<number | null> {
+  function waitForIndexProgress(indexed: number, signal: AbortSignal, timeout: number) {
+    if (signal.aborted || timeout <= 0) return Promise.resolve(false)
+    const changed = () =>
+      progress.value.indexed > indexed || progress.value.complete || Boolean(progress.value.error)
+    if (changed()) return Promise.resolve(true)
+    return new Promise<boolean>((resolve) => {
+      const stop = watch(progress, () => {
+        if (changed()) finish(true)
+      })
+      const timer = setTimeout(() => finish(false), timeout)
+      const abort = () => finish(false)
+      function finish(advanced: boolean) {
+        stop()
+        clearTimeout(timer)
+        signal.removeEventListener('abort', abort)
+        resolve(advanced)
+      }
+      signal.addEventListener('abort', abort, { once: true })
+    })
+  }
+
+  async function jump(sha: string, options: JumpOptions = {}): Promise<number | null> {
     const repo = repository.value
     if (!repo) return null
     cancelNavigation()
@@ -552,12 +615,28 @@ export function useRepository(client: GitClient = request) {
     const controller = new AbortController()
     navigationController = controller
     try {
-      const position = await call<number | null>(
-        'commit_position',
-        { sessionId: repo.id, sha },
-        controller,
-      )
-      if (generation !== navigationEpoch || repo.id !== repository.value?.id) return null
+      const deadline = Date.now() + NAVIGATION_INDEX_TIMEOUT_MS
+      let position: number | null
+      do {
+        const status = progress.value
+        position = await call<number | null>(
+          'commit_position',
+          { sessionId: repo.id, sha },
+          controller,
+        )
+        if (generation !== navigationEpoch || repo.id !== repository.value?.id) return null
+        if (position !== null || !options.waitForIndex || status.complete || progress.value.error)
+          break
+        // Reuse index_status/list_commits progress instead of adding another polling loop.
+        const advanced = await waitForIndexProgress(
+          status.indexed,
+          controller.signal,
+          deadline - Date.now(),
+        )
+        if (generation !== navigationEpoch || repo.id !== repository.value?.id) return null
+        if (!advanced) break
+      } while (position === null)
+      if (position === null && options.reportMissing === false) return null
       if (visibleRange) {
         const { start, end } = visibleRange
         const reads = []
@@ -571,7 +650,7 @@ export function useRepository(client: GitClient = request) {
         if (generation !== navigationEpoch || repo.id !== repository.value?.id) return null
       }
       if (position === null) {
-        error.value = 'Cette référence n’est pas encore indexée.'
+        error.value = progress.value.error ?? 'Cette référence n’est pas encore indexée.'
         navigating = false
         await loadPage(0)
         return null

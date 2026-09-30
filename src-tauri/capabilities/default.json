@@ -17,6 +17,10 @@
     "allow-file-blame",
     "allow-file-revision-diff",
     "allow-working-tree-status",
-    "allow-working-tree-diff"
+    "allow-working-tree-diff",
+    "allow-list-worktrees",
+    "allow-list-stashes",
+    "allow-stash-details",
+    "allow-stash-diff"
   ]
 }

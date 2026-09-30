@@ -26,6 +26,9 @@ import WorkingTreeRow from './components/WorkingTreeRow.vue'
 import WorkingTreePanel from './components/WorkingTreePanel.vue'
 import RepositoryTabs from './components/RepositoryTabs.vue'
 import SettingsView from './components/SettingsView.vue'
+import RepositoryContext from './components/RepositoryContext.vue'
+import StashPanel from './components/StashPanel.vue'
+import { useRepositoryContext } from './composables/useRepositoryContext'
 import { useRepository } from './composables/useRepository'
 import { useRepositoryTabs } from './composables/useRepositoryTabs'
 import { useWorkingTree } from './composables/useWorkingTree'
@@ -41,6 +44,7 @@ import type {
   ChangedFile,
   CommitRow,
   Reference,
+  StashArea,
   WorkingTreeArea,
   WorkingTreeFile,
 } from './lib/types'
@@ -80,7 +84,88 @@ function dismissError() {
   error.value = ''
   fetchError.value = ''
 }
-const selection = ref<'commit' | 'working'>('commit')
+const selection = ref<'commit' | 'working' | 'stash'>('commit')
+const context = useRepositoryContext(repository, () => selection.value === 'stash')
+const {
+  worktrees,
+  stashes,
+  worktreesLoading,
+  stashesLoading,
+  worktreesError,
+  stashesError,
+  details: stashDetails,
+  selectedSha: stashSha,
+  detailsLoading: stashLoading,
+  detailsError: stashError,
+  selectedFile: stashFile,
+  selectedArea: stashArea,
+  diff: stashDiff,
+  highlightedDiff: stashHighlightedDiff,
+  fileLoading: stashDiffLoading,
+  diffError: stashDiffError,
+} = context
+const worktreesExpanded = ref(false)
+const stashesExpanded = ref(false)
+const soloRefs = computed(() => new Set(repository.value?.soloRefs ?? []))
+const graphReferences = computed(() => {
+  const references = repository.value?.references ?? []
+  return soloRefs.value.size
+    ? references.filter((reference) => soloRefs.value.has(reference.name))
+    : references
+})
+const soloLabels = computed(
+  () =>
+    repository.value?.references
+      .filter((reference) => soloRefs.value.has(reference.name))
+      .map((reference) => reference.label) ?? [],
+)
+watch(
+  () => repository.value?.id,
+  (id) => {
+    if (!id) return
+    if (worktreesExpanded.value) void context.loadWorktrees()
+    if (stashesExpanded.value) void context.loadStashes()
+  },
+)
+function toggleWorktrees() {
+  worktreesExpanded.value = !worktreesExpanded.value
+  if (worktreesExpanded.value) void context.loadWorktrees()
+}
+function toggleStashes() {
+  stashesExpanded.value = !stashesExpanded.value
+  if (stashesExpanded.value) void context.loadStashes()
+}
+function selectStash(sha: string) {
+  interactionRevision++
+  selection.value = 'stash'
+  state.pauseDiffPreload()
+  diffOpen.value = false
+  void context.selectStash(sha)
+}
+function openStashFile(area: StashArea, file: ChangedFile) {
+  interactionRevision++
+  diffOpen.value = true
+  void context.selectFile(area, file)
+}
+function changeStashArea() {
+  interactionRevision++
+  diffOpen.value = false
+  context.clearFile()
+}
+async function toggleSolo(reference: Reference) {
+  const path = repository.value?.path
+  if (!path || opening.value) return
+  interactionRevision++
+  const next = new Set(soloRefs.value)
+  if (next.has(reference.name)) next.delete(reference.name)
+  else next.add(reference.name)
+  await openPath(path, true, [...next])
+}
+async function stopSolo() {
+  if (!repository.value || opening.value) return
+  interactionRevision++
+  await openPath(repository.value.path, true, [])
+}
 const working = useWorkingTree(repository, undefined, {
   active: () => selection.value === 'working',
 })
@@ -130,19 +215,36 @@ const showCentralDiff = computed(() => diffMode.value === 'central' && diffOpen.
 watch(selectedSha, (sha) => {
   if (!sha && selection.value === 'commit') diffOpen.value = false
 })
+watch(stashSha, (sha) => {
+  if (!sha && selection.value === 'stash') diffOpen.value = false
+})
 const displayedFile = computed(() =>
-  selection.value === 'working' ? workingFile.value : selectedFile.value,
+  selection.value === 'stash'
+    ? stashFile.value
+    : selection.value === 'working'
+      ? workingFile.value
+      : selectedFile.value,
 )
 const displayedDiff = computed(() =>
-  selection.value === 'working' ? workingDiff.value : diff.value,
+  selection.value === 'stash'
+    ? stashDiff.value
+    : selection.value === 'working'
+      ? workingDiff.value
+      : diff.value,
 )
 const displayedDiffLoading = computed(() =>
-  selection.value === 'working'
-    ? workingDiffLoading.value
-    : detailLoading.value || diffLoading.value,
+  selection.value === 'stash'
+    ? stashLoading.value || stashDiffLoading.value
+    : selection.value === 'working'
+      ? workingDiffLoading.value
+      : detailLoading.value || diffLoading.value,
 )
 const displayedDiffError = computed(() =>
-  selection.value === 'working' ? workingError.value : detailError.value || diffError.value,
+  selection.value === 'stash'
+    ? stashError.value || stashDiffError.value
+    : selection.value === 'working'
+      ? workingError.value
+      : detailError.value || diffError.value,
 )
 
 function selectWorkingTree() {
@@ -165,38 +267,66 @@ function selectCommit(row: CommitRow, index: number) {
   diffOpen.value = false
   void state.select(row, index)
 }
-function refreshWorkingTree() {
-  if (repository.value) void working.refresh()
+function refreshOnFocus() {
+  if (repository.value && !opening.value) void refreshRepository()
 }
 async function refreshRepository() {
-  const path = repository.value?.path
-  if (!path) return
+  const previousRepository = repository.value
+  if (!previousRepository || opening.value) return
+  const path = previousRepository.path
+  const tabId = activeTabId.value
   const previousSelection = selection.value
+  const previousStash = stashSha.value
+  const previousStashFile = stashFile.value
+  const previousStashArea = stashArea.value
   const revision = ++interactionRevision
   const previousFile = workingFile.value
   const previousArea = workingArea.value
   const previousDiffOpen = diffOpen.value
-  await openPath(path, true)
-  if (repository.value?.path !== path || revision !== interactionRevision) return
+  if (!(await state.refresh())) return
+  const sessionId = repository.value?.id
+  const current = () =>
+    repository.value?.path === path &&
+    repository.value?.id === sessionId &&
+    activeTabId.value === tabId &&
+    revision === interactionRevision
+  if (!current()) return
+  if (sessionId === previousRepository.id) {
+    await Promise.all([
+      worktreesExpanded.value ? context.loadWorktrees() : Promise.resolve(),
+      stashesExpanded.value || previousSelection === 'stash'
+        ? context.loadStashes()
+        : Promise.resolve(),
+      working.refresh(),
+    ])
+    return
+  }
+  if (previousSelection === 'stash') {
+    if (!stashes.value) await context.loadStashes()
+    if (!current()) return
+    if (!stashes.value?.stashes.some((stash) => stash.sha === previousStash)) return
+    selection.value = 'stash'
+    state.pauseDiffPreload()
+    await context.selectStash(previousStash)
+    if (!current() || selection.value !== 'stash') return
+    if (!previousStashFile || !previousStashArea) return
+    const file = stashDetails.value?.groups
+      .find((group) => group.area === previousStashArea)
+      ?.files.find((file) => file.fileKey === previousStashFile.fileKey)
+    if (!file) return
+    await context.selectFile(previousStashArea, file)
+    if (current() && selection.value === 'stash') diffOpen.value = previousDiffOpen
+    return
+  }
   selection.value = previousSelection
   if (previousSelection === 'working') state.pauseDiffPreload()
   if (previousSelection === 'working' && previousFile && previousArea) {
     await working.refresh()
-    if (
-      repository.value?.path !== path ||
-      selection.value !== 'working' ||
-      revision !== interactionRevision
-    )
-      return
+    if (!current() || selection.value !== 'working') return
     const file = workingStatus.value?.[previousArea].find((file) => file.key === previousFile.key)
     if (file) {
       await working.selectFile(previousArea, file)
-      if (
-        repository.value?.path === path &&
-        selection.value === 'working' &&
-        revision === interactionRevision
-      )
-        diffOpen.value = previousDiffOpen
+      if (current() && selection.value === 'working') diffOpen.value = previousDiffOpen
     }
   }
 }
@@ -289,8 +419,10 @@ const latestReference = computed(() =>
 const hasReferences = computed(() => groups.value.some((group) => group.references.length))
 
 let openingRevision = 0
-async function openPath(path: string, refreshing = false) {
+async function openPath(path: string, refreshing = false, solo?: string[]) {
   if (!refreshing) showSettings.value = false
+  const previousQuery = query.value
+  const requestedSolo = solo ?? (refreshing ? (repository.value?.soloRefs ?? []) : [])
   const attempt = ++openingRevision
   const previousTabs = tabs.value
   if (!refreshing) interactionRevision++
@@ -299,10 +431,10 @@ async function openPath(path: string, refreshing = false) {
     : repositoryTabs.open(path)
   const previousPath = repository.value?.path
   const previousTab = previousTabs.find((item) => item.id === tab?.id)
-  if (await state.open(path)) {
+  if (await state.open(path, requestedSolo, refreshing ? previousQuery : '')) {
     showDialog.value = false
     const info = repository.value
-    if (!info || !tab || activeTabId.value !== tab.id) return
+    if (!info || !tab || activeTabId.value !== tab.id || attempt !== openingRevision) return false
     repositoryTabs.update(tab.id, info)
     recent.value = [
       { path: info.path, name: info.name },
@@ -313,7 +445,7 @@ async function openPath(path: string, refreshing = false) {
     } catch {
       /* Preferences are optional. */
     }
-    referenceFilter.value = ''
+    if (!refreshing) referenceFilter.value = ''
     if (info.path !== previousPath) {
       collapsed.value = new Set()
       collapsedFolders.value = {
@@ -323,9 +455,11 @@ async function openPath(path: string, refreshing = false) {
         other: new Set(),
       }
     }
+    return true
   } else if (!refreshing && tab && attempt === openingRevision) {
     repositoryTabs.rejectOpen(tab.id, previousTab)
   }
+  return false
 }
 async function activateTab(id: string) {
   if (id === activeTabId.value && (repository.value || opening.value)) return
@@ -377,14 +511,27 @@ async function jumpToCommit(sha: string) {
   }
 }
 async function jump(reference: Reference) {
-  interactionRevision++
+  const revision = ++interactionRevision
+  const sessionId = repository.value?.id
   selection.value = 'commit'
   state.resumeDiffPreload()
   diffOpen.value = false
-  const index = await state.jump(reference.sha)
+  let index = await state.jump(reference.sha, { reportMissing: !soloRefs.value.size })
+  if (revision !== interactionRevision || sessionId !== repository.value?.id) return
+  if (index === null && soloRefs.value.size && repository.value && !error.value) {
+    const path = repository.value.path
+    if (!(await openPath(path, true, [])) || revision !== interactionRevision) return
+    const nextSession = repository.value?.id
+    index = await state.jump(reference.sha, { waitForIndex: true })
+    if (revision !== interactionRevision || nextSession !== repository.value?.id) return
+  }
   if (index !== null) {
     await nextTick()
-    if (selectedIndex.value === index && selectedSha.value === reference.sha)
+    if (
+      revision === interactionRevision &&
+      selectedIndex.value === index &&
+      selectedSha.value === reference.sha
+    )
       list.value?.scrollToIndex(index)
   }
 }
@@ -402,7 +549,7 @@ async function navigate(direction: -1 | 1) {
     workingRow.value?.focus()
     return
   }
-  const fromWorkingTree = selection.value === 'working'
+  const fromWorkingTree = selection.value !== 'commit'
   const revision = interactionRevision
   const index = fromWorkingTree ? await state.selectIndex(0) : await state.moveSelection(direction)
   if (index !== null && selectedIndex.value === index && revision === interactionRevision) {
@@ -470,11 +617,11 @@ function keyboard(event: KeyboardEvent) {
 }
 onMounted(() => {
   window.addEventListener('keydown', keyboard)
-  window.addEventListener('focus', refreshWorkingTree)
+  window.addEventListener('focus', refreshOnFocus)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', keyboard)
-  window.removeEventListener('focus', refreshWorkingTree)
+  window.removeEventListener('focus', refreshOnFocus)
 })
 </script>
 
@@ -540,11 +687,28 @@ onBeforeUnmount(() => {
                 :filter="referenceFilter"
                 :current-name="latestReference?.name"
                 :selected-sha="selectedSha"
+                :solo-refs="soloRefs"
                 @select="jump"
+                @solo="toggleSolo"
                 @toggle-folder="toggleFolder(group.kind, $event)"
               />
             </div>
             <p v-if="!hasReferences" class="reference-none">Aucune référence trouvée.</p>
+            <RepositoryContext
+              :worktrees="worktrees"
+              :stashes="stashes"
+              :worktrees-expanded="worktreesExpanded"
+              :stashes-expanded="stashesExpanded"
+              :worktrees-loading="worktreesLoading"
+              :stashes-loading="stashesLoading"
+              :worktrees-error="worktreesError"
+              :stashes-error="stashesError"
+              :selected-stash="selection === 'stash' ? stashSha : ''"
+              @toggle-worktrees="toggleWorktrees"
+              @toggle-stashes="toggleStashes"
+              @open-worktree="openPath"
+              @select-stash="selectStash"
+            />
           </nav>
         </template>
         <div v-else class="sidebar-empty">
@@ -647,7 +811,9 @@ onBeforeUnmount(() => {
                   <div class="history-title">
                     <GitBranch :size="17" />
                     <h1>Historique</h1>
-                    <span class="branch-chip">{{ repository.headName }}</span>
+                    <span class="branch-chip" title="Branche réellement active dans le worktree"
+                      >HEAD · {{ repository.headName }}</span
+                    >
                   </div>
                   <button
                     class="icon-button"
@@ -657,6 +823,21 @@ onBeforeUnmount(() => {
                     @click="refreshRepository"
                   >
                     <RefreshCw :size="14" />
+                  </button>
+                </div>
+                <div
+                  v-if="soloRefs.size"
+                  class="solo-banner flex shrink-0 items-center gap-2 border-b border-warning/30 bg-warning/10 px-4 py-2 text-xs text-warning"
+                  role="status"
+                >
+                  <span class="min-w-0 flex-1 truncate" :title="soloLabels.join(', ')"
+                    >Solo : {{ soloLabels.join(', ') }}</span
+                  >
+                  <button
+                    class="shrink-0 rounded border border-warning/30 px-2 py-1 hover:bg-warning/10"
+                    @click="stopSolo"
+                  >
+                    Quitter le mode Solo
                   </button>
                 </div>
                 <div class="search-toolbar">
@@ -691,7 +872,7 @@ onBeforeUnmount(() => {
                   :total="total"
                   :selected-sha="selection === 'commit' ? selectedSha : ''"
                   :selected-index="selectedIndex"
-                  :references="repository.references"
+                  :references="graphReferences"
                   :filtered="Boolean(filter)"
                   :loading="loadingPages > 0 || opening || query.trim().slice(0, 256) !== filter"
                   :indexing="!progress.complete"
@@ -746,7 +927,13 @@ onBeforeUnmount(() => {
                 :diff="displayedDiff"
                 :loading="displayedDiffLoading"
                 :error="displayedDiffError"
-                :highlighted="selection === 'commit' ? highlightedDiff : workingHighlightedDiff"
+                :highlighted="
+                  selection === 'stash'
+                    ? stashHighlightedDiff
+                    : selection === 'commit'
+                      ? highlightedDiff
+                      : workingHighlightedDiff
+                "
                 @close="closeDiff"
               />
             </div>
@@ -776,6 +963,23 @@ onBeforeUnmount(() => {
               :error="workingError"
               :diff-mode="diffMode"
               @select-file="openWorkingFile"
+              @diff-mode-changed="changeDiffMode"
+            />
+            <StashPanel
+              v-else-if="selection === 'stash'"
+              id="commit-details-pane"
+              :details="stashDetails"
+              :loading="stashLoading"
+              :error="stashError"
+              :selected-file="stashFile"
+              :selected-area="stashArea"
+              :diff="stashDiff"
+              :highlighted="stashHighlightedDiff"
+              :diff-loading="stashDiffLoading"
+              :diff-error="stashDiffError"
+              :diff-mode="diffMode"
+              @select-file="openStashFile"
+              @area-changed="changeStashArea"
               @diff-mode-changed="changeDiffMode"
             />
             <CommitDetailsPanel

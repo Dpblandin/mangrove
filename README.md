@@ -11,6 +11,8 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Accueil simple : logo Mangrove, ouverture d’un dépôt et accès aux dépôts récents.
 - Historique topologique paginé, liste virtualisée et graphe Canvas.
 - Branches locales, références distantes et tags ; dossiers imbriqués repliables et navigation vers leur commit. Le filtre révèle les dossiers des références correspondantes sans perdre les replis de la navigation normale.
+- Mode **Solo** sur une ou plusieurs branches locales/distantes, accessible par clic droit ou bouton clavier : parcours et graphe recalculés, recherche limitée à ce parcours et retour explicite à la vue complète. La branche réellement active reste indiquée.
+- Sections **Worktrees** et **Stashes** chargées à la demande ; ouverture des worktrees existants en onglets, états manquant/verrouillé/détaché, et consultation séparée des diffs sauvegardés du worktree, de l’index et des fichiers non suivis. [Comportements et limites](docs/repository-context.md).
 - Les références techniques `refs/t3/checkpoints/` sont masquées dans les branches, l’historique, le graphe et la recherche ; les instantanés restent dans le dépôt pour T3 Code.
 - Recherche locale dans les messages, auteurs et emails, avec préfixes de mots ; recherche par préfixe de SHA ou de référence.
 - Détails des commits, liste de fichiers virtualisée et diffs unifiés à la demande. Les merges sont comparés au premier parent.

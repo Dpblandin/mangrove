@@ -584,6 +584,134 @@ describe('repository navigation', () => {
   })
 })
 
+describe('reference navigation during indexing', () => {
+  it('waits for the requested branch after leaving Solo without displaying a false missing-reference error', async () => {
+    const { state, transport } = setup()
+    const path = '/tmp/solo'
+    await openReady(state, transport, {
+      ...repository('solo'),
+      path,
+      soloRefs: ['refs/heads/topic'],
+    })
+    const probe = state.jump('main-tip', { reportMissing: false })
+    transport.take('commit_position', { sessionId: 'solo' }).resolve(null)
+    expect(await probe).toBeNull()
+    expect(state.error.value).toBe('')
+    expect(transport.calls.filter((call) => call.command === 'list_commits')).toHaveLength(1)
+
+    const opening = state.open(path, [])
+    transport.take('open_repository').resolve({ ...repository('full', 0, false), path })
+    await flush()
+    transport.take('list_commits', { sessionId: 'full' }).resolve(page([], 0, index(0, false)))
+    await opening
+    const jumping = state.jump('main-tip', { waitForIndex: true })
+    transport.take('commit_position', { sessionId: 'full' }).resolve(null)
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(state.error.value).toBe('')
+    expect(state.selectedSha.value).toBe('')
+    expect(
+      transport.calls.filter(
+        (call) => call.command === 'commit_position' && call.args.sessionId === 'full',
+      ),
+    ).toHaveLength(1)
+
+    transport.take('index_status', { sessionId: 'full' }).resolve(index(2))
+    await flush()
+    transport.take('commit_position', { sessionId: 'full' }).resolve(1)
+    transport
+      .take('list_commits', { sessionId: 'full' })
+      .resolve(page([row(0, 'another-tip'), row(1, 'main-tip')]))
+    expect(await jumping).toBe(1)
+    expect(state.selectedSha.value).toBe('main-tip')
+    expect(state.error.value).toBe('')
+    expect(transport.calls.filter((call) => call.command === 'index_status')).toHaveLength(1)
+    expect(
+      transport.calls.filter(
+        (call) => call.command === 'commit_details' && call.args.sha === 'another-tip',
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('rechecks an old missing-position result when indexing completed before the progress watcher starts', async () => {
+    const { state, transport } = setup()
+    await openReady(state, transport, repository('repo', 0, false), page([], 0, index(0, false)))
+    const jumping = state.jump('target', { waitForIndex: true })
+    const oldPosition = transport.take('commit_position')
+    transport.take('index_status').resolve(index(1))
+    await flush()
+    oldPosition.resolve(null)
+    await flush()
+    transport.take('commit_position').resolve(0)
+    transport.take('list_commits').resolve(page([row(0, 'target')]))
+    expect(await jumping).toBe(0)
+    expect(state.selectedSha.value).toBe('target')
+    expect(state.error.value).toBe('')
+  })
+
+  it.each(['search', 'close'])(
+    'cancels an indexing wait when a new %s replaces navigation',
+    async (change) => {
+      const { state, transport } = setup()
+      await openReady(state, transport, repository('repo', 0, false), page([], 0, index(0, false)))
+      const jumping = state.jump('old-target', { waitForIndex: true })
+      const position = transport.take('commit_position')
+      position.resolve(null)
+      await flush()
+      if (change === 'search') state.query.value = 'new search'
+      else state.close()
+      expect(await jumping).toBeNull()
+      expect(position.signal?.aborted).toBe(true)
+      transport.take('index_status').resolve(index(1))
+      await vi.advanceTimersByTimeAsync(160)
+      if (change === 'search') {
+        transport
+          .take('list_commits', { query: 'new search' })
+          .resolve(page([row(0, 'search-result')]))
+      }
+      await flush()
+      expect(transport.calls.filter((call) => call.command === 'commit_position')).toHaveLength(1)
+      expect(state.selectedSha.value).toBe(change === 'search' ? 'search-result' : '')
+      expect(state.error.value).toBe('')
+    },
+  )
+
+  it('still reports a missing target when its traversal was already fully indexed', async () => {
+    const { state, transport } = setup()
+    await openReady(state, transport)
+    const jumping = state.jump('missing', { waitForIndex: true })
+    transport.take('commit_position').resolve(null)
+    await flush()
+    transport.take('list_commits').resolve(page())
+    expect(await jumping).toBeNull()
+    expect(state.error.value).toBe('Cette référence n’est pas encore indexée.')
+    await vi.advanceTimersByTimeAsync(31_000)
+    expect(transport.calls.filter((call) => call.command === 'commit_position')).toHaveLength(1)
+  })
+
+  it('bounds an indexing wait without adding position polling when progress stalls', async () => {
+    const { state, transport } = setup()
+    await openReady(state, transport, repository('repo', 0, false), page([], 0, index(0, false)))
+    const jumping = state.jump('target', { waitForIndex: true })
+    transport.take('commit_position').resolve(null)
+    await flush()
+    await vi.advanceTimersByTimeAsync(30_000)
+    transport.take('list_commits').resolve(page([], 0, index(0, false)))
+    expect(await jumping).toBeNull()
+    expect(state.error.value).toBe('Cette référence n’est pas encore indexée.')
+    expect(transport.calls.filter((call) => call.command === 'commit_position')).toHaveLength(1)
+  })
+
+  it('reports native navigation failures even when the Solo probe suppresses absent targets', async () => {
+    const { state, transport } = setup()
+    await openReady(state, transport)
+    const jumping = state.jump('target', { reportMissing: false })
+    transport.take('commit_position').reject(new Error('Native session expired'))
+    expect(await jumping).toBeNull()
+    expect(state.error.value).toContain('Native session expired')
+  })
+})
+
 describe('displayed selection transitions', () => {
   it('publishes commit and file colors with their patches, and preserves a pause requested during preparation', async () => {
     const workers = controlledWorkers()
@@ -1220,5 +1348,76 @@ describe('visible page retention', () => {
     state.resumeDiffPreload()
     await vi.advanceTimersByTimeAsync(150)
     expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(2)
+  })
+})
+
+describe('repository refresh', () => {
+  it('opens a Solo traversal with its preserved search before loading or selecting commits', async () => {
+    const { state, transport } = setup()
+    const info = { ...repository(), soloRefs: ['refs/heads/topic'] }
+    const opening = state.open(info.path, info.soloRefs, 'active search')
+    transport.take('open_repository').resolve(info)
+    expect(await opening).toBe(true)
+    expect(state.query.value).toBe('active search')
+    expect(transport.calls.filter((call) => call.command === 'list_commits')).toHaveLength(0)
+    expect(transport.calls.filter((call) => call.command === 'commit_details')).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(160)
+    const pages = transport.calls.filter((call) => call.command === 'list_commits')
+    expect(pages).toHaveLength(1)
+    expect(pages[0]!.args.query).toBe('active search')
+    pages[0]!.resolve(page([row(0, 'matching-commit')]))
+    await flush()
+    expect(state.selectedSha.value).toBe('matching-commit')
+    expect(transport.take('commit_details').args.sha).toBe('matching-commit')
+  })
+
+  it('retains the Solo filter, displayed commit and active search for an unchanged session', async () => {
+    const { state, transport } = setup()
+    const info = { ...repository(), soloRefs: ['refs/heads/topic'] }
+    await openReady(state, transport, info)
+    transport.take('commit_details').resolve(details('commit-0', []))
+    await flush()
+    state.query.value = 'active search'
+    await flush()
+    await vi.advanceTimersByTimeAsync(160)
+    transport.take('list_commits', { query: 'active search' }).resolve(page())
+    await flush()
+    transport.take('commit_details').resolve(details('commit-0', []))
+    await flush()
+    const before = state.details.value
+    const refreshing = state.refresh()
+    const request = transport.take('open_repository')
+    expect(request.args).toEqual({ path: info.path, soloRefs: info.soloRefs })
+    request.resolve(info)
+    await flush()
+    for (const call of transport.calls.filter(
+      (call) => !call.settled && call.command === 'list_commits',
+    ))
+      call.resolve(page())
+    expect(await refreshing).toBe(true)
+    expect(state.details.value).toBe(before)
+    expect(state.selectedSha.value).toBe('commit-0')
+    expect(state.query.value).toBe('active search')
+  })
+
+  it('loads a new traversal when the native session changes and releases old selection', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const refreshing = state.refresh()
+    const updated = {
+      ...repository('new-generation'),
+      path: '/tmp/repo',
+      soloRefs: ['refs/heads/topic'],
+    }
+    transport.take('open_repository').resolve(updated)
+    await flush()
+    transport
+      .take('list_commits', { sessionId: updated.id, offset: 0 })
+      .resolve(page([row(0, 'new-tip')]))
+    expect(await refreshing).toBe(true)
+    expect(state.repository.value?.id).toBe(updated.id)
+    expect(state.selectedSha.value).toBe('new-tip')
+    expect(state.diff.value).toBeNull()
   })
 })

@@ -3,6 +3,7 @@ mod fetch;
 mod file_browser;
 mod graph;
 pub mod model;
+mod repository_context;
 mod working_tree;
 mod worktree_filter;
 
@@ -183,6 +184,15 @@ impl Workspace {
     }
 
     pub fn open_repository(&self, path: &str) -> Result<RepositoryInfo> {
+        self.open_repository_with_solo(path, &[])
+    }
+
+    pub fn open_repository_with_solo(&self, path: &str, solo: &[String]) -> Result<RepositoryInfo> {
+        if solo.len() > 64 || solo.iter().any(|name| name.len() > 1024) {
+            return Err(
+                "Solo accepte au plus 64 branches, avec des noms de 1 024 octets maximum.".into(),
+            );
+        }
         let path = Path::new(path.trim());
         if !path.is_dir() {
             return Err("Choisissez un dossier contenant un dépôt Git local.".into());
@@ -236,23 +246,7 @@ impl Workspace {
             .ok()
             .and_then(|head| head.peel_to_commit().ok());
         let head_sha = head.as_ref().map(|head| head.id().to_string());
-        let head_name = if repository.head_detached().unwrap_or(false) {
-            "HEAD détachée".into()
-        } else {
-            repository
-                .head()
-                .ok()
-                .and_then(|head| head.shorthand().ok().map(str::to_owned))
-                .or_else(|| {
-                    repository.find_reference("HEAD").ok().and_then(|head| {
-                        head.symbolic_target()
-                            .ok()
-                            .flatten()
-                            .map(|name| name.trim_start_matches("refs/heads/").to_owned())
-                    })
-                })
-                .unwrap_or_else(|| "HEAD".into())
-        };
+        let head_name = repository_head_name(&repository);
         let mut references = Vec::new();
         for reference in repository.references().map_err(|e| e.to_string())? {
             let reference = reference.map_err(|e| e.to_string())?;
@@ -301,6 +295,19 @@ impl Workspace {
             });
         }
         references.sort_by(|a, b| a.name.cmp(&b.name));
+        // References deleted externally leave the filter instead of keeping a stale root.
+        let mut solo_refs: Vec<_> = solo
+            .iter()
+            .filter(|name| {
+                references.iter().any(|reference| {
+                    &reference.name == *name
+                        && matches!(reference.kind.as_str(), "local" | "remote")
+                })
+            })
+            .cloned()
+            .collect();
+        solo_refs.sort();
+        solo_refs.dedup();
         let mut remotes = Vec::new();
         for name in repository
             .remotes()
@@ -335,8 +342,16 @@ impl Workspace {
         let fingerprint = format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&(5u32, &head_sha, &head_name, &references, &remotes, &shallow))
-                    .map_err(|e| e.to_string())?,
+                serde_json::to_vec(&(
+                    6u32,
+                    &head_sha,
+                    &head_name,
+                    &references,
+                    &remotes,
+                    &shallow,
+                    &solo_refs
+                ))
+                .map_err(|e| e.to_string())?,
             )
         );
         if let Some(session) = sessions.get(&key) {
@@ -417,6 +432,7 @@ impl Workspace {
             head: head_sha,
             head_name,
             references,
+            solo_refs,
             remotes,
             index: IndexProgress {
                 indexed,
@@ -603,6 +619,30 @@ impl Workspace {
         render_file_diff(&diff, file_index)
     }
 
+    pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        repository_context::worktrees(&repository)
+    }
+
+    pub fn list_stashes(&self, id: &str) -> Result<StashList> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        repository_context::stashes(&repository)
+    }
+
+    pub fn stash_details(&self, id: &str, sha: &str) -> Result<StashDetails> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        repository_context::stash_details(&repository, sha)
+    }
+
+    pub fn stash_diff(&self, id: &str, sha: &str, area: &str, file_key: &str) -> Result<FileDiff> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        repository_context::stash_diff(&repository, sha, area, file_key)
+    }
+
     pub fn working_tree_status(&self, id: &str) -> Result<WorkingTreeStatus> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
@@ -704,6 +744,25 @@ fn is_current(connection: &rusqlite::Connection, session: &Session) -> Result<bo
         || cache::meta(connection, "index_run")?.as_deref() != Some(&session.index_run)))
 }
 
+fn repository_head_name(repository: &Repository) -> String {
+    if repository.head_detached().unwrap_or(false) {
+        return "HEAD détachée".into();
+    }
+    repository
+        .head()
+        .ok()
+        .and_then(|head| head.shorthand().ok().map(str::to_owned))
+        .or_else(|| {
+            repository.find_reference("HEAD").ok().and_then(|head| {
+                head.symbolic_target()
+                    .ok()
+                    .flatten()
+                    .map(|name| name.trim_start_matches("refs/heads/").to_owned())
+            })
+        })
+        .unwrap_or_else(|| "HEAD".into())
+}
+
 fn commit_diff<'a>(
     repository: &'a Repository,
     sha: &str,
@@ -721,16 +780,25 @@ fn commit_diff<'a>(
     } else {
         None
     };
+    let diff = tree_diff(repository, parent.as_ref(), &tree)?;
+    Ok((commit, diff))
+}
+
+fn tree_diff<'repo>(
+    repository: &'repo Repository,
+    old: Option<&git2::Tree<'repo>>,
+    new: &git2::Tree<'repo>,
+) -> Result<git2::Diff<'repo>> {
     let mut options = DiffOptions::new();
     options.include_typechange(true).max_size(MAX_FILE_SIZE);
     let mut diff = repository
-        .diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(&mut options))
+        .diff_tree_to_tree(old, Some(new), Some(&mut options))
         .map_err(|e| e.to_string())?;
     let mut find = DiffFindOptions::new();
     find.renames(true).rename_limit(200);
     diff.find_similar(Some(&mut find))
         .map_err(|e| e.to_string())?;
-    Ok((commit, diff))
+    Ok(diff)
 }
 
 fn index_repository(session: &Session) -> Result<()> {
@@ -739,10 +807,18 @@ fn index_repository(session: &Session) -> Result<()> {
     walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
         .map_err(|e| e.to_string())?;
     for reference in &session.info.references {
+        if !session.info.solo_refs.is_empty() && !session.info.solo_refs.contains(&reference.name) {
+            continue;
+        }
         walk.push(Oid::from_str(&reference.sha).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     }
-    if let Some(head) = &session.info.head {
+    if let Some(head) = session
+        .info
+        .head
+        .as_ref()
+        .filter(|_| session.info.solo_refs.is_empty())
+    {
         walk.push(Oid::from_str(head).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     }

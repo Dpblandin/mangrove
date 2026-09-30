@@ -14,6 +14,10 @@ fn main() {
             "file_revision_diff",
             "working_tree_status",
             "working_tree_diff",
+            "list_worktrees",
+            "list_stashes",
+            "stash_details",
+            "stash_diff",
         ]),
     ))
     .expect("Unable to prepare the desktop permissions");

@@ -58,3 +58,21 @@ cargo build --release --locked -p mangrove-core --example file_benchmark
 ```
 
 Pour un dépôt réel, remplacer seulement le dépôt et le chemin de fichier dans ces commandes. La sortie JSON du programme ne contient que des données agrégées. Conserver les logs locaux hors du dépôt si l’outil externe de mesure y imprime le chemin de la commande.
+
+## Worktrees, stashes et Solo (issue #4)
+
+Mesure du 30 septembre 2026, Apple M4 Pro, 48 Gio de RAM, macOS ARM, Rust release avec ThinLTO. Le benchmark `context_benchmark` termine l’indexation initiale, puis mesure 30 lectures de chaque opération dans un même processus, avec cache filesystem chaud et cache applicatif temporaire hors du dépôt. Le changement Solo alterne entre une branche et deux références distinctes, attend la fin du nouveau parcours et lit une page de 128 commits. Les métadonnées SQLite sont réutilisées. Les chiffres excluent IPC, Vue, WebView et coloration.
+
+- **Fixture synthétique de 10 007 commits**, quatre worktrees dont un absent et un verrouillé, un stash avec trois zones : worktrees p50 **0,91 ms**, p95 **1,23 ms** ; stashes **0,17 / 0,23 ms** ; détails des trois fichiers du stash **0,61 / 0,72 ms** ; patch de quatre lignes **0,67 / 0,83 ms**. Recalcul Solo et première page : **119,81 / 136,34 ms**. Les deux filtres de cette fixture atteignent le même historique complet. Pic RSS du processus : **27,81 Mio**.
+- **Dépôt réel local de 12 090 commits indexés**, 44 worktrees et neuf stashes : worktrees p50 **34,81 ms**, p95 **45,86 ms** ; stashes **0,72 / 0,80 ms** ; détails de deux fichiers **23,80 / 24,55 ms** ; patch de 62 lignes **29,81 / 31,62 ms**. Recalcul Solo et première page : **65,64 / 69,93 ms**, avec 3 594 commits dans le dernier filtre. Pic RSS : **53,42 Mio**.
+
+Dans ces couples, le premier chiffre est le p50 et le second le p95. Les premiers appels sont conservés séparément dans [performance-context.json](performance-context.json), mais font partie des 30 échantillons. Le pic RSS inclut l’indexation initiale et toutes les opérations du processus ; il n’isole ni une réponse ni le coût mémoire du Solo. Les réponses sont bornées, sans borne globale sur les allocations internes de libgit2, notamment le reflog, les arbres et la détection de renommages. Ces deux mesures ne représentent pas un pire cas. Aucun chemin, SHA, nom de branche, auteur ou contenu du dépôt réel n’est publié.
+
+```sh
+vp run fixture --commits 10000 --large-change
+# Préparer des worktrees et un stash dans une copie synthétique de cette fixture.
+cargo build --release --locked -p mangrove-core --example context_benchmark
+/usr/bin/time -l target/release/examples/context_benchmark /chemin/vers/la/copie
+```
+
+La mesure des diffs est omise si aucun stash ou fichier n’est présent ; l’alternance Solo est omise si le dépôt possède moins de deux références de branches distinctes. Sur Linux, remplacer `time -l` par `time -v`. La QA du bundle est décrite dans [qa-repository-context.md](qa-repository-context.md).
