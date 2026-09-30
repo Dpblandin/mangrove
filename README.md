@@ -13,6 +13,7 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Détails des commits, fichiers modifiés et diffs unifiés à la demande. Les merges sont comparés au premier parent.
 - Fichiers ajoutés en vert, supprimés en rouge, modifiés en jaune et renommés en bleu, dans les trois thèmes.
 - Un clic sur un fichier ouvre son diff dans la zone centrale, avec les détails et fichiers du commit à droite. La vue compacte reste disponible ; fermer le diff ramène à l’historique à la même position.
+- Le message du commit dispose d’une zone de lecture de hauteur stable et défilable : les titres longs, descriptions et notes de fusion ne déplacent pas les métadonnées ni la liste des fichiers.
 - Aucun loader animé pendant les lectures de commits ou de diffs : le contenu précédent reste affiché jusqu’à ce que la nouvelle sélection soit prête.
 - Indexation progressive dans un cache SQLite FTS5 séparé du dépôt ; réutilisation à la prochaine ouverture.
 - Trois thèmes mémorisés : **Classique** par défaut, gris/bleu ; **Mangrove**, vert ; **Catppuccin Macchiato**.

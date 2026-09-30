@@ -76,17 +76,25 @@ function selected(file: ChangedFile) {
     </div>
 
     <template v-else-if="details">
-      <section class="max-h-[38%] shrink-0 overflow-y-auto p-5 pb-4">
-        <h2 class="mb-4 text-[15px] leading-relaxed font-medium [overflow-wrap:anywhere]">
-          {{ title }}
-        </h2>
-        <p
-          v-if="description"
-          class="-mt-1.5 mb-[18px] text-xs leading-relaxed whitespace-pre-wrap text-muted [overflow-wrap:anywhere]"
+      <section class="commit-summary shrink-0">
+        <div
+          :key="details.sha"
+          class="commit-message min-h-0 overflow-y-auto"
+          role="region"
+          aria-label="Message du commit"
+          tabindex="0"
         >
-          {{ description }}
-        </p>
-        <div class="mb-[15px] flex items-center gap-2.5">
+          <h2 class="m-0 text-[15px] leading-relaxed font-medium [overflow-wrap:anywhere]">
+            {{ title }}
+          </h2>
+          <p
+            v-if="description"
+            class="mt-2.5 mb-0 text-xs leading-relaxed whitespace-pre-wrap text-muted [overflow-wrap:anywhere]"
+          >
+            {{ description }}
+          </p>
+        </div>
+        <div class="flex min-w-0 items-center gap-2.5">
           <span
             class="grid size-8 shrink-0 place-items-center rounded-[10px] bg-accent/12 text-[11px] font-semibold text-accent"
             aria-hidden="true"
@@ -97,39 +105,38 @@ function selected(file: ChangedFile) {
               details.author
             }}</strong>
             <time
-              class="text-[10px] text-muted"
+              class="truncate text-[10px] text-muted"
               :datetime="new Date(details.time * 1000).toISOString()"
               >{{ commitDate(details.time) }}</time
             >
           </div>
         </div>
-        <div class="flex items-start gap-3 rounded-md bg-bg px-[11px] py-2.5 text-[10px]">
-          <span class="pt-px text-muted">SHA</span
-          ><code class="font-mono leading-normal text-text/80 [overflow-wrap:anywhere]">{{
-            details.sha
-          }}</code>
-        </div>
-        <div
-          v-if="details.parents.length > 1"
-          class="parent-note mt-[11px] flex items-start gap-[7px] text-[10px] leading-relaxed text-muted"
-        >
-          <GitMerge :size="13" />
-          <span
-            >Commit de fusion · comparaison avec le premier parent
-            <code>{{ shortSha(details.parents[0]!) }}</code></span
+        <div class="flex min-w-0 items-center gap-3 rounded-md bg-bg px-[11px] text-[10px]">
+          <span class="shrink-0 text-muted">SHA</span
+          ><code
+            class="commit-sha min-w-0 overflow-x-auto font-mono leading-normal whitespace-nowrap text-text/80"
+            tabindex="0"
+            aria-label="SHA complet du commit"
+            >{{ details.sha }}</code
           >
         </div>
-        <div
-          v-else-if="!details.parents.length"
-          class="parent-note mt-[11px] flex items-start gap-[7px] text-[10px] leading-relaxed text-muted"
-        >
-          <GitCommitHorizontal :size="13" /><span>Premier commit du dépôt</span>
+        <div class="parent-note min-h-0 overflow-y-auto text-[10px] leading-normal text-muted">
+          <div v-if="details.parents.length > 1" class="flex items-start gap-[7px]">
+            <GitMerge :size="13" />
+            <span
+              >Commit de fusion · comparaison avec le premier parent
+              <code>{{ shortSha(details.parents[0]!) }}</code></span
+            >
+          </div>
+          <div v-else-if="!details.parents.length" class="flex items-start gap-[7px]">
+            <GitCommitHorizontal :size="13" /><span>Premier commit du dépôt</span>
+          </div>
         </div>
       </section>
 
       <section
         class="flex min-h-0 flex-col border-t border-border"
-        :class="diffMode === 'compact' ? 'max-h-[30%] shrink-0' : 'flex-1'"
+        :class="diffMode === 'compact' ? 'h-[30%] shrink-0' : 'flex-1'"
         aria-label="Fichiers modifiés"
       >
         <div
@@ -235,6 +242,21 @@ function selected(file: ChangedFile) {
 <style scoped>
 @reference '../style.css';
 
+.commit-summary {
+  display: grid;
+  height: clamp(220px, 36%, 290px);
+  grid-template-rows: minmax(0, 1fr) 32px 36px 30px;
+  gap: 10px;
+  padding: 20px 20px 16px;
+}
+.commit-message {
+  scrollbar-gutter: stable;
+}
+.commit-message:focus-visible,
+.commit-sha:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
+}
 .panel-state {
   @apply flex flex-1 flex-col items-center justify-center gap-3 p-[30px] text-center text-xs text-muted;
 }
