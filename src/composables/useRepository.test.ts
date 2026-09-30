@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { effectScope } from 'vue'
 import type { GitClient } from '../lib/api'
+import type { HighlightedDiff, SyntaxRequest, SyntaxResponse } from '../lib/diffSyntax'
 import type {
   ChangedFile,
   CommitDetails,
@@ -122,6 +123,42 @@ const diff = (additions: number): FileDiff => ({
   truncated: false,
   hunks: [],
 })
+const textDiff = (content: string): FileDiff => ({
+  ...diff(1),
+  hunks: [
+    {
+      header: '@@ -0,0 +1 @@',
+      lines: [{ kind: 'addition', oldLine: null, newLine: 1, content }],
+    },
+  ],
+})
+const colored = (content: string): HighlightedDiff => [[[{ content, kind: 'string' }]]]
+
+function controlledWorkers() {
+  const workers: ControlledWorker[] = []
+  class ControlledWorker {
+    onmessage: ((event: MessageEvent<SyntaxResponse>) => void) | null = null
+    onerror: ((event: Event) => void) | null = null
+    onmessageerror: ((event: MessageEvent) => void) | null = null
+    requests: SyntaxRequest[] = []
+    terminate = vi.fn()
+
+    constructor() {
+      workers.push(this)
+    }
+
+    postMessage(request: SyntaxRequest) {
+      this.requests.push(request)
+    }
+
+    complete(tokens: HighlightedDiff | null, request = this.requests.at(-1)!) {
+      // A terminated worker can still deliver a message queued by the host.
+      this.onmessage?.({ data: { id: request.id, tokens } } as MessageEvent<SyntaxResponse>)
+    }
+  }
+  vi.stubGlobal('Worker', ControlledWorker)
+  return workers
+}
 
 async function flush() {
   for (let step = 0; step < 12; step += 1) await Promise.resolve()
@@ -170,10 +207,46 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const dispose of cleanup) dispose()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
 describe('repository navigation', () => {
+  it('closes the active view and ignores a diff that finishes after the last tab closes', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const reading = state.selectFile(file(1))
+    const pendingDiff = transport.take('file_diff', { fileIndex: 1 })
+
+    state.close()
+    pendingDiff.resolve(diff(99))
+    await reading
+
+    expect(pendingDiff.signal?.aborted).toBe(true)
+    expect(state.repository.value).toBeNull()
+    expect(state.pages.value.size).toBe(0)
+    expect(state.total.value).toBe(0)
+    expect(state.selectedSha.value).toBe('')
+    expect(state.details.value).toBeNull()
+    expect(state.diff.value).toBeNull()
+    expect(state.opening.value).toBe(false)
+  })
+
+  it('ignores a repository opening that completes after its tab closes', async () => {
+    const { state, transport } = setup()
+    const opening = state.open('/tmp/closed-tab')
+    const pendingOpen = transport.take('open_repository')
+
+    state.close()
+    pendingOpen.resolve(repository('closed-tab'))
+
+    expect(await opening).toBe(false)
+    expect(pendingOpen.signal?.aborted).toBe(true)
+    expect(state.repository.value).toBeNull()
+    expect(state.opening.value).toBe(false)
+    expect(transport.calls.filter((call) => call.command === 'list_commits')).toHaveLength(0)
+  })
+
   it('discards old repository results even when transport cancellation is ignored', async () => {
     const { state, transport } = setup()
     const firstOpen = state.open('/tmp/first')
@@ -305,6 +378,97 @@ describe('repository navigation', () => {
 })
 
 describe('displayed selection transitions', () => {
+  it('publishes commit and file colors with their patches, and preserves a pause requested during preparation', async () => {
+    const workers = controlledWorkers()
+    const { state, transport } = setup()
+    await openReady(state, transport, repository('repo', 3), fullPage(0, 3))
+    transport.take('commit_details').resolve(details('commit-0', [file(0)]))
+    await flush()
+    const firstPatch = textDiff('first')
+    const firstColors = colored('first')
+    transport.take('file_diff', { sha: 'commit-0' }).resolve(firstPatch)
+    await flush()
+    expect(state.details.value).toBeNull()
+    expect(state.diff.value).toBeNull()
+    expect(state.highlightedDiff.value).toBeNull()
+    workers[0]!.complete(firstColors)
+    await flush()
+    expect(state.details.value?.sha).toBe('commit-0')
+    expect(state.diff.value).toBe(firstPatch)
+    expect(state.highlightedDiff.value).toBe(firstColors)
+
+    const selecting = state.select(row(1), 1)
+    transport
+      .take('commit_details', { sha: 'commit-1' })
+      .resolve(details('commit-1', [file(1), file(2)]))
+    await flush()
+    const nextPatch = textDiff('next')
+    const nextColors = colored('next')
+    transport.take('file_diff', { sha: 'commit-1', fileIndex: 1 }).resolve(nextPatch)
+    await flush()
+    expect(state.details.value?.sha).toBe('commit-0')
+    expect(state.selectedFile.value?.index).toBe(0)
+    expect(state.diff.value).toBe(firstPatch)
+    expect(state.highlightedDiff.value).toBe(firstColors)
+    state.pauseDiffPreload()
+    workers[1]!.complete(nextColors)
+    await selecting
+    expect(state.details.value?.sha).toBe('commit-1')
+    expect(state.selectedFile.value?.index).toBe(1)
+    expect(state.diff.value).toBe(nextPatch)
+    expect(state.highlightedDiff.value).toBe(nextColors)
+    await vi.advanceTimersByTimeAsync(150)
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(2)
+
+    const selectingFile = state.selectFile(file(2))
+    const filePatch = textDiff('another file')
+    const fileColors = colored('another file')
+    transport.take('file_diff', { sha: 'commit-1', fileIndex: 2 }).resolve(filePatch)
+    await flush()
+    expect(state.selectedFile.value?.index).toBe(1)
+    expect(state.diff.value).toBe(nextPatch)
+    expect(state.highlightedDiff.value).toBe(nextColors)
+    workers.at(-1)!.complete(fileColors)
+    await selectingFile
+    expect(state.selectedFile.value?.index).toBe(2)
+    expect(state.diff.value).toBe(filePatch)
+    expect(state.highlightedDiff.value).toBe(fileColors)
+  })
+
+  it('ignores old colors after another commit replaces the snapshot and after the repository closes', async () => {
+    const workers = controlledWorkers()
+    const { state, transport } = setup()
+    await openReady(state, transport)
+    transport.take('commit_details').resolve(details('commit-0', [file(0)]))
+    await flush()
+    transport.take('file_diff', { sha: 'commit-0' }).resolve(textDiff('old'))
+    await flush()
+    const oldWorker = workers[0]!
+    const latest = state.select(row(1), 1)
+    transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1', [file(1)]))
+    await flush()
+    const latestPatch = textDiff('latest')
+    const latestColors = colored('latest')
+    transport.take('file_diff', { sha: 'commit-1' }).resolve(latestPatch)
+    await flush()
+    workers[1]!.complete(latestColors)
+    await latest
+    oldWorker.complete(colored('old'))
+    await flush()
+    expect(oldWorker.terminate).toHaveBeenCalled()
+    expect(state.details.value?.sha).toBe('commit-1')
+    expect(state.diff.value).toBe(latestPatch)
+    expect(state.highlightedDiff.value).toBe(latestColors)
+
+    state.close()
+    workers[1]!.complete(colored('late after close'))
+    await flush()
+    expect(state.details.value).toBeNull()
+    expect(state.selectedFile.value).toBeNull()
+    expect(state.diff.value).toBeNull()
+    expect(state.highlightedDiff.value).toBeNull()
+  })
+
   it('keeps the old metadata, file and patch together until the next commit and its first patch are ready', async () => {
     const { state, transport } = setup()
     await openDisplayed(state, transport)

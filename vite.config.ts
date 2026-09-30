@@ -10,6 +10,7 @@ export default defineConfig({
     options: { typeAware: true, typeCheck: true },
   },
   plugins: lazyPlugins(() => [tailwindcss(), vue()]),
+  worker: { format: 'es' },
   test: { include: ['src/**/*.test.ts'] },
   clearScreen: false,
   server: {

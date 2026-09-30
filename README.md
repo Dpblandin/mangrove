@@ -7,11 +7,17 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 ## Prototype disponible
 
 - Ouverture de dépôts locaux, bare et worktrees ; dépôts récemment ouverts.
+- Onglets de dépôts avec sélection, fermeture et bouton d’ouverture. Chaque changement recharge le dépôt actif ; les onglets conservent uniquement son nom et son chemin.
+- Accueil simple : logo Mangrove, ouverture d’un dépôt et accès aux dépôts récents.
 - Historique topologique paginé, liste virtualisée et graphe Canvas.
-- Branches locales, références distantes et tags ; navigation vers leur commit.
+- Branches locales, références distantes et tags ; dossiers imbriqués repliables et navigation vers leur commit. Le filtre révèle les dossiers des références correspondantes sans perdre les replis de la navigation normale.
+- Les références techniques `refs/t3/checkpoints/` sont masquées dans les branches, l’historique, le graphe et la recherche ; les instantanés restent dans le dépôt pour T3 Code.
 - Recherche locale dans les messages, auteurs et emails, avec préfixes de mots ; recherche par préfixe de SHA ou de référence.
-- Détails des commits, fichiers modifiés et diffs unifiés à la demande. Les merges sont comparés au premier parent.
+- Détails des commits, liste de fichiers virtualisée et diffs unifiés à la demande. Les merges sont comparés au premier parent.
+- Consultation des modifications non commitées : fichiers indexés, non indexés et non suivis, avec leurs diffs en lecture seule. Le statut est actualisé à l’ouverture du dépôt, au retour du focus dans l’application et par une actualisation manuelle. Aucun bouton ne permet de préparer un fichier pour un commit, de désindexer un fichier ou de créer un commit.
 - Fichiers ajoutés en vert, supprimés en rouge, modifiés en jaune et renommés en bleu, dans les trois thèmes.
+- Icônes de statut distinctes et chemins compacts dans les listes de fichiers. Les diffs gardent des fonds vert et rouge marqués, avec une coloration syntaxique préchargée progressivement pour le commit ou les modifications non commitées sélectionnés ; le texte ordinaire reste clair. Les fichiers indexés et non indexés sont préparés séparément et chaque actualisation invalide les anciens patches et couleurs.
+- Le bouton « + » ouvre les dépôts récents dans un nouvel onglet. Les onglets rechargent le dépôt à l’activation ; le loader apparaît seulement si l’ouverture dépasse 500 ms.
 - Un clic sur un fichier ouvre son diff dans la zone centrale, avec les détails et fichiers du commit à droite. La vue compacte reste disponible ; fermer le diff ramène à l’historique à la même position.
 - Le message du commit dispose d’une zone de lecture de hauteur stable et défilable : les titres longs, descriptions et notes de fusion ne déplacent pas les métadonnées ni la liste des fichiers.
 - Aucun loader animé pendant les lectures de commits ou de diffs : le contenu précédent reste affiché jusqu’à ce que la nouvelle sélection soit prête.
@@ -19,6 +25,8 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Trois thèmes mémorisés : **Classique** par défaut, gris/bleu ; **Mangrove**, vert ; **Catppuccin Macchiato**.
 - Fond sombre pour l’historique et les diffs ; Macchiato utilise le même fond que le panneau des détails.
 - Panneaux branches et détails redimensionnables à la souris ou au clavier ; leurs largeurs sont mémorisées et les colonnes de l’historique s’adaptent à l’espace disponible. Double clic sur un séparateur pour réinitialiser.
+- Taille des textes mémorisée : **Cmd/Ctrl + +** (ou **=**) agrandit, **Cmd/Ctrl + −** réduit, **Cmd/Ctrl + 0** rétablit la taille par défaut, augmentée d’un pixel par rapport à la première version du prototype.
+- Le texte des diffs démarre à **11 px**. Les boutons **− / +** dans leur en-tête règlent uniquement cette taille, mémorisée et partagée entre les vues centrale et compacte. Les raccourcis globaux ajustent les deux tailles ; **Cmd/Ctrl + 0** rétablit aussi le diff à 11 px.
 
 Les intégrations authentifiées GitHub/GitLab/Bitbucket, les profils et le SSH restent à implémenter. Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Ce prototype n’effectue ni clone ni fetch et ne contient aucune fonctionnalité d’IA.
 

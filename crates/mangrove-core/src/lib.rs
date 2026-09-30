@@ -1,6 +1,7 @@
 mod cache;
 mod graph;
 pub mod model;
+mod working_tree;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -23,6 +24,7 @@ pub type Result<T> = std::result::Result<T, String>;
 const BATCH_SIZE: usize = 256;
 const MAX_FILE_SIZE: i64 = 2 * 1024 * 1024;
 const MAX_DIFF_LINES: usize = 2_000;
+const MAX_CHANGED_FILES: usize = 5_000;
 const MAX_OPEN_REPOSITORIES: usize = 8;
 
 fn search_cte(include_sha: bool) -> String {
@@ -233,6 +235,11 @@ impl Workspace {
         let mut references = Vec::new();
         for reference in repository.references().map_err(|e| e.to_string())? {
             let reference = reference.map_err(|e| e.to_string())?;
+            // T3 snapshots are operational refs, not history roots. Filtering
+            // here also keeps their updates out of the traversal fingerprint.
+            if reference.name_bytes().starts_with(b"refs/t3/checkpoints/") {
+                continue;
+            }
             if reference.symbolic_target_bytes().is_some() {
                 continue;
             }
@@ -291,7 +298,7 @@ impl Workspace {
         let fingerprint = format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&(3u32, &head_sha, &head_name, &references, &remotes, &shallow))
+                serde_json::to_vec(&(4u32, &head_sha, &head_name, &references, &remotes, &shallow))
                     .map_err(|e| e.to_string())?,
             )
         );
@@ -531,37 +538,9 @@ impl Workspace {
         let author = commit.author();
         let files = diff
             .deltas()
-            .take(5_000)
+            .take(MAX_CHANGED_FILES)
             .enumerate()
-            .map(|(index, delta)| {
-                let new_path = delta.new_file().path().or_else(|| delta.old_file().path());
-                ChangedFile {
-                    index,
-                    path: new_path
-                        .unwrap_or_else(|| Path::new("(sans nom)"))
-                        .to_string_lossy()
-                        .into_owned(),
-                    old_path: if delta.status() == git2::Delta::Renamed {
-                        delta
-                            .old_file()
-                            .path()
-                            .map(|path| path.to_string_lossy().into_owned())
-                    } else {
-                        None
-                    },
-                    status: match delta.status() {
-                        git2::Delta::Added => "added",
-                        git2::Delta::Deleted => "deleted",
-                        git2::Delta::Modified => "modified",
-                        git2::Delta::Renamed => "renamed",
-                        git2::Delta::Copied => "copied",
-                        git2::Delta::Typechange => "typechange",
-                        git2::Delta::Unmodified => "unmodified",
-                        _ => "unknown",
-                    }
-                    .into(),
-                }
-            })
+            .map(|(index, delta)| changed_file(index, &delta))
             .collect();
         Ok(CommitDetails {
             sha: commit.id().to_string(),
@@ -582,86 +561,19 @@ impl Workspace {
         if file_index >= diff.deltas().len() {
             return Err("Fichier introuvable dans ce commit.".into());
         }
-        let Some(patch) = git2::Patch::from_diff(&diff, file_index).map_err(|e| e.to_string())?
-        else {
-            return Ok(FileDiff {
-                binary: true,
-                truncated: false,
-                additions: 0,
-                deletions: 0,
-                hunks: vec![],
-            });
-        };
-        // libgit2 marks files above max_size as binary to skip processing. Expose
-        // that size guard as a truncated diff instead of mislabelling text files.
-        if patch
-            .delta()
-            .old_file()
-            .size()
-            .max(patch.delta().new_file().size())
-            > MAX_FILE_SIZE as u64
-        {
-            return Ok(FileDiff {
-                binary: false,
-                truncated: true,
-                additions: 0,
-                deletions: 0,
-                hunks: vec![],
-            });
-        }
-        if patch.delta().flags().contains(git2::DiffFlags::BINARY) {
-            return Ok(FileDiff {
-                binary: true,
-                truncated: false,
-                additions: 0,
-                deletions: 0,
-                hunks: vec![],
-            });
-        }
-        let (_, additions, deletions) = patch.line_stats().map_err(|e| e.to_string())?;
-        let mut result = FileDiff {
-            binary: false,
-            truncated: false,
-            additions,
-            deletions,
-            hunks: vec![],
-        };
-        let mut count = 0;
-        let mut bytes = 0;
-        'hunks: for index in 0..patch.num_hunks() {
-            let (hunk, lines) = patch.hunk(index).map_err(|e| e.to_string())?;
-            let mut output = DiffHunk {
-                header: String::from_utf8_lossy(hunk.header()).trim_end().into(),
-                lines: Vec::new(),
-            };
-            for line_index in 0..lines {
-                let line = patch
-                    .line_in_hunk(index, line_index)
-                    .map_err(|e| e.to_string())?;
-                if count >= MAX_DIFF_LINES || bytes + line.content().len() > 512 * 1024 {
-                    result.truncated = true;
-                    result.hunks.push(output);
-                    break 'hunks;
-                }
-                count += 1;
-                bytes += line.content().len();
-                output.lines.push(DiffLine {
-                    kind: match line.origin() {
-                        '+' => "addition",
-                        '-' => "deletion",
-                        _ => "context",
-                    }
-                    .into(),
-                    old_line: line.old_lineno(),
-                    new_line: line.new_lineno(),
-                    content: String::from_utf8_lossy(line.content())
-                        .trim_end_matches(['\r', '\n'])
-                        .into(),
-                });
-            }
-            result.hunks.push(output);
-        }
-        Ok(result)
+        render_file_diff(&diff, file_index)
+    }
+
+    pub fn working_tree_status(&self, id: &str) -> Result<WorkingTreeStatus> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        working_tree::status(&repository)
+    }
+
+    pub fn working_tree_diff(&self, id: &str, area: &str, file_key: &str) -> Result<FileDiff> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        working_tree::diff(&repository, area, file_key)
     }
 }
 
@@ -862,11 +774,140 @@ fn index_repository(session: &Session) -> Result<()> {
             transaction.commit().map_err(|e| e.to_string())?;
             session.indexed.store(position, Ordering::Release);
             if exhausted {
+                // Closing SQLite may still checkpoint and remove WAL sidecars.
+                // Publish completion only once those cache writes are finished.
+                drop(connection);
                 session.complete.store(true, Ordering::Release);
                 return Ok(());
             }
         }
         thread::yield_now();
+    }
+}
+
+fn render_file_diff(diff: &git2::Diff<'_>, file_index: usize) -> Result<FileDiff> {
+    let delta = diff.get_delta(file_index).ok_or("Fichier introuvable.")?;
+    if delta.old_file().size().max(delta.new_file().size()) > MAX_FILE_SIZE as u64 {
+        return Ok(FileDiff {
+            binary: false,
+            truncated: true,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    }
+    let Some(patch) = git2::Patch::from_diff(diff, file_index).map_err(|e| e.to_string())? else {
+        return Ok(FileDiff {
+            binary: true,
+            truncated: false,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    };
+    render_patch(patch)
+}
+
+fn render_patch(patch: git2::Patch<'_>) -> Result<FileDiff> {
+    // libgit2 marks files above max_size as binary to skip processing. Expose
+    // that size guard as a truncated diff instead of mislabelling text files.
+    if patch
+        .delta()
+        .old_file()
+        .size()
+        .max(patch.delta().new_file().size())
+        > MAX_FILE_SIZE as u64
+    {
+        return Ok(FileDiff {
+            binary: false,
+            truncated: true,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    }
+    if patch.delta().flags().contains(git2::DiffFlags::BINARY) {
+        return Ok(FileDiff {
+            binary: true,
+            truncated: false,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    }
+    let (_, additions, deletions) = patch.line_stats().map_err(|e| e.to_string())?;
+    let mut result = FileDiff {
+        binary: false,
+        truncated: false,
+        additions,
+        deletions,
+        hunks: vec![],
+    };
+    let mut count = 0;
+    let mut bytes = 0;
+    'hunks: for index in 0..patch.num_hunks() {
+        let (hunk, lines) = patch.hunk(index).map_err(|e| e.to_string())?;
+        let mut output = DiffHunk {
+            header: String::from_utf8_lossy(hunk.header()).trim_end().into(),
+            lines: Vec::new(),
+        };
+        for line_index in 0..lines {
+            let line = patch
+                .line_in_hunk(index, line_index)
+                .map_err(|e| e.to_string())?;
+            if count >= MAX_DIFF_LINES || bytes + line.content().len() > 512 * 1024 {
+                result.truncated = true;
+                result.hunks.push(output);
+                break 'hunks;
+            }
+            count += 1;
+            bytes += line.content().len();
+            output.lines.push(DiffLine {
+                kind: match line.origin() {
+                    '+' => "addition",
+                    '-' => "deletion",
+                    _ => "context",
+                }
+                .into(),
+                old_line: line.old_lineno(),
+                new_line: line.new_lineno(),
+                content: String::from_utf8_lossy(line.content())
+                    .trim_end_matches(['\r', '\n'])
+                    .into(),
+            });
+        }
+        result.hunks.push(output);
+    }
+    Ok(result)
+}
+
+fn changed_file(index: usize, delta: &git2::DiffDelta<'_>) -> ChangedFile {
+    let path = delta.new_file().path().or_else(|| delta.old_file().path());
+    ChangedFile {
+        index,
+        path: path
+            .unwrap_or_else(|| Path::new("(sans nom)"))
+            .to_string_lossy()
+            .into_owned(),
+        old_path: (delta.status() == git2::Delta::Renamed)
+            .then(|| {
+                delta
+                    .old_file()
+                    .path()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .flatten(),
+        status: match delta.status() {
+            git2::Delta::Added | git2::Delta::Untracked => "added",
+            git2::Delta::Deleted => "deleted",
+            git2::Delta::Modified => "modified",
+            git2::Delta::Renamed => "renamed",
+            git2::Delta::Copied => "copied",
+            git2::Delta::Typechange => "typechange",
+            git2::Delta::Unmodified => "unmodified",
+            _ => "unknown",
+        }
+        .into(),
     }
 }
 

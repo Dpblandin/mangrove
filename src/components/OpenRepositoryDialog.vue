@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { AlertCircle, ArrowRight, FolderOpen, LoaderCircle, ShieldCheck, X } from '@lucide/vue'
 import { chooseFolder, desktop } from '../lib/api'
+import { useDelayedBusy } from '../composables/useDelayedBusy'
 
 const props = defineProps<{
   open: boolean
@@ -19,6 +20,7 @@ const input = ref<HTMLInputElement | null>(null)
 const path = ref('')
 const validationError = ref('')
 const choosing = ref(false)
+const busyVisible = useDelayedBusy(() => props.busy)
 
 watch(
   () => props.open,
@@ -94,12 +96,13 @@ async function browse() {
         aria-hidden="true"
         ><FolderOpen :size="25" :stroke-width="1.6"
       /></span>
-      <span class="block text-[9px] font-semibold tracking-[1.6px] text-accent"
+      <span
+        class="block text-[calc(9px_+_var(--font-size-offset))] font-semibold tracking-[1.6px] text-accent"
         >VOTRE HISTORIQUE, EN CLAIR</span
       >
       <h2
         id="repository-dialog-title"
-        class="mt-[9px] mb-2.5 text-[25px] font-medium tracking-[-.65px]"
+        class="mt-[9px] mb-2.5 text-[calc(25px_+_var(--font-size-offset))] font-medium tracking-[-.65px]"
       >
         Ouvrir un dépôt
       </h2>
@@ -109,7 +112,9 @@ async function browse() {
       </p>
 
       <form @submit.prevent="submit">
-        <label for="repository-path" class="mb-[9px] block text-[11px] font-medium"
+        <label
+          for="repository-path"
+          class="mb-[9px] block text-[calc(11px_+_var(--font-size-offset))] font-medium"
           >Chemin du dépôt</label
         >
         <div
@@ -122,7 +127,7 @@ async function browse() {
         >
           <FolderOpen :size="16" class="shrink-0 text-muted" aria-hidden="true" />
           <input
-            class="w-full min-w-0 flex-1 border-0 bg-transparent font-mono text-[11px] text-text outline-none placeholder:text-muted disabled:cursor-wait disabled:opacity-55"
+            class="w-full min-w-0 flex-1 border-0 bg-transparent font-mono text-[calc(11px_+_var(--font-size-offset))] text-text outline-none placeholder:text-muted disabled:cursor-wait disabled:opacity-55"
             id="repository-path"
             ref="input"
             v-model="path"
@@ -140,7 +145,7 @@ async function browse() {
           <button
             v-if="desktop"
             type="button"
-            class="shrink-0 cursor-pointer rounded border border-border bg-surface px-[7px] py-[5px] text-[10px] text-text disabled:cursor-wait disabled:opacity-55"
+            class="shrink-0 cursor-pointer rounded border border-border bg-surface px-[7px] py-[5px] text-[calc(10px_+_var(--font-size-offset))] text-text disabled:cursor-wait disabled:opacity-55"
             :disabled="busy || choosing"
             @click="browse"
           >
@@ -150,14 +155,18 @@ async function browse() {
         <p
           v-if="validationError || error"
           id="repository-error"
-          class="mt-[9px] flex items-start gap-[7px] text-[11px] leading-relaxed text-danger [overflow-wrap:anywhere]"
+          class="mt-[9px] flex items-start gap-[7px] text-[calc(11px_+_var(--font-size-offset))] leading-relaxed text-danger [overflow-wrap:anywhere]"
           role="alert"
         >
           <AlertCircle :size="14" class="mt-0.5 shrink-0" /><span>{{
             validationError || error
           }}</span>
         </p>
-        <p v-else id="repository-path-help" class="mt-[9px] text-[10px] leading-relaxed text-muted">
+        <p
+          v-else
+          id="repository-path-help"
+          class="mt-[9px] text-[calc(10px_+_var(--font-size-offset))] leading-relaxed text-muted"
+        >
           Choisissez le dossier du projet. Les dépôts bare et les worktrees sont aussi pris en
           charge.
         </p>
@@ -166,8 +175,9 @@ async function browse() {
           class="mt-[23px] flex items-start gap-2.5 rounded-[7px] border border-border bg-accent/3 p-3.5"
         >
           <ShieldCheck :size="16" class="mt-0.5 shrink-0 text-accent" />
-          <p class="m-0 text-[11px] leading-relaxed">
-            Votre dépôt reste intact.<br /><span class="text-[10px] text-muted"
+          <p class="m-0 text-[calc(11px_+_var(--font-size-offset))] leading-relaxed">
+            Votre dépôt reste intact.<br /><span
+              class="text-[calc(10px_+_var(--font-size-offset))] text-muted"
               >Mangrove lit votre historique sans modifier vos fichiers ni vos branches.</span
             >
           </p>
@@ -187,11 +197,11 @@ async function browse() {
             :disabled="busy || choosing"
           >
             <LoaderCircle
-              v-if="busy"
+              v-if="busyVisible"
               class="animate-spin motion-reduce:animate-none"
               :size="15"
-            /><span>{{ busy ? 'Ouverture…' : 'Explorer le dépôt' }}</span
-            ><ArrowRight v-if="!busy" :size="15" />
+            /><span>{{ busyVisible ? 'Ouverture…' : 'Explorer le dépôt' }}</span
+            ><ArrowRight v-if="!busyVisible" :size="15" />
           </button>
         </div>
       </form>
@@ -207,6 +217,6 @@ async function browse() {
   backdrop-filter: blur(5px);
 }
 .dialog-button {
-  @apply inline-flex min-h-[37px] cursor-pointer items-center justify-center gap-[9px] rounded-md border px-3.5 text-[11px] font-medium disabled:cursor-wait disabled:opacity-55;
+  @apply inline-flex min-h-[37px] cursor-pointer items-center justify-center gap-[9px] rounded-md border px-3.5 text-[calc(11px_+_var(--font-size-offset))] font-medium disabled:cursor-wait disabled:opacity-55;
 }
 </style>

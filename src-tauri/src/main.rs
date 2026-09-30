@@ -71,6 +71,26 @@ async fn file_diff(
     blocking(move || workspace.file_diff(&session_id, &sha, file_index)).await
 }
 
+#[tauri::command]
+async fn working_tree_status(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+) -> Result<WorkingTreeStatus> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.working_tree_status(&session_id)).await
+}
+
+#[tauri::command]
+async fn working_tree_diff(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    area: String,
+    file_key: String,
+) -> Result<FileDiff> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.working_tree_diff(&session_id, &area, &file_key)).await
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -87,6 +107,8 @@ fn main() {
             commit_position,
             commit_details,
             file_diff,
+            working_tree_status,
+            working_tree_diff,
         ])
         .run(tauri::generate_context!())
         .expect("Unable to start Mangrove");

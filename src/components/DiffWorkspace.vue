@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { ArrowLeft, FileText, X } from '@lucide/vue'
 import DiffViewer from './DiffViewer.vue'
+import DiffFontControls from './DiffFontControls.vue'
 import { count } from '../lib/format'
 import type { ChangedFile, FileDiff } from '../lib/types'
+import type { HighlightedDiff } from '../lib/diffSyntax'
 
 defineProps<{
   file: ChangedFile | null
   diff: FileDiff | null
   loading: boolean
   error: string
+  highlighted?: HighlightedDiff | null
 }>()
 const emit = defineEmits<{ close: [] }>()
 </script>
@@ -18,6 +21,7 @@ const emit = defineEmits<{ close: [] }>()
     <header class="file-heading">
       <FileText :size="15" class="shrink-0 text-muted" />
       <h1 :title="file?.path">{{ file?.path ?? 'Modifications du fichier' }}</h1>
+      <DiffFontControls />
       <button
         class="icon-button"
         aria-label="Fermer le diff"
@@ -37,14 +41,18 @@ const emit = defineEmits<{ close: [] }>()
         <span class="text-danger">−{{ count(diff.deletions) }}</span>
       </span>
     </div>
-    <DiffViewer :file="file" :diff="diff" :loading="loading" :error="error" />
+    <DiffViewer
+      :file="file"
+      :diff="diff"
+      :loading="loading"
+      :error="error"
+      :highlighted="highlighted"
+    />
   </section>
 </template>
 
 <style scoped>
 .diff-workspace {
-  --diff-font-size: 12px;
-  --diff-line-height: 22px;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -66,7 +74,7 @@ const emit = defineEmits<{ close: [] }>()
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: calc(12px + var(--font-size-offset));
   font-weight: 500;
 }
 .diff-toolbar {
@@ -87,7 +95,7 @@ const emit = defineEmits<{ close: [] }>()
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  font-size: 10px;
+  font-size: calc(10px + var(--font-size-offset));
   cursor: pointer;
 }
 .history-button:hover {
@@ -99,7 +107,7 @@ const emit = defineEmits<{ close: [] }>()
 }
 .diff-label {
   color: var(--accent);
-  font-size: 11px;
+  font-size: calc(11px + var(--font-size-offset));
   font-weight: 500;
 }
 .diff-statistics {
@@ -107,6 +115,6 @@ const emit = defineEmits<{ close: [] }>()
   gap: 8px;
   margin-left: auto;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: calc(10px + var(--font-size-offset));
 }
 </style>

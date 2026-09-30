@@ -1,5 +1,7 @@
 import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { request, type GitClient } from '../lib/api'
+import { createCommitDiffCache } from '../lib/diffCache'
+import type { HighlightedDiff } from '../lib/diffSyntax'
 import type {
   ChangedFile,
   CommitDetails,
@@ -18,6 +20,7 @@ type SelectionSnapshot = {
   details: CommitDetails | null
   file: ChangedFile | null
   diff: FileDiff | null
+  tokens: HighlightedDiff | null
   error: string
 }
 
@@ -25,10 +28,12 @@ const emptySnapshot = (): SelectionSnapshot => ({
   details: null,
   file: null,
   diff: null,
+  tokens: null,
   error: '',
 })
 
 export function useRepository(client: GitClient = request) {
+  const diffCache = createCommitDiffCache(client)
   const repository = shallowRef<RepositoryInfo | null>(null)
   const progress = ref<IndexProgress>({ indexed: 0, complete: false, error: null })
   const pages = shallowRef(new Map<number, CommitRow[]>())
@@ -46,6 +51,7 @@ export function useRepository(client: GitClient = request) {
   const detailError = ref('')
   const selectedFile = computed(() => snapshot.value.file)
   const diff = computed(() => snapshot.value.diff)
+  const highlightedDiff = computed(() => snapshot.value.tokens)
   const diffLoading = ref(false)
   const diffError = computed(() => snapshot.value.error)
   let epoch = 0
@@ -53,6 +59,7 @@ export function useRepository(client: GitClient = request) {
   let selectionEpoch = 0
   let diffEpoch = 0
   let navigationEpoch = 0
+  let diffPreloadPaused = false
   let navigating = false
   let requestedIndex: number | null = null
   let desiredQuery = ''
@@ -91,6 +98,7 @@ export function useRepository(client: GitClient = request) {
     diffEpoch += 1
     detailController?.abort()
     diffController?.abort()
+    diffCache.reset(null)
     detailLoading.value = false
     diffLoading.value = false
     detailError.value = ''
@@ -236,8 +244,8 @@ export function useRepository(client: GitClient = request) {
     filter.value = ''
   }
 
-  async function open(path: string) {
-    const generation = ++epoch
+  function close() {
+    epoch += 1
     clearTimeout(poll)
     clearQuery()
     for (const controller of controllers) controller.abort()
@@ -248,6 +256,12 @@ export function useRepository(client: GitClient = request) {
     progress.value = { indexed: 0, complete: false, error: null }
     total.value = 0
     error.value = ''
+    opening.value = false
+  }
+
+  async function open(path: string) {
+    close()
+    const generation = epoch
     opening.value = true
     try {
       const info = await call<RepositoryInfo>('open_repository', { path })
@@ -272,6 +286,7 @@ export function useRepository(client: GitClient = request) {
     if (!repo) return
     cancelNavigation()
     cancelSelectionReads()
+    diffPreloadPaused = false
     const generation = selectionEpoch
     const controller = new AbortController()
     detailController = controller
@@ -285,21 +300,31 @@ export function useRepository(client: GitClient = request) {
         controller,
       )
       if (generation !== selectionEpoch || repo.id !== repository.value?.id) return
+      diffCache.reset({ sessionId: repo.id, sha: row.sha, files: value.files })
       const file = value.files[0] ?? null
       let patch: FileDiff | null = null
+      let patchTokens: HighlightedDiff | null = null
       let patchError = ''
       if (file) {
         const patchController = new AbortController()
         diffController = patchController
         diffLoading.value = true
-        const result = await readFile(repo.id, row.sha, file, patchController)
+        const result = await readFile(row.sha, file, patchController)
         if (generation !== selectionEpoch || repo.id !== repository.value?.id) return
         patch = result.diff
+        patchTokens = result.tokens
         patchError = result.error
       }
-      // Metadata, file identity and patch share one displayed snapshot. The list
+      // Metadata, file identity, patch and colors share one displayed snapshot. The list
       // can express a newer intent while this coherent snapshot remains visible.
-      snapshot.value = { details: value, file, diff: patch, error: patchError }
+      snapshot.value = {
+        details: value,
+        file,
+        diff: patch,
+        tokens: patchTokens,
+        error: patchError,
+      }
+      if (!diffPreloadPaused) diffCache.preload()
     } catch (cause) {
       if (generation === selectionEpoch && !controller.signal.aborted) {
         snapshot.value = emptySnapshot()
@@ -313,22 +338,14 @@ export function useRepository(client: GitClient = request) {
     }
   }
 
-  async function readFile(
-    repositoryId: string,
-    sha: string,
-    file: ChangedFile,
-    controller: AbortController,
-  ) {
+  async function readFile(sha: string, file: ChangedFile, controller: AbortController) {
     try {
-      const value = await call<FileDiff>(
-        'file_diff',
-        { sessionId: repositoryId, sha, fileIndex: file.index },
-        controller,
-      )
-      return { diff: value, error: '' }
+      const value = await diffCache.read(file, controller.signal)
+      return { ...value, error: '' }
     } catch (cause) {
       return {
         diff: null,
+        tokens: null,
         error: `Impossible de lire ${file.path} (${sha.slice(0, 8)}) : ${String(cause)}`,
       }
     }
@@ -353,16 +370,32 @@ export function useRepository(client: GitClient = request) {
     diffController = controller
     diffLoading.value = true
     try {
-      const result = await readFile(repo.id, sha, target, controller)
+      const result = await readFile(sha, target, controller)
       if (
         generation === diffEpoch &&
         repo.id === repository.value?.id &&
         !controller.signal.aborted
       )
-        snapshot.value = { ...snapshot.value, file: target, diff: result.diff, error: result.error }
+        snapshot.value = {
+          ...snapshot.value,
+          file: target,
+          diff: result.diff,
+          tokens: result.tokens,
+          error: result.error,
+        }
     } finally {
       if (generation === diffEpoch) diffLoading.value = false
     }
+  }
+
+  function pauseDiffPreload() {
+    diffPreloadPaused = true
+    diffCache.pause()
+  }
+
+  function resumeDiffPreload() {
+    diffPreloadPaused = false
+    diffCache.preload()
   }
 
   async function loadSelection(index: number, generation: number, repositoryId: string) {
@@ -461,6 +494,7 @@ export function useRepository(client: GitClient = request) {
     cancelNavigation()
     resetPages()
     clearSelection()
+    diffCache.dispose()
     clearTimeout(poll)
     clearTimeout(debounce)
     for (const controller of controllers) controller.abort()
@@ -483,11 +517,15 @@ export function useRepository(client: GitClient = request) {
     detailError,
     selectedFile,
     diff,
+    highlightedDiff,
     diffLoading,
     diffError,
+    pauseDiffPreload,
+    resumeDiffPreload,
     getRow,
     loadPage,
     loadRange,
+    close,
     open,
     select,
     selectIndex,

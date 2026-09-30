@@ -81,6 +81,25 @@ pub struct ChangedFile {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkingTreeFile {
+    /// Lossless identity of the Git path; `file.path` is display text only.
+    pub key: String,
+    #[serde(flatten)]
+    pub file: ChangedFile,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingTreeStatus {
+    pub available: bool,
+    pub staged: Vec<WorkingTreeFile>,
+    pub unstaged: Vec<WorkingTreeFile>,
+    pub staged_count: usize,
+    pub unstaged_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommitDetails {
     pub sha: String,
     pub message: String,

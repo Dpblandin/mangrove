@@ -141,6 +141,7 @@ function keydown(event: KeyboardEvent) {
       ><span>Message du commit</span> <span class="author-column">Auteur</span
       ><span class="date-column">Date</span><span class="sha-column">SHA</span>
     </div>
+    <slot name="working-tree" />
     <div class="list-viewport">
       <div
         ref="container"
@@ -242,7 +243,7 @@ function keydown(event: KeyboardEvent) {
   flex: none;
   padding-right: 14px;
   border-block: 1px solid var(--border);
-  font-size: 10px;
+  font-size: calc(10px + var(--font-size-offset));
   letter-spacing: 0.045em;
   color: var(--muted);
 }
@@ -302,7 +303,7 @@ function keydown(event: KeyboardEvent) {
   border: 0;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
   cursor: pointer;
-  font-size: 11px;
+  font-size: calc(11px + var(--font-size-offset));
   color: var(--muted);
 }
 .commit-row:hover {
@@ -329,7 +330,7 @@ function keydown(event: KeyboardEvent) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 12px;
+  font-size: calc(12px + var(--font-size-offset));
   color: var(--text);
 }
 .ref-badge {
@@ -346,7 +347,7 @@ function keydown(event: KeyboardEvent) {
   color: var(--accent);
   background: var(--accent-soft);
   padding: 3px 5px;
-  font-size: 9px;
+  font-size: calc(9px + var(--font-size-offset));
   flex-shrink: 1;
 }
 .ref-badge > svg {
@@ -381,12 +382,12 @@ function keydown(event: KeyboardEvent) {
   color: var(--text);
   display: grid;
   place-items: center;
-  font-size: 8px;
+  font-size: calc(8px + var(--font-size-offset));
   flex: none;
 }
 .sha-column {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: calc(10px + var(--font-size-offset));
   color: var(--muted);
   text-align: right;
 }
@@ -404,7 +405,7 @@ function keydown(event: KeyboardEvent) {
   gap: 13px;
   pointer-events: none;
   color: var(--muted);
-  font-size: 12px;
+  font-size: calc(12px + var(--font-size-offset));
 }
 .history-empty strong {
   font-weight: 500;

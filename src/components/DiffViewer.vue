@@ -1,17 +1,78 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { AlertCircle, FileText } from '@lucide/vue'
+import { useDiffHighlighting } from '../composables/useDiffHighlighting'
+import type { HighlightedDiff } from '../lib/diffSyntax'
 import type { ChangedFile, FileDiff } from '../lib/types'
 
-defineProps<{
+const props = defineProps<{
   file: ChangedFile | null
   diff: FileDiff | null
   loading: boolean
   error: string
+  highlighted?: HighlightedDiff | null
 }>()
+const viewer = ref<HTMLElement>()
+const generatedTokens = useDiffHighlighting(
+  () => (props.highlighted === undefined ? props.file : null),
+  () => (props.highlighted === undefined ? props.diff : null),
+)
+const tokens = shallowRef<HighlightedDiff | null>(null)
+let deferredTokens: HighlightedDiff | null | undefined
+let selectionDocument: Document | undefined
+
+function selectionTouchesViewer() {
+  const element = viewer.value
+  const selection = element?.ownerDocument.getSelection()
+  if (!element || !selection || selection.isCollapsed) return false
+  for (let index = 0; index < selection.rangeCount; index++) {
+    if (selection.getRangeAt(index).intersectsNode(element)) return true
+  }
+  return false
+}
+
+function publishTokens(value: HighlightedDiff | null) {
+  // Replacing text nodes with token spans would invalidate the native text selection.
+  if (selectionTouchesViewer()) deferredTokens = value
+  else {
+    deferredTokens = undefined
+    tokens.value = value
+  }
+}
+
+function selectionChanged() {
+  if (deferredTokens !== undefined && !selectionTouchesViewer()) {
+    tokens.value = deferredTokens
+    deferredTokens = undefined
+  }
+}
+
+watch(
+  [() => props.file, () => props.diff],
+  () => {
+    tokens.value = null
+    deferredTokens = undefined
+  },
+  { flush: 'sync' },
+)
+watch(
+  () => (props.highlighted === undefined ? generatedTokens.value : props.highlighted),
+  publishTokens,
+  { immediate: true, flush: 'sync' },
+)
+onMounted(() => {
+  selectionDocument = viewer.value?.ownerDocument
+  selectionDocument?.addEventListener('selectionchange', selectionChanged)
+})
+onBeforeUnmount(() => {
+  selectionDocument?.removeEventListener('selectionchange', selectionChanged)
+  deferredTokens = undefined
+})
 </script>
 
 <template>
   <div
+    ref="viewer"
     class="diff-viewer flex min-h-0 min-w-0 flex-1 flex-col bg-reading"
     role="region"
     aria-label="Modifications du fichier"
@@ -38,9 +99,12 @@ defineProps<{
       >
         <div
           v-if="file.oldPath && file.oldPath !== file.path"
-          class="border-b border-border px-[17px] py-[13px] text-[11px] leading-relaxed text-muted [overflow-wrap:anywhere]"
+          class="border-b border-border px-[17px] py-[13px] text-[calc(11px_+_var(--font-size-offset))] leading-relaxed text-muted [overflow-wrap:anywhere]"
         >
-          Renommé depuis <code class="font-mono text-[10px]">{{ file.oldPath }}</code>
+          Renommé depuis
+          <code class="font-mono text-[calc(10px_+_var(--font-size-offset))]">{{
+            file.oldPath
+          }}</code>
         </div>
         <div
           v-for="(hunk, hunkIndex) in diff.hunks"
@@ -55,7 +119,7 @@ defineProps<{
           <div
             v-for="(line, lineIndex) in hunk.lines"
             :key="lineIndex"
-            class="diff-line flex min-h-5 min-w-max whitespace-pre"
+            class="diff-line flex min-w-max whitespace-pre"
             :class="line.kind"
           >
             <span
@@ -73,19 +137,28 @@ defineProps<{
               aria-hidden="true"
               >{{ line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' ' }}</span
             >
-            <code class="pr-[15px] [font:inherit]">{{ line.content.replace(/\r?\n$/, '') }}</code>
+            <code class="pr-[15px] [font:inherit]"
+              ><template v-if="tokens?.[hunkIndex]?.[lineIndex]"
+                ><span
+                  v-for="(token, tokenIndex) in tokens[hunkIndex]![lineIndex]"
+                  :key="tokenIndex"
+                  :class="`syntax-${token.kind}`"
+                  >{{ token.content }}</span
+                ></template
+              ><template v-else>{{ line.content.replace(/\r?\n$/, '') }}</template></code
+            >
           </div>
         </div>
         <div
           v-if="!diff.hunks.length && !diff.truncated"
-          class="px-[17px] py-[13px] text-[11px] leading-relaxed text-muted [overflow-wrap:anywhere]"
+          class="px-[17px] py-[13px] text-[calc(11px_+_var(--font-size-offset))] leading-relaxed text-muted [overflow-wrap:anywhere]"
         >
           Aucune différence de contenu texte. Le changement peut concerner le nom ou les permissions
           du fichier.
         </div>
         <div
           v-if="diff.truncated"
-          class="sticky left-0 flex max-w-full items-start gap-2 bg-reading px-[17px] py-[13px] text-[10px] leading-relaxed text-warning"
+          class="sticky left-0 flex max-w-full items-start gap-2 bg-reading px-[17px] py-[13px] text-[calc(10px_+_var(--font-size-offset))] leading-relaxed text-warning"
         >
           <AlertCircle :size="14" class="mt-0.5 shrink-0" /><span
             >Aperçu limité pour préserver la réactivité. Le fichier est volumineux ou le diff
@@ -104,7 +177,7 @@ defineProps<{
 @reference '../style.css';
 
 .diff-state {
-  @apply flex flex-1 flex-col items-center justify-center gap-2.5 p-[22px] text-center text-[11px] text-muted;
+  @apply flex flex-1 flex-col items-center justify-center gap-2.5 p-[22px] text-center text-[calc(11px_+_var(--font-size-offset))] text-muted;
 }
 .diff-state p {
   @apply m-0 max-w-[260px] leading-relaxed [overflow-wrap:anywhere];
@@ -114,23 +187,56 @@ defineProps<{
 }
 .diff-hunk {
   font-size: var(--diff-font-size, 11px);
-  line-height: var(--diff-line-height, 20px);
+  line-height: 1.7;
 }
 .diff-hunk:first-child .hunk-header {
   border-top: 0;
 }
+.diff-viewer ::selection {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text);
+}
 .diff-line.addition {
-  background: color-mix(in srgb, var(--success) 9%, var(--reading-bg));
+  background: var(--diff-addition-bg);
 }
 .diff-line.deletion {
-  background: color-mix(in srgb, var(--danger) 9%, var(--reading-bg));
+  background: var(--diff-deletion-bg);
 }
-.addition .line-sign,
-.addition code {
+.diff-line.addition > span:not(.line-sign),
+.diff-line.deletion > span:not(.line-sign) {
+  color: var(--text);
+}
+.addition .line-sign {
   color: var(--success);
 }
-.deletion .line-sign,
-.deletion code {
+.diff-line code {
+  color: var(--text);
+}
+.deletion .line-sign {
   color: var(--danger);
+}
+.syntax-keyword {
+  color: var(--syntax-keyword);
+}
+.syntax-string {
+  color: var(--syntax-string);
+}
+.syntax-comment {
+  color: var(--syntax-comment);
+}
+.syntax-number {
+  color: var(--syntax-number);
+}
+.syntax-type {
+  color: var(--syntax-type);
+}
+.syntax-function {
+  color: var(--syntax-function);
+}
+.syntax-punctuation {
+  color: var(--syntax-punctuation);
+}
+.syntax-property {
+  color: var(--syntax-property);
 }
 </style>

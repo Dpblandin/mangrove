@@ -10,6 +10,8 @@
     "allow-list-commits",
     "allow-commit-position",
     "allow-commit-details",
-    "allow-file-diff"
+    "allow-file-diff",
+    "allow-working-tree-status",
+    "allow-working-tree-diff"
   ]
 }

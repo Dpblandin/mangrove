@@ -71,6 +71,21 @@ export interface ChangedFile {
   status: FileStatus
 }
 
+export type WorkingTreeArea = 'staged' | 'unstaged'
+
+export interface WorkingTreeFile extends ChangedFile {
+  /** Opaque identity of the raw Git path; path is only its display label. */
+  key: string
+}
+
+export interface WorkingTreeStatus {
+  available: boolean
+  staged: WorkingTreeFile[]
+  unstaged: WorkingTreeFile[]
+  stagedCount: number
+  unstagedCount: number
+}
+
 export interface CommitDetails {
   sha: string
   message: string

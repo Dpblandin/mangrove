@@ -7,6 +7,8 @@ fn main() {
             "commit_position",
             "commit_details",
             "file_diff",
+            "working_tree_status",
+            "working_tree_diff",
         ]),
     ))
     .expect("Unable to prepare the read-only desktop permissions");

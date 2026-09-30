@@ -8,8 +8,12 @@ use std::{
 };
 
 use git2::{Oid, Repository, Signature, Time};
-use mangrove_core::{model::RepositoryInfo, Workspace};
+use mangrove_core::{
+    model::{Reference, RepositoryInfo},
+    Workspace,
+};
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -120,8 +124,10 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, FileState> {
             )
         } else if metadata.is_dir() {
             ("directory", vec![])
-        } else {
+        } else if metadata.is_file() {
             ("file", fs::read(path).unwrap())
+        } else {
+            ("special", vec![])
         };
         entries.insert(
             path.strip_prefix(root).unwrap().to_path_buf(),
@@ -913,4 +919,937 @@ fn removing_shallow_boundaries_rebuilds_history_and_effective_parents_without_re
             .parents,
         [middle.to_string()]
     );
+}
+
+#[test]
+fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
+    let fixture = Fixture::new();
+    let root = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
+    let visible = commit(
+        &fixture.repository,
+        "T3 checkpoint visible on a real branch",
+        &[root],
+        &[],
+        Some("HEAD"),
+    );
+    let hidden = commit(
+        &fixture.repository,
+        "technical-only-snapshot",
+        &[root],
+        &[],
+        Some("refs/t3/checkpoints/session/turn/1"),
+    );
+    fixture
+        .repository
+        .reference("refs/t3/checkpoints/session/shared", visible, false, "test")
+        .unwrap();
+    fixture
+        .repository
+        .reference("refs/heads/t3/checkpoints-feature", visible, false, "test")
+        .unwrap();
+    let backup = commit(
+        &fixture.repository,
+        "neighboring backup commit",
+        &[root],
+        &[],
+        Some("refs/t3/checkpoints-backup/session"),
+    );
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    assert!(info
+        .references
+        .iter()
+        .all(|reference| !reference.name.starts_with("refs/t3/checkpoints/")));
+    assert!(info
+        .references
+        .iter()
+        .any(|reference| reference.name == "refs/heads/t3/checkpoints-feature"));
+    assert!(info
+        .references
+        .iter()
+        .any(|reference| reference.name == "refs/t3/checkpoints-backup/session"));
+    let page = workspace.list_commits(&info.id, 0, 100, "").unwrap();
+    assert_eq!(page.total, 3);
+    assert!(page
+        .commits
+        .iter()
+        .any(|row| row.sha == visible.to_string()));
+    assert!(page.commits.iter().any(|row| row.sha == backup.to_string()));
+    assert!(page.commits.iter().all(|row| row.graph.width <= 2));
+    for query in [
+        "neighboring backup commit",
+        "refs/t3/checkpoints-backup/session",
+        &backup.to_string(),
+    ] {
+        let result = workspace.list_commits(&info.id, 0, 100, query).unwrap();
+        assert_eq!(result.total, 1, "{query}");
+        assert_eq!(result.commits[0].sha, backup.to_string(), "{query}");
+    }
+    for query in [
+        "technical-only-snapshot",
+        "refs/t3/checkpoints/session/turn/1",
+        &hidden.to_string(),
+    ] {
+        assert_eq!(
+            workspace
+                .list_commits(&info.id, 0, 100, query)
+                .unwrap()
+                .total,
+            0,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        workspace
+            .list_commits(&info.id, 0, 100, "T3 checkpoint visible")
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(
+        workspace
+            .commit_position(&info.id, &hidden.to_string())
+            .unwrap(),
+        None
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+    let database = cache_database(&fixture.cache);
+    let connection = Connection::open(&database).unwrap();
+    let run: String = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'index_run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    commit(
+        &fixture.repository,
+        "technical-only-new-snapshot",
+        &[hidden],
+        &[],
+        Some("refs/t3/checkpoints/session/turn/2"),
+    );
+    fixture
+        .repository
+        .find_reference("refs/t3/checkpoints/session/turn/1")
+        .unwrap()
+        .delete()
+        .unwrap();
+    let before = snapshot(&fixture.source);
+    let same = fixture.open(&workspace);
+    assert_eq!(same.id, info.id);
+    assert!(same.index.complete);
+    assert_eq!(same.index.indexed, 3);
+    assert_eq!(
+        run,
+        connection
+            .query_row::<String, _, _>(
+                "SELECT value FROM meta WHERE key = 'index_run'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap()
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn legacy_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
+    let fixture = Fixture::new();
+    let root = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
+    let main = commit(
+        &fixture.repository,
+        "main change",
+        &[root],
+        &[],
+        Some("HEAD"),
+    );
+    let checkpoint = commit(
+        &fixture.repository,
+        "legacy-only-checkpoint",
+        &[root],
+        &[],
+        Some("refs/heads/legacy-checkpoint-cache"),
+    );
+    let legacy = {
+        // Load the same three commits the old engine would have reached from a
+        // technical ref, exercising its real persistence and graph creation.
+        let workspace = fixture.workspace();
+        let info = fixture.open(&workspace);
+        finish(&workspace, &info.id);
+        assert_eq!(
+            workspace.list_commits(&info.id, 0, 100, "").unwrap().total,
+            3
+        );
+        info
+    };
+    fixture
+        .repository
+        .find_reference("refs/heads/legacy-checkpoint-cache")
+        .unwrap()
+        .delete()
+        .unwrap();
+    let technical = fixture
+        .repository
+        .reference(
+            "refs/t3/checkpoints/session/turn/1",
+            checkpoint,
+            false,
+            "test",
+        )
+        .unwrap();
+    let mut references: Vec<_> = legacy
+        .references
+        .iter()
+        .filter(|reference| reference.name != "refs/heads/legacy-checkpoint-cache")
+        .cloned()
+        .collect();
+    let technical = Reference {
+        name: technical.name().unwrap().into(),
+        label: technical.shorthand().unwrap().into(),
+        kind: "other".into(),
+        sha: checkpoint.to_string(),
+    };
+    references.push(technical.clone());
+    references.sort_by(|left, right| left.name.cmp(&right.name));
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                3u32,
+                &legacy.head,
+                &legacy.head_name,
+                &references,
+                &legacy.remotes,
+                vec![Vec::<u8>::new()]
+            ))
+            .unwrap()
+        )
+    );
+    let database = cache_database(&fixture.cache);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'fingerprint'",
+            [&fingerprint],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM refs WHERE name = 'refs/heads/legacy-checkpoint-cache'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO refs(name, label, sha) VALUES(?1, ?2, ?3)",
+            rusqlite::params![technical.name, technical.label, technical.sha],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM walk", [], |row| row.get(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM search WHERE search MATCH 'legacy'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    assert!(!info.index.complete);
+    finish(&workspace, &info.id);
+    let page = workspace.list_commits(&info.id, 0, 100, "").unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.commits[0].sha, main.to_string());
+    assert!(page.commits.iter().all(|row| row.graph.width == 1));
+    assert!(info
+        .references
+        .iter()
+        .all(|reference| !reference.name.starts_with("refs/t3/checkpoints/")));
+    for query in [
+        "legacy-only-checkpoint",
+        "refs/t3/checkpoints/session/turn/1",
+        &checkpoint.to_string(),
+    ] {
+        assert_eq!(
+            workspace
+                .list_commits(&info.id, 0, 100, query)
+                .unwrap()
+                .total,
+            0,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        workspace
+            .commit_position(&info.id, &checkpoint.to_string())
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM search WHERE search MATCH 'legacy'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM refs WHERE name LIKE 'refs/t3/checkpoints/%'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+fn working_key(path: &str) -> String {
+    path.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn checkout_head(fixture: &Fixture) {
+    let mut options = git2::build::CheckoutBuilder::new();
+    options.force();
+    fixture
+        .repository
+        .checkout_head(Some(&mut options))
+        .unwrap();
+}
+
+fn patch_text(diff: &mangrove_core::model::FileDiff) -> String {
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .map(|line| format!("{}:{}", line.kind, line.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn working_tree_separates_staged_unstaged_untracked_renames_and_preserves_the_source() {
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "baseline",
+        &[],
+        &[
+            ("both.txt", b"initial\n"),
+            ("deleted.txt", b"deleted baseline\n"),
+            ("staged-old.txt", b"staged rename baseline\n"),
+            ("unstaged-old.txt", b"unstaged rename baseline\n"),
+            ("binary.dat", b"\0\x01"),
+            (".gitignore", b"ignored.txt\n"),
+        ],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    fs::write(fixture.source.join("both.txt"), b"staged\n").unwrap();
+    fs::rename(
+        fixture.source.join("staged-old.txt"),
+        fixture.source.join("staged-new.txt"),
+    )
+    .unwrap();
+    let mut index = fixture.repository.index().unwrap();
+    index.add_path(Path::new("both.txt")).unwrap();
+    index.remove_path(Path::new("staged-old.txt")).unwrap();
+    index.add_path(Path::new("staged-new.txt")).unwrap();
+    index.write().unwrap();
+    fs::write(fixture.source.join("both.txt"), b"worktree\n").unwrap();
+    fs::write(fixture.source.join("binary.dat"), b"\0\x02\x03").unwrap();
+    fs::write(
+        fixture.source.join("untracked.txt"),
+        b"untracked addition\n",
+    )
+    .unwrap();
+    fs::write(fixture.source.join("ignored.txt"), b"ignored content\n").unwrap();
+    fs::remove_file(fixture.source.join("deleted.txt")).unwrap();
+    fs::rename(
+        fixture.source.join("unstaged-old.txt"),
+        fixture.source.join("unstaged-new.txt"),
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert!(status.available);
+    assert_eq!(status.staged_count, 2);
+    assert_eq!(status.unstaged_count, 5);
+    for (files, path, expected, old) in [
+        (&status.staged, "both.txt", "modified", None),
+        (
+            &status.staged,
+            "staged-new.txt",
+            "renamed",
+            Some("staged-old.txt"),
+        ),
+        (&status.unstaged, "both.txt", "modified", None),
+        (&status.unstaged, "deleted.txt", "deleted", None),
+        (
+            &status.unstaged,
+            "unstaged-new.txt",
+            "renamed",
+            Some("unstaged-old.txt"),
+        ),
+        (&status.unstaged, "untracked.txt", "added", None),
+    ] {
+        let file = files.iter().find(|file| file.file.path == path).unwrap();
+        assert_eq!(file.file.status, expected, "{path}");
+        assert_eq!(file.file.old_path.as_deref(), old, "{path}");
+    }
+    assert!(status
+        .unstaged
+        .iter()
+        .all(|file| file.file.path != "ignored.txt"));
+    let staged = workspace
+        .working_tree_diff(&info.id, "staged", &working_key("both.txt"))
+        .unwrap();
+    let unstaged = workspace
+        .working_tree_diff(&info.id, "unstaged", &working_key("both.txt"))
+        .unwrap();
+    assert!(patch_text(&staged).contains("deletion:initial"));
+    assert!(patch_text(&staged).contains("addition:staged"));
+    assert!(patch_text(&unstaged).contains("deletion:staged"));
+    assert!(patch_text(&unstaged).contains("addition:worktree"));
+    assert!(
+        workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key("binary.dat"))
+            .unwrap()
+            .binary
+    );
+    assert!(patch_text(
+        &workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key("deleted.txt"))
+            .unwrap()
+    )
+    .contains("deletion:deleted baseline"));
+    assert!(patch_text(
+        &workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key("untracked.txt"))
+            .unwrap()
+    )
+    .contains("addition:untracked addition"));
+    for (area, files) in [("staged", &status.staged), ("unstaged", &status.unstaged)] {
+        for file in files {
+            workspace
+                .working_tree_diff(&info.id, area, &file.key)
+                .unwrap();
+        }
+    }
+    assert_eq!(before, snapshot(&fixture.source));
+
+    // Adding an earlier-sorted entry must not redirect a selection by index.
+    fs::write(fixture.source.join("aaa-new.txt"), b"different file\n").unwrap();
+    let before = snapshot(&fixture.source);
+    assert!(patch_text(
+        &workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key("untracked.txt"))
+            .unwrap()
+    )
+    .contains("addition:untracked addition"));
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn working_tree_supports_unborn_branches_and_reports_bare_repositories_unavailable() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.join("first.txt"), b"staged first file\n").unwrap();
+    let mut index = fixture.repository.index().unwrap();
+    index.add_path(Path::new("first.txt")).unwrap();
+    index.write().unwrap();
+    fs::write(fixture.source.join("first.txt"), b"unstaged first file\n").unwrap();
+    fs::write(fixture.source.join("new.txt"), b"untracked first file\n").unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert!(status.available);
+    assert_eq!(status.staged_count, 1);
+    assert_eq!(status.unstaged_count, 2);
+    assert_eq!(status.staged[0].file.status, "added");
+    assert!(patch_text(
+        &workspace
+            .working_tree_diff(&info.id, "staged", &working_key("first.txt"))
+            .unwrap()
+    )
+    .contains("addition:staged first file"));
+    assert!(patch_text(
+        &workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key("first.txt"))
+            .unwrap()
+    )
+    .contains("addition:unstaged first file"));
+    assert_eq!(before, snapshot(&fixture.source));
+    let bare_path = fixture.root.path().join("bare.git");
+    let bare = Repository::init_bare(&bare_path).unwrap();
+    commit(&bare, "bare", &[], &[], Some("HEAD"));
+    let before = snapshot(&bare_path);
+    let info = workspace
+        .open_repository(bare_path.to_str().unwrap())
+        .unwrap();
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert!(!status.available);
+    assert!(status.staged.is_empty());
+    assert!(status.unstaged.is_empty());
+    assert_eq!((status.staged_count, status.unstaged_count), (0, 0));
+    assert!(workspace
+        .working_tree_diff(&info.id, "staged", &working_key("first.txt"))
+        .is_err());
+    assert_eq!(before, snapshot(&bare_path));
+}
+
+#[test]
+fn working_tree_patches_bound_large_content_and_reject_invalid_areas_and_paths() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let oversized = vec![b'x'; 2 * 1024 * 1024 + 1];
+    fs::write(fixture.source.join("large.txt"), &oversized).unwrap();
+    fs::write(
+        fixture.source.join("many.txt"),
+        (0..3000)
+            .map(|number| format!("line {number}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut index = fixture.repository.index().unwrap();
+    index.add_path(Path::new("large.txt")).unwrap();
+    index.write().unwrap();
+    fs::write(
+        fixture.source.join("large.txt"),
+        vec![b'y'; oversized.len()],
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    for area in ["staged", "unstaged"] {
+        let diff = workspace
+            .working_tree_diff(&info.id, area, &working_key("large.txt"))
+            .unwrap();
+        assert!(diff.truncated);
+        assert!(!diff.binary);
+        assert!(diff.hunks.is_empty());
+    }
+    let diff = workspace
+        .working_tree_diff(&info.id, "unstaged", &working_key("many.txt"))
+        .unwrap();
+    assert!(diff.truncated);
+    assert_eq!(
+        diff.hunks
+            .iter()
+            .map(|hunk| hunk.lines.len())
+            .sum::<usize>(),
+        2000
+    );
+    assert!(workspace
+        .working_tree_diff(&info.id, "push", &working_key("large.txt"))
+        .is_err());
+    for path in [
+        "",
+        ".",
+        "..",
+        "../secret",
+        "/etc/passwd",
+        "directory/../secret",
+        "secret\0.txt",
+    ] {
+        for area in ["staged", "unstaged"] {
+            assert!(
+                workspace
+                    .working_tree_diff(&info.id, area, &working_key(path))
+                    .is_err(),
+                "{path:?}"
+            );
+        }
+    }
+    assert!(workspace
+        .working_tree_diff(&info.id, "unstaged", &working_key("absent.txt"))
+        .is_err());
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[cfg(unix)]
+#[test]
+fn working_tree_symlinks_special_files_and_gitlinks_do_not_expose_external_contents() {
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    let fixture = Fixture::new();
+    let root = commit(
+        &fixture.repository,
+        "root",
+        &[],
+        &[("tracked.txt", b"baseline\n")],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    let outside = fixture.root.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(
+        outside.join("secret.txt"),
+        "EXTERNAL SECRET MUST NOT BE READ\n",
+    )
+    .unwrap();
+    symlink(outside.join("secret.txt"), fixture.source.join("link.txt")).unwrap();
+    symlink(&outside, fixture.source.join("escape")).unwrap();
+    fs::remove_file(fixture.source.join("tracked.txt")).unwrap();
+    symlink(
+        outside.join("secret.txt"),
+        fixture.source.join("tracked.txt"),
+    )
+    .unwrap();
+    let _socket = UnixListener::bind(fixture.source.join("socket")).unwrap();
+    let mut index = fixture.repository.index().unwrap();
+    let mut gitlink = index.get_path(Path::new("tracked.txt"), 0).unwrap();
+    gitlink.path = b"vendor".to_vec();
+    gitlink.mode = 0o160000;
+    gitlink.id = root;
+    index.add(&gitlink).unwrap();
+    index.write().unwrap();
+    symlink(&outside, fixture.source.join("vendor")).unwrap();
+    fixture
+        .repository
+        .config()
+        .unwrap()
+        .set_bool("core.symlinks", false)
+        .unwrap();
+    let before = snapshot(&fixture.source);
+    let before_outside = snapshot(&outside);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert!(status
+        .unstaged
+        .iter()
+        .any(|file| file.file.path == "tracked.txt" && file.file.status == "typechange"));
+    assert!(status
+        .unstaged
+        .iter()
+        .all(|file| !file.file.path.starts_with("escape/")));
+    for path in ["link.txt", "tracked.txt"] {
+        let diff = workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key(path))
+            .unwrap();
+        assert!(!patch_text(&diff).contains("EXTERNAL SECRET MUST NOT BE READ"));
+        assert!(patch_text(&diff).contains("secret.txt"), "{path} {diff:?}");
+    }
+    let gitlink = workspace
+        .working_tree_diff(&info.id, "staged", &working_key("vendor"))
+        .unwrap();
+    assert!(patch_text(&gitlink).contains("Subproject commit"));
+    assert!(!patch_text(&gitlink).contains("EXTERNAL SECRET MUST NOT BE READ"));
+    for path in ["escape/secret.txt", "socket", "vendor/secret.txt"] {
+        assert!(
+            workspace
+                .working_tree_diff(&info.id, "unstaged", &working_key(path))
+                .is_err(),
+            "{path}"
+        );
+    }
+    assert_eq!(before, snapshot(&fixture.source));
+    assert_eq!(before_outside, snapshot(&outside));
+}
+
+#[test]
+fn working_tree_conflicts_are_reported_without_modifying_the_index_or_worktree() {
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "baseline",
+        &[],
+        &[("conflict.txt", b"ancestor\n")],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    let mut index = fixture.repository.index().unwrap();
+    let base = index.get_path(Path::new("conflict.txt"), 0).unwrap();
+    index.remove_path(Path::new("conflict.txt")).unwrap();
+    for (stage, content) in [
+        (1, b"ancestor\n".as_slice()),
+        (2, b"ours\n".as_slice()),
+        (3, b"theirs\n".as_slice()),
+    ] {
+        let mut entry = git2::IndexEntry {
+            id: fixture.repository.blob(content).unwrap(),
+            flags: (base.flags & !0x3000) | (stage << 12),
+            path: base.path.clone(),
+            ..base
+        };
+        entry.file_size = content.len() as u32;
+        index.add(&entry).unwrap();
+    }
+    index.write().unwrap();
+    assert!(index.has_conflicts());
+    fs::write(
+        fixture.source.join("conflict.txt"),
+        "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert!(status
+        .staged
+        .iter()
+        .chain(&status.unstaged)
+        .any(|file| file.file.path == "conflict.txt"));
+    for area in ["staged", "unstaged"] {
+        assert!(workspace
+            .working_tree_diff(&info.id, area, &working_key("conflict.txt"))
+            .unwrap_err()
+            .contains("conflit"));
+    }
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[cfg(unix)]
+#[test]
+fn working_tree_unreadable_files_fail_without_refreshing_index_stats() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "baseline",
+        &[],
+        &[("private.txt", b"initial\n")],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    let file = fixture.source.join("private.txt");
+    fs::write(&file, b"unreadable changes\n").unwrap();
+    let before = snapshot(&fixture.source);
+    let permissions = fs::metadata(&file).unwrap().permissions();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o0)).unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    if fs::read(&file).is_err() {
+        assert!(status
+            .unstaged
+            .iter()
+            .any(|entry| entry.file.path == "private.txt"));
+        assert!(workspace
+            .working_tree_diff(&info.id, "unstaged", &working_key("private.txt"))
+            .is_err());
+    }
+    fs::set_permissions(&file, permissions).unwrap();
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn working_tree_status_reports_full_counts_with_bounded_file_lists() {
+    let fixture = Fixture::new();
+    for number in 0..5_001 {
+        fs::write(
+            fixture.source.join(format!("untracked-{number:04}.txt")),
+            b"content\n",
+        )
+        .unwrap();
+    }
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert_eq!(status.unstaged_count, 5_001);
+    assert_eq!(status.unstaged.len(), 5_000);
+    assert_eq!(status.staged_count, 0);
+    assert!(status.staged.is_empty());
+    let json = serde_json::to_value(status).unwrap();
+    assert_eq!(json["unstagedCount"], 5_001);
+    assert_eq!(json["stagedCount"], 0);
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[cfg(unix)]
+#[test]
+fn working_tree_keys_distinguish_non_utf8_names_and_unicode_display_collisions() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let fixture = Fixture::new();
+    let names: [(&[u8], &[u8], &[u8]); 3] = [
+        (b"f\xff.txt", b"raw index\n", b"raw worktree\n"),
+        (
+            "f�.txt".as_bytes(),
+            b"replacement index\n",
+            b"replacement worktree\n",
+        ),
+        (
+            "文件.txt".as_bytes(),
+            b"unicode index\n",
+            b"unicode worktree\n",
+        ),
+    ];
+    let mut index = fixture.repository.index().unwrap();
+    // Some filesystems (including APFS) reject non-UTF8 names. Git's index
+    // still supports them; use an index-only name with a deletion in worktree.
+    for (name, staged, _) in &names[1..] {
+        let path = Path::new(OsStr::from_bytes(name));
+        fs::write(fixture.source.join(path), staged).unwrap();
+        index.add_path(path).unwrap();
+    }
+    let mut raw = index.get_path(Path::new("f�.txt"), 0).unwrap();
+    raw.path = names[0].0.to_vec();
+    raw.id = fixture.repository.blob(names[0].1).unwrap();
+    raw.file_size = names[0].1.len() as u32;
+    index.add(&raw).unwrap();
+    index.write().unwrap();
+    for (name, _, unstaged) in &names[1..] {
+        fs::write(fixture.source.join(OsStr::from_bytes(name)), unstaged).unwrap();
+    }
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert_eq!((status.staged_count, status.unstaged_count), (3, 3));
+    for (area, files) in [("staged", &status.staged), ("unstaged", &status.unstaged)] {
+        let raw = files
+            .iter()
+            .find(|file| file.key == "66ff2e747874")
+            .unwrap();
+        let replacement = files
+            .iter()
+            .find(|file| file.key == "66efbfbd2e747874")
+            .unwrap();
+        assert_eq!(raw.file.path, replacement.file.path);
+        assert_ne!(raw.key, replacement.key);
+        for (name, staged, unstaged) in names {
+            let expected_key: String = name.iter().map(|byte| format!("{byte:02x}")).collect();
+            let file = files.iter().find(|file| file.key == expected_key).unwrap();
+            let diff = workspace
+                .working_tree_diff(&info.id, area, &file.key)
+                .unwrap();
+            let expected = if area == "staged" || name == b"f\xff.txt" {
+                staged
+            } else {
+                unstaged
+            };
+            assert!(
+                patch_text(&diff).contains(std::str::from_utf8(expected).unwrap().trim()),
+                "{area} {file:?}"
+            );
+            if file.key == raw.key {
+                assert!(!patch_text(&diff).contains("replacement"));
+            }
+        }
+    }
+    let json = serde_json::to_value(&status).unwrap();
+    assert!(json["staged"][0]["key"].is_string());
+    assert!(json["staged"][0]["path"].is_string());
+    assert!(json["staged"][0].get("file").is_none());
+    // Display paths and malformed strings are never accepted as identities.
+    for key in ["f�.txt", "66f", "66zz", ""] {
+        assert!(workspace
+            .working_tree_diff(&info.id, "unstaged", key)
+            .is_err());
+    }
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[cfg(unix)]
+#[test]
+fn working_tree_patch_races_never_follow_replaced_leaves_or_parent_directories() {
+    use std::{
+        os::unix::fs::symlink,
+        sync::{atomic::AtomicBool, Arc, Barrier},
+    };
+    for replace_parent in [false, true] {
+        let fixture = Fixture::new();
+        let directory = fixture.source.join("nested");
+        fs::create_dir(&directory).unwrap();
+        let file = directory.join("target.txt");
+        fs::write(&file, b"index baseline\n").unwrap();
+        let mut index = fixture.repository.index().unwrap();
+        index.add_path(Path::new("nested/target.txt")).unwrap();
+        index.write().unwrap();
+        fs::write(&file, b"safe current content\n").unwrap();
+        fixture
+            .repository
+            .config()
+            .unwrap()
+            .set_bool("core.symlinks", false)
+            .unwrap();
+        let outside = fixture.root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let secret = outside.join("target.txt");
+        fs::write(&secret, b"EXTERNAL RACE SECRET MUST NEVER APPEAR\n").unwrap();
+        let outside_before = snapshot(&outside);
+        let index_before = fs::read(fixture.repository.path().join("index")).unwrap();
+        let workspace = fixture.workspace();
+        let info = fixture.open(&workspace);
+        let status = workspace.working_tree_status(&info.id).unwrap();
+        let key = status
+            .unstaged
+            .iter()
+            .find(|entry| entry.file.path == "nested/target.txt")
+            .unwrap()
+            .key
+            .clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_stop = Arc::clone(&stop);
+        let worker_barrier = Arc::clone(&barrier);
+        let temporary = fixture.root.path().join("replacement");
+        let worker = thread::spawn(move || {
+            worker_barrier.wait();
+            while !worker_stop.load(Ordering::Relaxed) {
+                if replace_parent {
+                    fs::rename(&directory, &temporary).unwrap();
+                    symlink(&outside, &directory).unwrap();
+                    thread::yield_now();
+                    fs::remove_file(&directory).unwrap();
+                    fs::rename(&temporary, &directory).unwrap();
+                } else {
+                    symlink(&secret, &temporary).unwrap();
+                    fs::rename(&temporary, &file).unwrap();
+                    thread::yield_now();
+                    fs::write(&temporary, b"safe current content\n").unwrap();
+                    fs::rename(&temporary, &file).unwrap();
+                }
+            }
+        });
+        barrier.wait();
+        let mut exposed_secret = false;
+        for _ in 0..200 {
+            // Concurrent replacements may fail the scan/read safely. Any patch
+            // which succeeds must contain only the pinned file or link text.
+            if let Ok(diff) = workspace.working_tree_diff(&info.id, "unstaged", &key) {
+                exposed_secret |= patch_text(&diff).contains("EXTERNAL RACE SECRET");
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        assert!(!exposed_secret, "replace_parent={replace_parent}");
+        let diff = workspace
+            .working_tree_diff(&info.id, "unstaged", &key)
+            .unwrap();
+        assert!(patch_text(&diff).contains("safe current content"));
+        assert_eq!(
+            index_before,
+            fs::read(fixture.repository.path().join("index")).unwrap()
+        );
+        assert_eq!(
+            outside_before,
+            snapshot(&fixture.root.path().join("outside"))
+        );
+    }
 }
