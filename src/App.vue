@@ -448,10 +448,6 @@ onBeforeUnmount(() => {
         :class="{ compact: leftWidth < 210 }"
         :style="{ width: `${leftWidth}px` }"
       >
-        <div class="brand">
-          <img src="/favicon.svg" width="31" height="31" alt="" />
-          <span>Mangrove</span>
-        </div>
         <div class="workspace-heading">
           <span>ESPACE DE TRAVAIL</span>
         </div>
@@ -805,12 +801,8 @@ onBeforeUnmount(() => {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
 }
-.sidebar.compact .brand,
 .sidebar.compact .sidebar-bottom {
   padding-inline: 14px;
-}
-.sidebar.compact .brand {
-  gap: 9px;
 }
 .sidebar.compact .workspace-heading {
   padding-inline: 14px;

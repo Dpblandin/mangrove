@@ -167,18 +167,6 @@ button {
 .sidebar {
   width: 226px;
 }
-.brand {
-  height: 81px;
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 0 22px;
-}
-.brand > span {
-  font-size: calc(17px + var(--font-size-offset));
-  font-weight: 620;
-  letter-spacing: -0.4px;
-}
 .workspace-heading {
   display: flex;
   align-items: center;
