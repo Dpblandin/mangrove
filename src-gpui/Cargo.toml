@@ -1,0 +1,31 @@
+[package]
+name = "mangrove-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+
+# Independent dependency graph: GPUI does not enter the Tauri workspace.
+[workspace]
+
+[features]
+default = []
+app-benchmark = ["gpui-kit/profiler"]
+
+[dependencies]
+gpui-kit = { version = "=0.7.0", features = ["tree-sitter-languages"] }
+mangrove-core = { path = "../crates/mangrove-core" }
+dirs = "6"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.17.2"
+accesskit = "0.24"
+icu_collator = "=2.3.0"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

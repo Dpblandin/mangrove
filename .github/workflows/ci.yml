@@ -79,3 +79,89 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - name: Check native commands, permissions, and embedded frontend
         run: cargo check --release --locked -p mangrove-desktop --features custom-protocol
+      - name: Build opt-in Tauri benchmark frontend
+        env:
+          VITE_APP_BENCHMARK: '1'
+        run: vp build
+      - name: Check opt-in Tauri benchmark commands, permissions, and embedded frontend
+        run: cargo check --release --locked -p mangrove-desktop --features custom-protocol,app-benchmark
+
+  gpui:
+    name: GPUI / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Linux GPUI dependencies
+        if: runner.os == 'Linux'
+        # https://gpui-kit.com/docs/installation/ (Ubuntu 24.04)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang pkg-config cmake libfontconfig-dev libwayland-dev \
+            libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
+      - name: Check macOS Xcode toolchain
+        if: runner.os == 'macOS'
+        # GPUI Kit 0.7 enables runtime_shaders; no offline Metal compiler is needed.
+        run: |
+          xcode-select -p
+          xcodebuild -version
+      - name: Check Windows MSVC toolchain and CMake
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $activeToolchain = rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0 -or $activeToolchain -notmatch 'msvc') {
+            throw 'GPUI requires the MSVC Rust toolchain and Windows SDK.'
+          }
+          cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'CMake must be available on PATH.' }
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-gpui -> target
+          key: gpui
+      - name: Check GPUI formatting
+        run: cargo fmt --manifest-path src-gpui/Cargo.toml --all --check
+      - name: Lint GPUI production configuration
+        run: cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D warnings
+      - name: Test GPUI production configuration
+        run: cargo test --locked --manifest-path src-gpui/Cargo.toml
+      - name: Lint GPUI benchmark configuration
+        run: cargo clippy --locked --manifest-path src-gpui/Cargo.toml --features app-benchmark --all-targets -- -D warnings
+      - name: Test GPUI benchmark configuration
+        run: cargo test --locked --manifest-path src-gpui/Cargo.toml --features app-benchmark
+
+  gpui-macos-bundle:
+    name: GPUI / macOS production bundle
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check macOS Xcode toolchain
+        # GPUI Kit 0.7 enables runtime_shaders; no offline Metal compiler is needed.
+        run: |
+          xcode-select -p
+          xcodebuild -version
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-gpui -> target
+          key: gpui-release
+      - name: Build the production application bundle
+        run: sh src-gpui/scripts/package-macos.sh
+      - name: Check packaged executable, identity, and original Dock icon
+        run: |
+          test -x src-gpui/target/release/bundle/Mangrove.app/Contents/MacOS/mangrove-gpui
+          test "$(plutil -extract CFBundleIdentifier raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = dev.mangrove.gpui
+          test "$(plutil -extract CFBundleExecutable raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = mangrove-gpui
+          test "$(plutil -extract CFBundleIconFile raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = icon.icns
+          cmp src-tauri/icons/icon.icns src-gpui/target/release/bundle/Mangrove.app/Contents/Resources/icon.icns

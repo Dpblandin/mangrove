@@ -8,9 +8,11 @@ license.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [features]
+app-benchmark = []
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 mangrove-core = { path = "../crates/mangrove-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+serde_json = "1"

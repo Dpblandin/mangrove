@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "app-benchmark",
+  "description": "Opt-in benchmark reporting for the bundled main window; compiled only with the app-benchmark feature.",
+  "windows": ["main"],
+  "permissions": ["allow-app-benchmark-phase", "allow-app-benchmark-report"]
+}

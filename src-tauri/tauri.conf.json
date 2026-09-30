@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "vp run dev:ui",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "vp run build",
+    "beforeBuildCommand": "vp run build:ui",
     "frontendDist": "../dist"
   },
   "app": {

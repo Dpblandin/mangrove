@@ -1933,6 +1933,7 @@ name = "mangrove-desktop"
 version = "0.1.0"
 dependencies = [
  "mangrove-core",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

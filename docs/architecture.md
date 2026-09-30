@@ -1,14 +1,14 @@
-# Architecture du prototype
+# Architecture de Mangrove
 
 ## Application native
 
-Mangrove est une application Tauri 2. Vue 3 et Tailwind CSS 4 composent son interface dans la WebView système. Vite+ sert à installer les dépendances, développer, vérifier, tester et compiler les assets embarqués. Le moteur Git et SQLite tournent dans le processus Rust natif. Aucun serveur HTTP n’est requis en production.
+Mangrove utilise GPUI pour son interface native. `src-gpui` possède un workspace Cargo indépendant et réutilise `crates/mangrove-core` ; la famille `gpui-pre-*` est verrouillée avec GPUI Kit. La version de comparaison utilise Tauri 2, Vue 3 et Tailwind CSS 4 dans la WebView système. Vite+ sert à installer les dépendances, développer, vérifier, tester et compiler les assets embarqués. Le moteur Git et SQLite tournent dans le processus Rust natif. Aucun serveur HTTP n’est requis en production.
 
 ## Contrat de lecture
 
-`Workspace` est le module central du moteur. Il expose les opérations de consultation du dépôt et la récupération des références distantes. L’adaptateur Tauri appelle ce contrat ; les tests et benchmarks l’exercent indépendamment de la fenêtre native.
+`Workspace` est le module central du moteur. Il expose les opérations de consultation du dépôt et la récupération des références distantes. Les vues GPUI et l’adaptateur Tauri appellent ce contrat ; les tests et benchmarks l’exercent indépendamment de la fenêtre native.
 
-Les dix-sept opérations de consultation utilisent `git2` / libgit2, avec les transports réseau désactivés. Elles n’exécutent pas de commande Git ni de hook et ne modifient ni le worktree, ni l’index Git, ni les refs, ni la configuration Git. Les permissions Tauri exposent ces commandes, une commande de fetch et le sélecteur de dossier ; aucun accès shell ou filesystem général n’est accordé à l’interface. Les commandes natives exécutent les opérations sur le pool bloquant, hors du thread d’interface.
+Les opérations de consultation utilisent `git2` / libgit2, avec les transports réseau désactivés. Elles n’exécutent pas de commande Git ni de hook et ne modifient ni le worktree, ni l’index Git, ni les refs, ni la configuration Git. Les permissions Tauri exposent ces commandes, une commande de fetch et le sélecteur de dossier ; aucun accès shell ou filesystem général n’est accordé à l’interface. Les commandes natives exécutent les opérations sur le pool bloquant, hors du thread d’interface.
 
 `fetch_repository` constitue l’opération d’écriture dédiée : elle reçoit un identifiant de session existante, lance le Git installé sur la machine sans shell et récupère chaque remote sauf ceux configurés avec `skipFetchAll`. Les refspecs explicites mettent à jour `refs/remotes/<remote>/*` et les tags suivis, même lorsqu’un remote possède une configuration de miroir ; les branches locales, le worktree, l’index et la configuration restent inchangés. Les hooks, la récursion des sous-modules, la maintenance automatique et le pruning sont désactivés. Les gestionnaires d’identifiants et l’agent SSH existants sont réutilisés sans invite Git interactive. Les objets LFS ne sont pas téléchargés. Une garde native empêche les fetchs concurrents ; chaque remote dispose d’un délai de deux minutes et les diagnostics sont bornés. Un remote en erreur n’empêche pas les suivants de réussir.
 
@@ -23,6 +23,22 @@ Les suppressions de fichiers exclus par `skip-worktree` et les entrées indexée
 Les modifications non commitées sont consultées séparément : les fichiers indexés comparent HEAD à l’index Git (`staged`), les fichiers non indexés comparent l’index au worktree (`unstaged`). Les fichiers non suivis sont présentés avec les fichiers non indexés. Un fichier peut apparaître dans les deux groupes quand des modifications supplémentaires ont suivi sa préparation dans l’index. La lecture d’un diff reçoit le groupe et la clé opaque `fileKey` renvoyée par le statut ; cette clé conserve les octets du chemin Git, indépendamment du nom affiché, y compris pour les noms non UTF-8. Cette lecture ne met pas à jour l’index et n’exécute ni stage, ni unstage, ni commit. Le statut est relu à l’ouverture, au retour du focus dans la fenêtre et sur actualisation manuelle ; il ne dépend pas du cache d’historique. Les limites de contenu et la présentation des fichiers binaires ou des diffs tronqués s’appliquent également à ces lectures. Un dépôt bare expose un statut indisponible (`available: false`), car il n’a pas de worktree.
 
 Les patches non indexés sont construits depuis des buffers lus via des descripteurs de dossier et de fichier, sans suivre les liens des parents ou du fichier final. Un lien symbolique est présenté par sa cible textuelle ; son contenu cible n’est pas ouvert pour produire le patch. Les contrôles de taille portent sur le descripteur effectivement ouvert et la lecture est bornée, même si le fichier grandit. Le scan de statut et la détection des renommages restent assurés par libgit2 ; ces opérations internes peuvent lire ou hacher des fichiers et ne constituent pas une isolation du système de fichiers contre un remplacement concurrent de l’arbre consulté. L’intérieur des sous-modules non indexés n’est pas parcouru.
+
+## Orchestration GPUI
+
+`app::Mangrove` possède une seule session affichée et coordonne les vues natives par leurs événements. Les onglets gardent leur identité, nom et chemin ; les données et caches ne sont pas conservés par onglet. `Tabs` fournit une tentative opaque d’ouverture, qui capture la cible à restaurer et rejette les réponses d’une navigation remplacée. `RepositoryOpenLane` conserve l’ouverture Git physique jusqu’à sa fin et regroupe les demandes sur le dernier intent ; une ancienne ouverture ne peut donc pas renouveler le moteur après une ouverture plus récente.
+
+`HistoryCache` borne l’historique à douze pages de 128 lignes. Les slots de lecture limitent aussi le travail physique à deux pages et une recherche de position, indépendamment des générations d’interface. Les résultats périmés libèrent ces slots et réveillent les demandes courantes sans publier leurs données. Les listes de worktrees et de stashes appliquent la même règle avec une lecture et un dernier intent par liste. Une absence dans une liste de stashes tronquée ne signifie pas une suppression.
+
+`InspectorView` et `FileBrowser` gardent leurs générations et leur lane Git commune. `FilePresentation` publie l’identité du fichier, son patch, ses tokens, le chargement et l’erreur ensemble. Le dernier choix de fichier pendant une actualisation locale est résolu dans le statut frais par clé opaque et zone. `Selection::None` exprime une absence de sélection sans lancer une lecture de SHA vide. Les caches de patches/coloration restent bornés et les réponses d’un ancien statut ne peuvent pas les remplir.
+
+`virtual_scroll` adapte les `ListState` existants à la géométrie complète des lignes. `RowGeometry` arrondit les frontières cumulées du code aux pixels physiques ; les notices de sidebar partent d’estimations affinées par les seules lignes rendues. Le même handle traduit molette, poignée, zoom et révélation d’une ligne, sans deuxième position de défilement. Le rendu reste limité au viewport et ne lit pas le `ListState` depuis son propre callback de lignes.
+
+`RecentMetadata` protège les noms récents par tickets de lecture et invalidation par chemin. `format` partage les formats des SHA, compteurs, initiales et dates françaises entre les vues. Les préférences gardent leur format JSON et leurs emplacements antérieurs.
+
+La fonctionnalité Cargo `app-benchmark` est désactivée par défaut. Elle seule compile le profiler GPUI, les actions de mesure et leurs variables de lancement. Tauri exige également cette fonctionnalité et un build Vue avec `VITE_APP_BENCHMARK=1` ; `setup` ajoute ses permissions avec `add_capability` uniquement sous cette fonctionnalité. Le fichier correspondant reste hors du répertoire de découverte automatique. Le packaging sépare les bundles courants et de mesure. Le [protocole](performance-gpui-protocol.md) distingue les proxys de présentation des mesures communes de CPU et de mémoire.
+
+Les sections suivantes décrivent le moteur partagé et les choix de la version Vue/Tauri de référence, notamment DOM, Canvas et Shiki.
 
 ## Chargement progressif
 
