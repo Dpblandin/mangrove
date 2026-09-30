@@ -192,3 +192,9 @@ pub struct FileBlame {
     pub groups: Vec<BlameGroup>,
     pub limitation: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchResult {
+    pub error: Option<String>,
+}

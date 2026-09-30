@@ -11,6 +11,8 @@ import {
   GitBranch,
   RefreshCw,
   Search,
+  Settings,
+  Download,
   X,
 } from '@lucide/vue'
 import CommitList from './components/CommitList.vue'
@@ -23,15 +25,18 @@ import ReferenceTree from './components/ReferenceTree.vue'
 import WorkingTreeRow from './components/WorkingTreeRow.vue'
 import WorkingTreePanel from './components/WorkingTreePanel.vue'
 import RepositoryTabs from './components/RepositoryTabs.vue'
+import SettingsView from './components/SettingsView.vue'
 import { useRepository } from './composables/useRepository'
 import { useRepositoryTabs } from './composables/useRepositoryTabs'
 import { useWorkingTree } from './composables/useWorkingTree'
 import { usePaneLayout } from './composables/usePaneLayout'
 import { useDelayedBusy } from './composables/useDelayedBusy'
+import { useAutoFetch } from './composables/useAutoFetch'
 import { chooseFolder, desktop } from './lib/api'
 import { count } from './lib/format'
 import { themes, getStoredTheme, setTheme, type ThemeId } from './lib/themes'
 import { handleFontSizeShortcut } from './lib/fontSize'
+import { getStoredAutoFetchInterval, storeAutoFetchInterval } from './lib/autoFetch'
 import type {
   ChangedFile,
   CommitRow,
@@ -65,6 +70,16 @@ const {
   highlightedDiff,
 } = state
 const openingVisible = useDelayedBusy(() => opening.value)
+const showSettings = ref(false)
+const settingsButton = ref<HTMLButtonElement>()
+const autoFetchInterval = ref(getStoredAutoFetchInterval())
+watch(autoFetchInterval, storeAutoFetchInterval)
+const autoFetch = useAutoFetch(repository, autoFetchInterval, state.refresh)
+const { fetching, error: fetchError } = autoFetch
+function dismissError() {
+  error.value = ''
+  fetchError.value = ''
+}
 const selection = ref<'commit' | 'working'>('commit')
 const working = useWorkingTree(repository, undefined, {
   active: () => selection.value === 'working',
@@ -87,7 +102,7 @@ const showWorkingRow = computed(
     (workingStatus.value?.stagedCount ?? 0) + (workingStatus.value?.unstagedCount ?? 0) > 0,
 )
 watch(
-  () => repository.value?.id,
+  () => repository.value?.path,
   () => {
     selection.value = 'commit'
     diffOpen.value = false
@@ -98,6 +113,14 @@ const workingRow = ref<InstanceType<typeof WorkingTreeRow>>()
 const layoutRoot = ref<HTMLElement>()
 const layout = usePaneLayout(layoutRoot)
 const { leftWidth, rightWidth, leftBounds, rightBounds, resizing } = layout
+function openSettings() {
+  if (!showDialog.value && !resizing.value) showSettings.value = true
+}
+async function closeSettings() {
+  showSettings.value = false
+  await nextTick()
+  settingsButton.value?.focus()
+}
 const theme = ref<ThemeId>(getStoredTheme())
 watch(theme, setTheme)
 const diffMode = ref<'central' | 'compact'>('central')
@@ -213,7 +236,8 @@ const collapsedFolders = ref<Record<Reference['kind'], Set<string>>>({
   tag: new Set(),
   other: new Set(),
 })
-const shortcut = /Mac/.test(navigator.platform) ? '⌘' : 'Ctrl'
+const isMac = /Mac/.test(navigator.platform)
+const shortcut = isMac ? '⌘' : 'Ctrl'
 const recent = ref<{ path: string; name: string }[]>([])
 const recentFilter = ref('')
 const recentSearch = ref<HTMLInputElement>()
@@ -266,6 +290,7 @@ const hasReferences = computed(() => groups.value.some((group) => group.referenc
 
 let openingRevision = 0
 async function openPath(path: string, refreshing = false) {
+  if (!refreshing) showSettings.value = false
   const attempt = ++openingRevision
   const previousTabs = tabs.value
   if (!refreshing) interactionRevision++
@@ -331,6 +356,7 @@ function closeTab(id: string) {
 async function openDialog() {
   interactionRevision++
   if (opening.value) return
+  showSettings.value = false
   if (desktop) {
     try {
       const path = await chooseFolder()
@@ -409,12 +435,27 @@ watch(filter, async () => {
 function keyboard(event: KeyboardEvent) {
   if (event.defaultPrevented) return
   if (handleFontSizeShortcut(event)) return
-  if (event.key === 'Escape' && showCentralDiff.value && !resizing.value && !showDialog.value) {
-    event.preventDefault()
-    void closeDiff()
+  if (event.key === 'Escape' && !showDialog.value) {
+    if (showSettings.value) {
+      event.preventDefault()
+      void closeSettings()
+    } else if (showCentralDiff.value && !resizing.value) {
+      event.preventDefault()
+      void closeDiff()
+    }
     return
   }
   if (!event.metaKey && !event.ctrlKey) return
+  if (
+    event.key === ',' &&
+    !event.altKey &&
+    !event.shiftKey &&
+    (isMac ? event.metaKey : event.ctrlKey)
+  ) {
+    event.preventDefault()
+    openSettings()
+    return
+  }
   if (event.key.toLowerCase() === 'o') {
     event.preventDefault()
     void openDialog()
@@ -422,6 +463,7 @@ function keyboard(event: KeyboardEvent) {
   if (event.key.toLowerCase() === 'k' && repository.value) {
     interactionRevision++
     event.preventDefault()
+    showSettings.value = false
     diffOpen.value = false
     void nextTick(() => search.value?.focus())
   }
@@ -439,6 +481,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-dvh min-h-[540px] min-w-[880px] flex-col overflow-hidden">
     <RepositoryTabs
+      v-show="!showSettings"
       :tabs="tabs"
       :active-id="activeTabId"
       @select="activateTab"
@@ -446,6 +489,7 @@ onBeforeUnmount(() => {
       @open="newTab"
     />
     <div
+      v-show="!showSettings"
       ref="layoutRoot"
       :style="{ '--details-width': rightWidth + 'px' }"
       :id="activeTabId ? 'repository-tab-panel' : undefined"
@@ -553,6 +597,27 @@ onBeforeUnmount(() => {
                 {{ item.label }}
               </option>
             </select>
+            <button
+              v-if="repository?.remotes.length"
+              class="icon-button"
+              :disabled="fetching || opening"
+              :aria-busy="fetching"
+              aria-label="Récupérer les références distantes"
+              :title="fetching ? 'Fetch en cours…' : 'Récupérer les références de tous les remotes'"
+              @click="autoFetch.fetchNow"
+            >
+              <Download :size="17" />
+            </button>
+            <button
+              ref="settingsButton"
+              class="icon-button"
+              aria-label="Paramètres"
+              :aria-keyshortcuts="isMac ? 'Meta+,' : 'Control+,'"
+              :title="'Paramètres · ' + shortcut + ' ,'"
+              @click="openSettings"
+            >
+              <Settings :size="17" />
+            </button>
             <button
               class="icon-button"
               :disabled="opening"
@@ -729,9 +794,9 @@ onBeforeUnmount(() => {
               @diff-mode-changed="changeDiffMode"
             />
           </div>
-          <div v-if="error && !showDialog" class="error-toast" role="alert">
-            <span>{{ error }}</span>
-            <button class="icon-button" aria-label="Fermer le message" @click="error = ''">
+          <div v-if="(error || fetchError) && !showDialog" class="error-toast" role="alert">
+            <span class="whitespace-pre-line">{{ error || fetchError }}</span>
+            <button class="icon-button" aria-label="Fermer le message" @click="dismissError">
               <X :size="14" />
             </button>
           </div>
@@ -794,6 +859,7 @@ onBeforeUnmount(() => {
       @close="showDialog = false"
       @submit="openPath"
     />
+    <SettingsView v-if="showSettings" v-model:interval="autoFetchInterval" @back="closeSettings" />
   </div>
 </template>
 

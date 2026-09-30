@@ -22,6 +22,10 @@ export interface RepositoryInfo {
   index: IndexProgress
 }
 
+export interface FetchResult {
+  error: string | null
+}
+
 export interface GraphEdge {
   from: number
   to: number

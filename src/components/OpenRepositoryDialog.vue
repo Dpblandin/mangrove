@@ -176,9 +176,10 @@ async function browse() {
         >
           <ShieldCheck :size="16" class="mt-0.5 shrink-0 text-accent" />
           <p class="m-0 text-[calc(11px_+_var(--font-size-offset))] leading-relaxed">
-            Votre dépôt reste intact.<br /><span
+            Vos fichiers restent intacts.<br /><span
               class="text-[calc(10px_+_var(--font-size-offset))] text-muted"
-              >Mangrove lit votre historique sans modifier vos fichiers ni vos branches.</span
+              >Mangrove ne modifie ni vos fichiers ni votre index. L’auto-fetch actualise les
+              références distantes selon l’intervalle choisi dans les paramètres.</span
             >
           </p>
         </div>

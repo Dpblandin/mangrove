@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Read-only Git commands and a folder picker for the bundled main window.",
+  "description": "Git inspection, remote fetch and a folder picker for the bundled main window.",
   "windows": ["main"],
   "permissions": [
     "dialog:allow-open",
     "allow-open-repository",
+    "allow-fetch-repository",
     "allow-index-status",
     "allow-list-commits",
     "allow-commit-position",

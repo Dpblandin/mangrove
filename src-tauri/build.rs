@@ -2,6 +2,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "open_repository",
+            "fetch_repository",
             "index_status",
             "list_commits",
             "commit_position",
@@ -15,5 +16,5 @@ fn main() {
             "working_tree_diff",
         ]),
     ))
-    .expect("Unable to prepare the read-only desktop permissions");
+    .expect("Unable to prepare the desktop permissions");
 }

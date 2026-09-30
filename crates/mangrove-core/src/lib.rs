@@ -1,4 +1,5 @@
 mod cache;
+mod fetch;
 mod file_browser;
 mod graph;
 pub mod model;
@@ -156,6 +157,7 @@ pub struct Workspace {
     write_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     generation: AtomicU64,
     workers: Arc<IndexPool>,
+    fetch_lock: Mutex<()>,
 }
 
 impl Workspace {
@@ -167,7 +169,17 @@ impl Workspace {
             write_locks: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(1),
             workers: IndexPool::start(),
+            fetch_lock: Mutex::new(()),
         })
+    }
+
+    pub fn fetch_repository(&self, session_id: &str) -> Result<FetchResult> {
+        let session = self.session(session_id)?;
+        let _guard = self
+            .fetch_lock
+            .try_lock()
+            .map_err(|_| "Une récupération des références distantes est déjà en cours.")?;
+        fetch::fetch(&session.source)
     }
 
     pub fn open_repository(&self, path: &str) -> Result<RepositoryInfo> {

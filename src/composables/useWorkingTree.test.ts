@@ -227,6 +227,24 @@ describe('working tree reads', () => {
     expect(state.error.value).toBe('')
   })
 
+  it('retains the local file selection while a fetch renews the same repository session', async () => {
+    const { state, repository, transport } = setup()
+    await ready(state, transport)
+    await display(state, transport)
+    const shownFile = state.selectedFile.value
+    const shownPatch = state.diff.value
+    repository.value = { ...repo('updated'), path: '/tmp/repo' }
+    expect(state.selectedFile.value).toBe(shownFile)
+    expect(state.diff.value).toBe(shownPatch)
+    transport.take('working_tree_status', { sessionId: 'updated' }).resolve(status([], [file()]))
+    await flush()
+    transport.take('working_tree_diff', { sessionId: 'updated' }).resolve(patch(9))
+    await flush()
+    expect(state.selectedFile.value?.key).toBe(shownFile?.key)
+    expect(state.selectedArea.value).toBe('unstaged')
+    expect(state.diff.value?.additions).toBe(9)
+  })
+
   it('keeps area, file and patch together while reading the other area for the same path', async () => {
     const { state, transport } = setup()
     const staged = { ...file(), status: 'added' as const }
