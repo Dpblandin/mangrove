@@ -30,3 +30,9 @@ Les mesures du moteur sur la fixture et sur un dépôt réel de plus de 12 000 c
 ## Portée
 
 La QA interactive porte sur macOS. La CI vérifie le moteur et les commandes natives sur macOS, Linux et Windows ; cela ne remplace pas une QA interactive des deux autres plateformes. Les mesures de performance excluent le rendu, la coloration et l’IPC. Les limites et règles d’actualisation sont décrites dans [repository-context.md](repository-context.md).
+
+## Liste compacte des worktrees
+
+La retouche de présentation est vérifiée dans le navigateur collaboratif avec le composant Vue réel, les styles de l'application et six worktrees synthétiques. Chaque entrée occupe une ligne de **28 px**, nommée par sa branche ; le principal porte une maison, le worktree ouvert reste seul surligné en vert et coché, et la HEAD détachée conserve son SHA court. Les chemins ne figurent plus dans le texte visible de la liste. L'attribut de l'infobulle native contient le nom complet, le répertoire de travail et les éventuels motifs de verrouillage ou d'indisponibilité, également présents dans le libellé accessible.
+
+À **320 px** puis **190 px** de largeur, les noms longs restent tronqués avec une ellipse, les icônes d'état restent visibles et les lignes ne débordent pas. Le clic sur le worktree verrouillé émet toujours son chemin ; Tab puis Entrée ouvrent l'entrée suivante, et Tab ignore l'inscription indisponible. Replier la section retire ses lignes. Les **302 tests Vue** et les contrôles de format, lint et types passent. Cette vérification du composant complète les parcours natifs précédents ; elle ne rejoue pas la lecture Git ni l'ouverture des onglets natifs.

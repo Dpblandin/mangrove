@@ -1,7 +1,16 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, FolderGit2, LockKeyhole, Archive } from '@lucide/vue'
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderGit2,
+  House,
+  Check,
+  LockKeyhole,
+  TriangleAlert,
+  Archive,
+} from '@lucide/vue'
 import { commitDate, shortSha } from '../lib/format'
-import type { WorktreeList, StashList } from '../lib/types'
+import type { WorktreeInfo, WorktreeList, StashList } from '../lib/types'
 defineProps<{
   worktrees: WorktreeList | null
   stashes: StashList | null
@@ -19,11 +28,28 @@ const emit = defineEmits<{
   openWorktree: [path: string]
   selectStash: [sha: string]
 }>()
+
+function worktreeLabel(item: WorktreeInfo) {
+  return item.detached && item.head ? `${item.headName} · ${shortSha(item.head)}` : item.headName
+}
+
+function worktreeDescription(item: WorktreeInfo) {
+  return [
+    item.path,
+    item.primary ? 'Worktree principal' : 'Worktree lié',
+    item.current ? 'Ouvert ici' : '',
+    item.locked !== null ? `Verrouillé : ${item.locked}` : '',
+    item.reason ?? (item.available ? '' : 'Indisponible'),
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
 </script>
 <template>
   <div class="repository-context">
     <button class="group-title" :aria-expanded="worktreesExpanded" @click="emit('toggleWorktrees')">
       <ChevronDown v-if="worktreesExpanded" :size="12" /><ChevronRight v-else :size="12" />
+      <FolderGit2 :size="13" />
       <span>Worktrees</span><small v-if="worktrees">{{ worktrees.worktrees.length }}</small>
     </button>
     <div v-if="worktreesExpanded" :aria-busy="worktreesLoading">
@@ -33,38 +59,38 @@ const emit = defineEmits<{
       <p v-else-if="!worktrees && worktreesLoading" class="context-notice">
         Lecture des worktrees…
       </p>
-      <button
+      <div
         v-for="item in worktrees?.worktrees"
         :key="item.path"
-        class="context-item"
-        :disabled="!item.available"
-        :aria-current="item.current ? 'location' : undefined"
-        :title="[item.path, item.reason, item.locked].filter(Boolean).join('\n')"
-        @click="emit('openWorktree', item.path)"
+        :title="`${worktreeLabel(item)}\n${worktreeDescription(item)}`"
       >
-        <FolderGit2 :size="13" class="shrink-0" />
-        <span
-          ><strong>{{ item.primary ? 'Principal' : item.name }}</strong
-          ><small
-            >{{ item.headName }} ·
-            {{ item.current ? 'ouvert ici' : item.primary ? 'principal' : 'lié' }}</small
-          ><small v-if="item.detached && item.head">{{ shortSha(item.head) }}</small
-          ><small :title="item.path">{{ item.path }}</small
-          ><small :class="{ 'text-warning': !item.available || item.locked !== null }"
-            >{{ item.available ? 'Disponible' : 'Indisponible' }}
-            <template v-if="item.locked !== null"> · verrouillé</template></small
-          ><small v-if="item.locked" class="context-reason text-warning">{{ item.locked }}</small
-          ><small v-if="item.reason" class="context-reason text-warning">{{
-            item.reason
-          }}</small></span
+        <button
+          class="context-item worktree-item"
+          :class="{ current: item.current }"
+          :disabled="!item.available"
+          :aria-current="item.current ? 'location' : undefined"
+          :aria-label="`${worktreeLabel(item)} · ${worktreeDescription(item)}`"
+          @click="emit('openWorktree', item.path)"
         >
-        <LockKeyhole
-          v-if="item.locked !== null"
-          :size="12"
-          :aria-label="`Verrouillé : ${item.locked}`"
-          class="shrink-0 text-warning"
-        />
-      </button>
+          <component :is="item.primary ? House : FolderGit2" :size="13" aria-hidden="true" />
+          <span
+            ><strong>{{ worktreeLabel(item) }}</strong></span
+          >
+          <TriangleAlert
+            v-if="!item.available"
+            :size="12"
+            class="text-warning"
+            aria-hidden="true"
+          />
+          <LockKeyhole
+            v-if="item.locked !== null"
+            :size="12"
+            class="text-warning"
+            aria-hidden="true"
+          />
+          <Check v-if="item.current" :size="12" aria-hidden="true" />
+        </button>
+      </div>
       <p v-if="worktrees?.truncated" class="context-notice">
         Les 256 premiers worktrees sont affichés.
       </p>
@@ -154,9 +180,21 @@ const emit = defineEmits<{
 .context-item .text-warning {
   color: var(--warning);
 }
-.context-item .context-reason {
-  white-space: normal;
-  overflow-wrap: anywhere;
+.worktree-item {
+  align-items: center;
+  height: 28px;
+  padding: 0 15px 0 26px;
+  border-radius: 0;
+}
+.worktree-item > svg {
+  flex-shrink: 0;
+}
+.worktree-item.current {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+}
+.worktree-item.current strong {
+  font-weight: 600;
 }
 .context-notice {
   margin: 8px 12px;

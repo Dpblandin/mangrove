@@ -4,7 +4,7 @@ Mangrove consulte ces données par des commandes natives Rust/git2. La consultat
 
 ## Worktrees
 
-La section Worktrees se charge à son ouverture et présente le worktree principal et les worktrees liés, leur chemin, leur branche ou HEAD détachée, leur disponibilité et leur éventuel verrouillage. Le worktree ouvert porte un indicateur distinct. Un verrou Git interdit certaines opérations de maintenance ; il n'empêche pas la consultation d'un worktree disponible. Les inscriptions dont le dossier manque restent affichées sans réparation ou nettoyage.
+La section Worktrees se charge à son ouverture et présente une ligne compacte par branche, ou HEAD détachée avec son SHA court. Le worktree principal porte une icône de maison ; le worktree ouvert est surligné en vert et coché. Le survol affiche le chemin complet du répertoire de travail, le type de worktree et les éventuels motifs de verrouillage ou d'indisponibilité. Ces informations sont aussi incluses dans le libellé accessible. Les entrées verrouillées ou indisponibles conservent leurs icônes d'état. Un verrou Git interdit certaines opérations de maintenance ; il n'empêche pas la consultation d'un worktree disponible. Les inscriptions dont le dossier manque restent affichées sans réparation ou nettoyage.
 
 Ouvrir une entrée disponible utilise son dossier de travail dans le parcours d'onglets existant. Une entrée déjà ouverte active cet onglet. Chaque worktree conserve son identité de session et son index Git local ; les gardes existantes interdisent un cache applicatif dans le worktree, ses dossiers Git ou le worktree principal. Un dépôt bare indique explicitement qu'il ne possède pas de répertoire de travail.
 
