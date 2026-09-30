@@ -93,6 +93,9 @@ Après la série, conserver `context.hardware`, `context.source_provenance`, les
 ```sh
 python3 -B scripts/benchmark-ui-report.py \
   docs/performance-gpui.json docs/performance-gpui.md
+python3 -B scripts/report-gpui.py
+# Mise en forme des artefacts pour les contrôles du dépôt :
+vp fmt docs/performance-gpui.json docs/performance-gpui.md docs/performance-gpui.html
 ```
 
 Le générateur exige 120 lancements complets et le marqueur de conversion pendant sampling. Le JSON brut conserve les timings et frames ; le Markdown utilise les quantiles déjà calculés, et reporte les hashes exacts du contexte. Les anciennes séries avant migration restent archivées localement et ne sont pas fusionnées avec la série production.

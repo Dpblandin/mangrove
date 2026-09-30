@@ -1,5 +1,5 @@
 {
-  "verified_at": "2026-09-30T23:12:57.758878+00:00",
+  "verified_at": "2026-09-30T23:45:30.480195+00:00",
   "platform": "macOS ARM64",
   "gpui_binary_sha256": "24eb109989353cb753dbc74768ce205fed4a20a87264302ad46c8748f94e2148",
   "gpui_test_count": 74,
@@ -15,9 +15,12 @@
       "bundle_identifier": "dev.mangrove.gpui"
     },
     "tauri": {
-      "sha256": "c1afb19bad06d70f1338c033409d1cbdca14b8d2564f993dded386a07e70be38",
-      "configuration": "release, Vue/Tauri baseline captured before architecture promotion",
-      "captured_on": "2026-09-30"
+      "sha256": "024d8b1fb388806c11885fe6e3ac7815f44bce0a288e59ab041d0bc12c7708f7",
+      "configuration": "release, app-benchmark compiled; normal UI mode without benchmark variables",
+      "captured_on": "2026-09-30T23:45:30.480195+00:00",
+      "bundle_identifier": "dev.mangrove.desktop.benchmark",
+      "source_git_revision": "77b15d5ba5a3671ebeef8f1e8f8384429bc81e58",
+      "display": "main Built-in Retina Display, scale 2"
     }
   },
   "checks": [
@@ -32,125 +35,87 @@
     "external commit refresh: local diff disappears, new first commit bf942f3 selected",
     "invalid repository open: old tabs retained, welcome shows error, navigation recovers",
     "remote branch Solo enter and leave; tab switches preserve repository intent",
-    "macOS NSRunningApplication resolves running production icon"
+    "macOS NSRunningApplication resolves running production icon",
+    "final Tauri bundle: paired history/diff/welcome at identical physical dimensions, same fixture and defaults, auto-fetch off"
   ],
   "captures": {
     "full-blame": {
       "sha256": "d2dff4115333e3a5be6fe989b7b73e4eaec7519e8fe1f9f04c1193ad5c501944",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.664263+00:00",
       "artifact": "gpui"
     },
     "full-clean-refresh": {
       "sha256": "fa6238531d939d41d971616d6633113be11a01eb38d8f09182a08533506f379e",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.723473+00:00",
       "artifact": "gpui"
     },
     "full-diff": {
       "sha256": "17886200b5c45a5c0fd0972a9091df1a4d17ed93d62716aa3f43bf09f6e3663e",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.553151+00:00",
       "artifact": "gpui"
     },
     "full-history": {
       "sha256": "9354eb1de2d34613c3d34de75130fe8aea4ae2c3f308134eafb8b5f2a0222ccd",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.527487+00:00",
       "artifact": "gpui"
     },
     "full-macchiato": {
       "sha256": "77250a52b596d4c2f9e1a9de05f2c08e49659b9a95c2c1faf086c55ee59be061",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.637765+00:00",
       "artifact": "gpui"
     },
     "full-main-clean": {
       "sha256": "a46481a043e5d168a1a2488fbaa1c78c48cc5afb00e667afc0732897a939c1d2",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.695321+00:00",
       "artifact": "gpui"
     },
     "full-mangrove": {
       "sha256": "56505788d9f05fc2906d069e4604ef22f027a4b7a1627baffa6f2b7b387cb3c8",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.606424+00:00",
       "artifact": "gpui"
     },
     "full-sidebar-10000": {
       "sha256": "fa29a67488ccca49240cf4608934529e0faa10abe0633d8a72d0d009fbdaa2d3",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.752113+00:00",
       "artifact": "gpui"
     },
     "full-welcome": {
       "sha256": "4aee5d86567fcb737e8c80337fcde901a0cef41e1033308714e58ed7f7c97d6e",
-      "dimensions": [
-        2880,
-        1840
-      ],
+      "dimensions": [2880, 1840],
       "modified_at": "2026-09-30T23:12:57.577174+00:00",
       "artifact": "gpui"
     },
     "tauri-diff": {
-      "sha256": "5a527fc2873a4c395e6f4476ce7a1395b671075cde3bd6c3d327bb79349f586e",
-      "dimensions": [
-        1440,
-        920
-      ],
-      "modified_at": "2026-09-30T21:18:38.310123+00:00",
+      "sha256": "00b67c1423f0454de8a5849bcbb5897d6899bc8a6469c4ab0ff35647d9625de9",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:45:30.533467+00:00",
       "artifact": "tauri"
     },
     "tauri-history": {
-      "sha256": "84979952527b68999ed31456d2a6a8193c0490117625490cbdc820bd1ad84fb0",
-      "dimensions": [
-        2880,
-        1840
-      ],
-      "modified_at": "2026-09-30T21:18:03.361975+00:00",
+      "sha256": "53df4f3a53a5b174a33f18af6b74eaf641f4711b2d1c7f9cc8943a1f606c342e",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:45:30.508749+00:00",
       "artifact": "tauri"
     },
     "tauri-welcome": {
-      "sha256": "5ffff8de923ec4da9552e89d7a2bcb58a95e315adb7c498f741fdec980dc93d1",
-      "dimensions": [
-        1440,
-        920
-      ],
-      "modified_at": "2026-09-30T22:01:51.403533+00:00",
+      "sha256": "66e732c24b717c4416f0a0d31b0829e49ad26aa81f6fcada24639c72484cab92",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:45:30.557176+00:00",
       "artifact": "tauri"
     }
   },
   "running_icon": {
     "file": "running-app-icon.png",
     "sha256": "db026cdaeddc53e99622342c0f2f5a8302b7ee9ed5f890143fc037076ee441ba",
-    "dimensions": [
-      64,
-      64
-    ],
+    "dimensions": [64, 64],
     "observed_bundle_identifier": "dev.mangrove.gpui"
   }
 }

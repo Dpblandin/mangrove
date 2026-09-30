@@ -37,7 +37,7 @@ Les intégrations de comptes GitHub/GitLab/Bitbucket et les profils restent à i
 
 ## Lancer l’application desktop
 
-Préparer Rust avec rustup et les [prérequis GPUI Kit de votre OS](https://gpui-kit.com/docs/installation/), dont Xcode complet et son compilateur Metal sur macOS. Le toolchain Rust du dépôt est fixé dans `rust-toolchain.toml`.
+Préparer Rust avec rustup et les [prérequis GPUI Kit de votre OS](https://gpui-kit.com/docs/installation/), dont Xcode complet sur macOS (les shaders Metal sont compilés à l’exécution par cette version de GPUI Kit). Le toolchain Rust du dépôt est fixé dans `rust-toolchain.toml`.
 
 ```sh
 cargo run --release --locked --manifest-path src-gpui/Cargo.toml
