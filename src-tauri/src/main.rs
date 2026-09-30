@@ -34,6 +34,11 @@ async fn fetch_repository(
 }
 
 #[tauri::command]
+async fn repository_names(paths: Vec<String>) -> Result<Vec<RepositoryName>> {
+    blocking(move || mangrove_core::repository_names(&paths)).await
+}
+
+#[tauri::command]
 async fn index_status(
     state: State<'_, Arc<Workspace>>,
     session_id: String,
@@ -199,6 +204,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_repository,
             fetch_repository,
+            repository_names,
             index_status,
             list_commits,
             commit_position,

@@ -3673,3 +3673,187 @@ fn two_parent_stashes_preserve_binary_and_large_diff_limits_without_untracked_gr
         .is_err());
     assert_eq!(before, snapshot(&fixture.source));
 }
+
+#[test]
+fn linked_repository_names_follow_branch_unborn_and_detached_head_in_read_only_mode() {
+    let fixture = Fixture::new();
+    let head = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
+    fixture
+        .repository
+        .reference("refs/heads/t3code/issue-4-readable", head, false, "setup")
+        .unwrap();
+    let linked_path = fixture.root.path().join("t3code-fab52430");
+    fixture
+        .repository
+        .worktree("readable", &linked_path, None)
+        .unwrap();
+    let linked = Repository::open(&linked_path).unwrap();
+    linked
+        .set_head("refs/heads/t3code/issue-4-readable")
+        .unwrap();
+    let nested_path = linked_path.join("nested");
+    fs::create_dir(&nested_path).unwrap();
+    let before = snapshot(&fixture.source);
+    let before_linked = snapshot(&linked_path);
+    let paths = vec![nested_path.to_string_lossy().into_owned()];
+    let names = mangrove_core::repository_names(&paths).unwrap();
+    assert_eq!(names[0].path, paths[0]);
+    assert_eq!(
+        names[0].name.as_deref(),
+        Some("repository · t3code/issue-4-readable")
+    );
+    assert!(!fixture.cache.exists());
+    assert_eq!(before, snapshot(&fixture.source));
+    assert_eq!(before_linked, snapshot(&linked_path));
+
+    let workspace = fixture.workspace();
+    for (reference, expected_name) in [
+        (
+            Some("refs/heads/t3code/issue-4-readable"),
+            "repository · t3code/issue-4-readable".into(),
+        ),
+        (
+            Some("refs/heads/t3code/unborn-readable"),
+            "repository · t3code/unborn-readable".into(),
+        ),
+        (
+            None,
+            format!("repository · HEAD détachée · {}", &head.to_string()[..7]),
+        ),
+    ] {
+        if let Some(reference) = reference {
+            linked.set_head(reference).unwrap();
+        } else {
+            linked.set_head_detached(head).unwrap();
+        }
+        let before = snapshot(&fixture.source);
+        let before_linked = snapshot(&linked_path);
+        let info = workspace.open_repository(&paths[0]).unwrap();
+        finish(&workspace, &info.id);
+        let before_cache = snapshot(&fixture.cache);
+        let names = mangrove_core::repository_names(&paths).unwrap();
+        assert_eq!(info.name, expected_name);
+        assert_eq!(names[0].name.as_deref(), Some(info.name.as_str()));
+        assert_eq!(before_cache, snapshot(&fixture.cache));
+        assert_eq!(before, snapshot(&fixture.source));
+        assert_eq!(before_linked, snapshot(&linked_path));
+    }
+}
+
+#[test]
+fn repository_names_keep_main_folder_names_original_paths_and_six_entry_limit() {
+    let fixture = Fixture::new();
+    fixture
+        .repository
+        .set_head("refs/heads/another-branch")
+        .unwrap();
+    let bare_path = fixture.root.path().join("bare.git");
+    Repository::init_bare(&bare_path).unwrap();
+    let missing_path = fixture.root.path().join("missing");
+    let empty_path = fixture.root.path().join("not-a-repository");
+    fs::create_dir(&empty_path).unwrap();
+    let file_path = fixture.root.path().join("plain-file");
+    fs::write(&file_path, b"file contents").unwrap();
+    let nested_path = fixture.source.join("nested");
+    fs::create_dir(&nested_path).unwrap();
+    let paths = vec![
+        fixture.source.to_string_lossy().into_owned(),
+        bare_path.to_string_lossy().into_owned(),
+        missing_path.to_string_lossy().into_owned(),
+        empty_path.to_string_lossy().into_owned(),
+        file_path.to_string_lossy().into_owned(),
+        format!("  {}  ", nested_path.to_string_lossy()),
+    ];
+    let before = snapshot(fixture.root.path());
+    let names = mangrove_core::repository_names(&paths).unwrap();
+    assert_eq!(names.len(), 6);
+    for ((entry, path), expected) in names.iter().zip(&paths).zip([
+        Some("repository"),
+        Some("bare.git"),
+        None,
+        None,
+        None,
+        Some("repository"),
+    ]) {
+        assert_eq!(&entry.path, path);
+        assert_eq!(entry.name.as_deref(), expected);
+    }
+    assert!(serde_json::to_value(&names[2]).unwrap()["name"].is_null());
+    assert!(mangrove_core::repository_names(&[]).unwrap().is_empty());
+    assert!(mangrove_core::repository_names(&vec![paths[0].clone(); 7]).is_err());
+    assert_eq!(before, snapshot(fixture.root.path()));
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    assert_eq!(info.name, "repository");
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_names_return_null_for_inaccessible_repositories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let original_permissions = fs::metadata(&fixture.source).unwrap().permissions();
+    let before = snapshot(&fixture.source);
+    fs::set_permissions(&fixture.source, fs::Permissions::from_mode(0o0)).unwrap();
+    let names = mangrove_core::repository_names(&[fixture.source.to_string_lossy().into_owned()]);
+    fs::set_permissions(&fixture.source, original_permissions).unwrap();
+    let names = names.unwrap();
+    assert!(names[0].name.is_none());
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn linked_repository_names_use_main_workdir_or_bare_repository_for_context() {
+    let root = tempfile::tempdir().unwrap();
+    let primary_path = root.path().join("principal-project");
+    let administration = root.path().join("git-administration");
+    git_at(
+        root.path(),
+        &[
+            "init",
+            "--separate-git-dir",
+            administration.to_str().unwrap(),
+            primary_path.to_str().unwrap(),
+        ],
+    );
+    let primary = Repository::open(&primary_path).unwrap();
+    primary.set_head("refs/heads/main").unwrap();
+    primary
+        .config()
+        .unwrap()
+        .set_str("core.worktree", primary_path.to_str().unwrap())
+        .unwrap();
+    commit(&primary, "root", &[], &[], Some("HEAD"));
+    let linked_path = root.path().join("t3code-012345");
+    primary.worktree("readable", &linked_path, None).unwrap();
+
+    let bare_path = root.path().join("principal.git");
+    let bare = Repository::init_bare(&bare_path).unwrap();
+    bare.set_head("refs/heads/main").unwrap();
+    commit(&bare, "root", &[], &[], Some("HEAD"));
+    let bare_linked_path = root.path().join("t3code-987654");
+    bare.worktree("bare-topic", &bare_linked_path, None)
+        .unwrap();
+
+    let before = snapshot(root.path());
+    let paths = vec![
+        linked_path.to_string_lossy().into_owned(),
+        bare_linked_path.to_string_lossy().into_owned(),
+    ];
+    let names = mangrove_core::repository_names(&paths).unwrap();
+    assert_eq!(
+        names[0].name.as_deref(),
+        Some("principal-project · readable")
+    );
+    assert_eq!(names[1].name.as_deref(), Some("principal.git · bare-topic"));
+    let cache = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new(cache.path()).unwrap();
+    for (path, expected) in paths.iter().zip(&names) {
+        let info = workspace.open_repository(path).unwrap();
+        finish(&workspace, &info.id);
+        assert_eq!(Some(info.name.as_str()), expected.name.as_deref());
+    }
+    assert_eq!(before, snapshot(root.path()));
+}

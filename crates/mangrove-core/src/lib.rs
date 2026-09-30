@@ -30,6 +30,32 @@ const MAX_FILE_SIZE: i64 = 2 * 1024 * 1024;
 const MAX_DIFF_LINES: usize = 2_000;
 const MAX_CHANGED_FILES: usize = 5_000;
 const MAX_OPEN_REPOSITORIES: usize = 8;
+const MAX_REPOSITORY_NAMES: usize = 6;
+
+pub fn repository_names(paths: &[String]) -> Result<Vec<RepositoryName>> {
+    if paths.len() > MAX_REPOSITORY_NAMES {
+        return Err("La lecture des noms est limitée à six dépôts.".into());
+    }
+    Ok(paths
+        .iter()
+        .map(|path| {
+            let name = (|| -> Result<String> {
+                let repository = open_source_repository(path)?;
+                let source = repository
+                    .workdir()
+                    .unwrap_or(repository.path())
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                Ok(repository_display_name(&repository, &source))
+            })()
+            .ok();
+            RepositoryName {
+                path: path.clone(),
+                name,
+            }
+        })
+        .collect())
+}
 
 fn search_cte(include_sha: bool) -> String {
     let sha = if include_sha {
@@ -193,19 +219,10 @@ impl Workspace {
                 "Solo accepte au plus 64 branches, avec des noms de 1 024 octets maximum.".into(),
             );
         }
-        let path = Path::new(path.trim());
-        if !path.is_dir() {
-            return Err("Choisissez un dossier contenant un dépôt Git local.".into());
-        }
         // Read repository state in the same critical section that publishes its
         // session; a delayed open must not replace a newer fingerprint.
         let mut sessions = self.sessions.lock().unwrap();
-        let repository = Repository::open_ext(
-            path,
-            git2::RepositoryOpenFlags::empty(),
-            &[] as &[&std::ffi::OsStr],
-        )
-        .map_err(|e| format!("Impossible d'ouvrir ce dépôt Git : {e}"))?;
+        let repository = open_source_repository(path)?;
         let git_dir = repository
             .path()
             .canonicalize()
@@ -423,11 +440,7 @@ impl Workspace {
                 &key[..16],
                 self.generation.fetch_add(1, Ordering::Relaxed)
             ),
-            name: source
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
+            name: repository_display_name(&repository, &source),
             path: source.to_string_lossy().into_owned(),
             head: head_sha,
             head_name,
@@ -742,6 +755,47 @@ fn is_current(connection: &rusqlite::Connection, session: &Session) -> Result<bo
     Ok(!(session.cancel.load(Ordering::Acquire)
         || cache::meta(connection, "fingerprint")?.as_deref() != Some(&session.fingerprint)
         || cache::meta(connection, "index_run")?.as_deref() != Some(&session.index_run)))
+}
+
+fn open_source_repository(path: &str) -> Result<Repository> {
+    let path = Path::new(path.trim());
+    if !path.is_dir() {
+        return Err("Choisissez un dossier contenant un dépôt Git local.".into());
+    }
+    Repository::open_ext(
+        path,
+        git2::RepositoryOpenFlags::empty(),
+        &[] as &[&std::ffi::OsStr],
+    )
+    .map_err(|e| format!("Impossible d'ouvrir ce dépôt Git : {e}"))
+}
+
+fn repository_display_name(repository: &Repository, source: &Path) -> String {
+    if !repository.is_worktree() {
+        return source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+    }
+    let primary_name = Repository::open(repository.commondir())
+        .ok()
+        .and_then(|primary| {
+            let source = primary
+                .workdir()
+                .unwrap_or(primary.path())
+                .canonicalize()
+                .ok()?;
+            Some(source.file_name()?.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Dépôt".into());
+    let mut name = repository_head_name(repository);
+    if repository.head_detached().unwrap_or(false) {
+        if let Some(head) = repository.head().ok().and_then(|head| head.target()) {
+            name = format!("{name} · {}", &head.to_string()[..7]);
+        }
+    }
+    format!("{primary_name} · {name}")
 }
 
 fn repository_head_name(repository: &Repository) -> String {

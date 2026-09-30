@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Check,
   Focus,
@@ -15,6 +15,7 @@ import {
 import { buildReferenceTree, visibleReferenceRows } from '../lib/referenceTree'
 import { count } from '../lib/format'
 import type { Reference } from '../lib/types'
+import BranchContextMenu from './BranchContextMenu.vue'
 
 const props = defineProps<{
   references: Reference[]
@@ -29,59 +30,13 @@ const emit = defineEmits<{
   toggleFolder: [path: string]
   solo: [reference: Reference]
 }>()
-const menu = ref<{ reference: Reference; x: number; y: number; origin: HTMLElement | null } | null>(
-  null,
-)
-const menuButton = ref<HTMLButtonElement>()
-function closeMenu(restore = false) {
-  if (restore) menu.value?.origin?.focus()
-  menu.value = null
-}
-function outside(event: PointerEvent) {
-  if (!(event.target instanceof Element) || !event.target.closest('.reference-menu')) closeMenu()
-}
+const branchMenu = ref<InstanceType<typeof BranchContextMenu>>()
 function canSolo(reference: Reference) {
   return reference.kind === 'local' || reference.kind === 'remote'
 }
 function openMenu(event: MouseEvent | KeyboardEvent, reference: Reference) {
-  if (!canSolo(reference)) return
-  event.preventDefault()
-  const origin = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
-  const rect = origin?.getBoundingClientRect()
-  menu.value = {
-    reference,
-    origin,
-    x: Math.max(
-      0,
-      Math.min('clientX' in event ? event.clientX : (rect?.left ?? 0), window.innerWidth - 220),
-    ),
-    y: Math.max(
-      0,
-      Math.min('clientY' in event ? event.clientY : (rect?.bottom ?? 0), window.innerHeight - 55),
-    ),
-  }
-  void nextTick(() => menuButton.value?.focus())
+  branchMenu.value?.open(event, [reference])
 }
-function selectSolo() {
-  if (!menu.value) return
-  const reference = menu.value.reference
-  closeMenu(true)
-  emit('solo', reference)
-}
-function menuKeyboard(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    event.stopPropagation()
-    closeMenu(true)
-  } else if (event.key === 'Tab') {
-    closeMenu(true)
-  } else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
-    event.preventDefault()
-    menuButton.value?.focus()
-  }
-}
-onMounted(() => document.addEventListener('pointerdown', outside))
-onBeforeUnmount(() => document.removeEventListener('pointerdown', outside))
 const icons = { local: GitBranch, remote: Globe, tag: Tag, other: Layers }
 const searchCollapsed = ref(new Set<string>())
 watch(
@@ -94,7 +49,7 @@ const searching = computed(() => Boolean(props.filter.trim()))
 const closed = computed(() => (searching.value ? searchCollapsed.value : props.collapsed))
 const tree = computed(() => buildReferenceTree(props.references))
 const rows = computed(() => visibleReferenceRows(tree.value, closed.value))
-watch(rows, () => closeMenu())
+watch(rows, () => branchMenu.value?.close())
 
 function toggle(path: string) {
   if (!searching.value) {
@@ -140,7 +95,7 @@ function toggle(path: string) {
           :aria-label="node.reference.label"
           :aria-haspopup="canSolo(node.reference) ? 'menu' : undefined"
           :aria-expanded="
-            canSolo(node.reference) ? menu?.reference.name === node.reference.name : undefined
+            canSolo(node.reference) ? branchMenu?.isOpen(node.reference.name) : undefined
           "
           @click="emit('select', node.reference)"
           @contextmenu="openMenu($event, node.reference)"
@@ -164,26 +119,12 @@ function toggle(path: string) {
       </div>
     </template>
   </div>
-  <Teleport to="body">
-    <div
-      v-if="menu"
-      class="reference-menu"
-      role="menu"
-      :aria-label="`Actions de la branche ${menu.reference.label}`"
-      :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
-      @keydown="menuKeyboard"
-    >
-      <button ref="menuButton" role="menuitem" @click="selectSolo">
-        <Focus :size="14" />{{
-          soloRefs?.has(menu.reference.name)
-            ? 'Retirer du Solo'
-            : soloRefs?.size
-              ? 'Ajouter au Solo'
-              : 'Solo'
-        }}
-      </button>
-    </div>
-  </Teleport>
+  <BranchContextMenu
+    ref="branchMenu"
+    :references="references"
+    :solo-refs="soloRefs"
+    @solo="emit('solo', $event)"
+  />
 </template>
 <style scoped>
 .reference-leaf {
@@ -206,6 +147,19 @@ function toggle(path: string) {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+.reference-leaf:hover .solo-toggle,
+.reference-leaf:focus-within .solo-toggle {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .solo-toggle {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 .solo-toggle:hover,
 .solo-toggle[aria-pressed='true'],
@@ -214,33 +168,6 @@ function toggle(path: string) {
   background: color-mix(in srgb, var(--warning) 12%, transparent);
 }
 .solo-toggle:focus-visible {
-  outline: 1px solid var(--accent);
-}
-.reference-menu {
-  position: fixed;
-  z-index: 100;
-  min-width: 210px;
-  padding: 5px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-  box-shadow: 0 8px 25px #0008;
-}
-.reference-menu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  font-size: 12px;
-  cursor: pointer;
-}
-.reference-menu button:hover,
-.reference-menu button:focus-visible {
-  background: var(--accent-soft);
   outline: 1px solid var(--accent);
 }
 </style>

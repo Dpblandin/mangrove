@@ -10,6 +10,12 @@ Ouvrir une entrée disponible utilise son dossier de travail dans le parcours d'
 
 La réponse contient au plus 256 entrées, principal compris, et annonce sa troncature. Les lectures de noms et inscriptions sont natives ; aucun processus Git ou shell n'est exécuté par l'application.
 
+## Onglets et dépôts récents
+
+Les onglets et les dépôts récemment ouverts utilisent le même nom lisible : le nom du dépôt principal, ou « dépôt · branche » pour un worktree lié. Une HEAD détachée inclut son SHA court. Les infobulles conservent le nom complet et le chemin source. Le survol ou le focus remplit tout l'onglet, zone de fermeture comprise. Le dépôt principal d'un worktree lié est identifié par Git ; un dossier Git principal séparé doit renseigner `core.worktree` pour que Git retrouve son répertoire de travail externe.
+
+À l'accueil ou dans un nouvel onglet, une lecture native bornée aux six récents actualise leurs anciens noms de dossiers sans ouvrir de session ni lancer d'indexation. Un dépôt manquant conserve son dernier nom connu. Le bouton de retrait enlève seulement l'entrée de cet historique local, sans fermer les onglets ni toucher au dépôt ; rouvrir le dossier l'ajoute à nouveau. Une réponse de métadonnées tardive ne réinsère pas un élément retiré et ne remplace pas le nom d'une ouverture plus récente. Le survol ou le focus remplit toute la carte du dépôt récent.
+
 ## Stashes
 
 La section Stashes se charge à son ouverture. Elle présente au plus les 128 entrées les plus récentes du reflog de `refs/stash`, avec leur message, date, auteur et commit de base. La troncature est annoncée. Un stash est identifié par son SHA, indépendamment de son numéro `stash@{n}`, qui peut changer après une opération externe.
@@ -28,7 +34,9 @@ Les commits techniques de stash restent exclus des racines de l'historique gén�
 
 ## Solo
 
-Le bouton Solo d'une branche locale ou distante, ou son menu contextuel accessible au clavier, ajoute cette référence au filtre. Une branche déjà sélectionnée est retirée ; retirer la dernière restaure l'historique complet. Plusieurs branches forment l'union de leurs historiques. Le bandeau indique les branches sélectionnées et permet de quitter le mode.
+Le bouton Solo d'une branche locale ou distante apparaît au survol de sa ligne dans la sidebar ou au focus clavier ; il reste visible sur les appareils sans survol. Le menu contextuel de la sidebar et le clic droit sur un badge de branche dans le graphe proposent la même action. Le clic droit sur une ligne de commit propose toutes les branches locales ou distantes attachées à ce commit, même celles dont le badge n'est pas affiché, pour choisir explicitement la référence à isoler. Les tags et les commits sans branche attachée ne proposent pas de Solo. Maj + F10 ou la touche Menu ouvrent aussi ces actions depuis le commit sélectionné.
+
+Le menu propose « Solo », « Ajouter au Solo » ou « Retirer du Solo » selon le filtre actuel. Une branche déjà sélectionnée est retirée ; retirer la dernière restaure l'historique complet. Plusieurs branches forment l'union de leurs historiques. Le bandeau indique les branches sélectionnées et permet de quitter le mode. Échap ferme le menu et rend le focus à son origine ; le défilement du graphe ou une actualisation des références ferme les actions périmées. Ouvrir le menu n'altère pas la sélection du commit.
 
 Le moteur parcourt tous les commits accessibles depuis les références sélectionnées, avec tous les parents des merges et les ancêtres communs dédupliqués. Il recalcule les positions et les voies du graphe pour ce parcours. HEAD n'est pas ajouté comme racine lorsque le Solo est actif ; le nom de la branche réellement active reste visible dans l'en-tête. Les modifications locales restent celles du worktree ouvert.
 

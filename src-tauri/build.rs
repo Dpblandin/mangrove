@@ -3,6 +3,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "open_repository",
             "fetch_repository",
+            "repository_names",
             "index_status",
             "list_commits",
             "commit_position",

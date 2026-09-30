@@ -31,6 +31,7 @@ import StashPanel from './components/StashPanel.vue'
 import { useRepositoryContext } from './composables/useRepositoryContext'
 import { useRepository } from './composables/useRepository'
 import { useRepositoryTabs } from './composables/useRepositoryTabs'
+import { useRecentRepositories } from './composables/useRecentRepositories'
 import { useWorkingTree } from './composables/useWorkingTree'
 import { usePaneLayout } from './composables/usePaneLayout'
 import { useDelayedBusy } from './composables/useDelayedBusy'
@@ -268,7 +269,9 @@ function selectCommit(row: CommitRow, index: number) {
   void state.select(row, index)
 }
 function refreshOnFocus() {
-  if (repository.value && !opening.value) void refreshRepository()
+  if (opening.value) return
+  if (repository.value) void refreshRepository()
+  else void recentRepositories.refreshNames()
 }
 async function refreshRepository() {
   const previousRepository = repository.value
@@ -284,7 +287,11 @@ async function refreshRepository() {
   const previousArea = workingArea.value
   const previousDiffOpen = diffOpen.value
   if (!(await state.refresh())) return
-  const sessionId = repository.value?.id
+  const info = repository.value
+  if (!info || info.path !== path || activeTabId.value !== tabId) return
+  if (tabId) repositoryTabs.update(tabId, info)
+  recentRepositories.updateName(info)
+  const sessionId = info.id
   const current = () =>
     repository.value?.path === path &&
     repository.value?.id === sessionId &&
@@ -368,32 +375,32 @@ const collapsedFolders = ref<Record<Reference['kind'], Set<string>>>({
 })
 const isMac = /Mac/.test(navigator.platform)
 const shortcut = isMac ? '⌘' : 'Ctrl'
-const recent = ref<{ path: string; name: string }[]>([])
+const recentRepositories = useRecentRepositories()
+const recent = recentRepositories.entries
 const recentFilter = ref('')
 const recentSearch = ref<HTMLInputElement>()
+const welcomeOpen = ref<HTMLButtonElement>()
 const filteredRecent = computed(() => {
   const text = recentFilter.value.trim().toLocaleLowerCase()
   return recent.value.filter((entry) =>
     `${entry.name} ${entry.path}`.toLocaleLowerCase().includes(text),
   )
 })
-watch(activeTabId, () => {
-  recentFilter.value = ''
-})
-try {
-  const saved: unknown = JSON.parse(localStorage.getItem('mangrove:recent') ?? '[]')
-  if (Array.isArray(saved))
-    recent.value = saved
-      .filter(
-        (entry): entry is { path: string; name: string } =>
-          typeof entry === 'object' &&
-          entry !== null &&
-          typeof entry.path === 'string' &&
-          typeof entry.name === 'string',
-      )
-      .slice(0, 6)
-} catch {
-  /* A missing or unavailable preferences store does not prevent opening a repo. */
+watch(
+  activeTabId,
+  () => {
+    recentFilter.value = ''
+    if (!tabs.value.find((tab) => tab.id === activeTabId.value)?.path)
+      void recentRepositories.refreshNames()
+  },
+  { immediate: true },
+)
+
+async function removeRecent(path: string) {
+  recentRepositories.remove(path)
+  await nextTick()
+  const target = recentSearch.value ?? welcomeOpen.value
+  target?.focus()
 }
 const groups = computed(() =>
   [
@@ -436,15 +443,7 @@ async function openPath(path: string, refreshing = false, solo?: string[]) {
     const info = repository.value
     if (!info || !tab || activeTabId.value !== tab.id || attempt !== openingRevision) return false
     repositoryTabs.update(tab.id, info)
-    recent.value = [
-      { path: info.path, name: info.name },
-      ...recent.value.filter((entry) => entry.path !== info.path),
-    ].slice(0, 6)
-    try {
-      localStorage.setItem('mangrove:recent', JSON.stringify(recent.value))
-    } catch {
-      /* Preferences are optional. */
-    }
+    recentRepositories.remember(info)
     if (!refreshing) referenceFilter.value = ''
     if (info.path !== previousPath) {
       collapsed.value = new Set()
@@ -873,12 +872,15 @@ onBeforeUnmount(() => {
                   :selected-sha="selection === 'commit' ? selectedSha : ''"
                   :selected-index="selectedIndex"
                   :references="graphReferences"
+                  :context-references="repository.references"
+                  :solo-refs="soloRefs"
                   :filtered="Boolean(filter)"
                   :loading="loadingPages > 0 || opening || query.trim().slice(0, 256) !== filter"
                   :indexing="!progress.complete"
                   @range="state.loadRange"
                   @select="selectCommit"
                   @navigate="navigate"
+                  @solo="toggleSolo"
                 >
                   <template #working-tree>
                     <WorkingTreeRow
@@ -1014,7 +1016,12 @@ onBeforeUnmount(() => {
         <section v-else class="welcome-content">
           <div class="welcome-symbol"><img src="/favicon.svg" width="56" height="56" alt="" /></div>
           <h1>Mangrove</h1>
-          <button class="primary-button welcome-open" :disabled="opening" @click="openDialog">
+          <button
+            ref="welcomeOpen"
+            class="primary-button welcome-open"
+            :disabled="opening"
+            @click="openDialog"
+          >
             <FolderOpen :size="17" />
             Ouvrir un dépôt local<ArrowRight :size="15" />
           </button>
@@ -1038,17 +1045,27 @@ onBeforeUnmount(() => {
                 spellcheck="false"
               />
             </label>
-            <button
-              v-for="entry in filteredRecent"
-              :key="entry.path"
-              :disabled="opening"
-              :title="entry.path"
-              @click="openPath(entry.path)"
-            >
-              <FolderGit2 :size="16" /><span
-                >{{ entry.name }}<small>{{ entry.path }}</small></span
-              ><ChevronRight :size="14" />
-            </button>
+            <div v-for="entry in filteredRecent" :key="entry.path" class="recent-entry">
+              <button
+                class="recent-open"
+                :disabled="opening"
+                :title="`${entry.name}\n${entry.path}`"
+                @click="openPath(entry.path)"
+              >
+                <FolderGit2 :size="16" /><span
+                  >{{ entry.name }}<small>{{ entry.path }}</small></span
+                ><ChevronRight :size="14" />
+              </button>
+              <button
+                class="recent-remove"
+                :aria-label="`Retirer ${entry.name} des dépôts récents`"
+                title="Retirer des dépôts récents"
+                :disabled="opening"
+                @click="removeRecent(entry.path)"
+              >
+                <X :size="14" aria-hidden="true" />
+              </button>
+            </div>
             <p v-if="!filteredRecent.length" class="py-2 text-xs text-muted" role="status">
               Aucun dépôt récent trouvé.
             </p>

@@ -23,6 +23,13 @@ pub struct RepositoryInfo {
     pub index: IndexProgress,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryName {
+    pub path: String,
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexProgress {
