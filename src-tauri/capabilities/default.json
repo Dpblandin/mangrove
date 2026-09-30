@@ -7,6 +7,7 @@
     "dialog:allow-open",
     "allow-open-repository",
     "allow-fetch-repository",
+    "allow-repository-names",
     "allow-index-status",
     "allow-list-commits",
     "allow-commit-position",
@@ -17,6 +18,10 @@
     "allow-file-blame",
     "allow-file-revision-diff",
     "allow-working-tree-status",
-    "allow-working-tree-diff"
+    "allow-working-tree-diff",
+    "allow-list-worktrees",
+    "allow-list-stashes",
+    "allow-stash-details",
+    "allow-stash-diff"
   ]
 }

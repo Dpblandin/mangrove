@@ -69,7 +69,7 @@ watch(
           aria-controls="repository-tab-panel"
           :aria-selected="tab.id === activeId"
           :tabindex="tab.id === activeId ? 0 : -1"
-          :title="tab.path ?? 'Ouvrir un dépôt'"
+          :title="tab.path ? `${tab.name}\n${tab.path}` : 'Ouvrir un dépôt'"
           @click="emit('select', tab.id)"
           @keydown="keyboard($event, tab.id)"
         >
@@ -120,6 +120,7 @@ watch(
   scrollbar-width: thin;
 }
 .repository-tab {
+  --tab-bg: var(--bg);
   display: flex;
   flex: none;
   position: relative;
@@ -130,6 +131,7 @@ watch(
   color: var(--muted);
 }
 .repository-tab.active {
+  --tab-bg: var(--surface);
   background: var(--surface);
   color: var(--text);
   box-shadow: inset 0 2px 0 var(--accent);
@@ -177,8 +179,11 @@ watch(
   border-radius: 3px;
   color: var(--muted);
 }
-.tab-select:hover,
-.tab-close:hover,
+.repository-tab:hover,
+.repository-tab:focus-within {
+  background: color-mix(in srgb, var(--text) 6%, var(--tab-bg));
+  color: var(--text);
+}
 .tab-open:hover {
   background: var(--hover);
   color: var(--text);

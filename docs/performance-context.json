@@ -1,0 +1,88 @@
+{
+  "measuredAt": "2026-09-30",
+  "platform": "Apple M4 Pro, 48 GiB RAM, macOS ARM",
+  "profile": "Rust release, ThinLTO",
+  "method": "30 samples after full indexing, warm OS filesystem cache, temporary application cache outside source; native engine only, excludes IPC, Vue and WebView; peak RSS includes initial indexing",
+  "results": {
+    "fixture": {
+      "commits": 10007,
+      "note": "Backend only; 30 samples, warm filesystem cache, temporary application cache outside source, metadata reused for alternating Solo filters (requires two distinct branch refs); no source identifiers or content.",
+      "soloIndexAndPage": {
+        "firstMs": 117.925833,
+        "lastCount": 10007,
+        "p50Ms": 119.810292,
+        "p95Ms": 136.34175000000002,
+        "samples": 30
+      },
+      "stashDetails": {
+        "firstMs": 1.770833,
+        "lastCount": 3,
+        "p50Ms": 0.6099169999999999,
+        "p95Ms": 0.716708,
+        "samples": 30
+      },
+      "stashDiff": {
+        "firstMs": 0.8755,
+        "lastCount": 4,
+        "p50Ms": 0.665791,
+        "p95Ms": 0.827209,
+        "samples": 30
+      },
+      "stashes": {
+        "firstMs": 0.230125,
+        "lastCount": 1,
+        "p50Ms": 0.172667,
+        "p95Ms": 0.230125,
+        "samples": 30
+      },
+      "worktrees": {
+        "firstMs": 1.393625,
+        "lastCount": 4,
+        "p50Ms": 0.910917,
+        "p95Ms": 1.227125,
+        "samples": 30
+      },
+      "peakRssBytes": 29163520
+    },
+    "real": {
+      "commits": 12090,
+      "note": "Backend only; 30 samples, warm filesystem cache, temporary application cache outside source, metadata reused for alternating Solo filters (requires two distinct branch refs); no source identifiers or content.",
+      "soloIndexAndPage": {
+        "firstMs": 68.810583,
+        "lastCount": 3594,
+        "p50Ms": 65.640084,
+        "p95Ms": 69.92633400000001,
+        "samples": 30
+      },
+      "stashDetails": {
+        "firstMs": 24.185583,
+        "lastCount": 2,
+        "p50Ms": 23.797875,
+        "p95Ms": 24.54675,
+        "samples": 30
+      },
+      "stashDiff": {
+        "firstMs": 29.949167,
+        "lastCount": 62,
+        "p50Ms": 29.813916,
+        "p95Ms": 31.618958000000003,
+        "samples": 30
+      },
+      "stashes": {
+        "firstMs": 0.7904169999999999,
+        "lastCount": 9,
+        "p50Ms": 0.7183750000000001,
+        "p95Ms": 0.8007500000000001,
+        "samples": 30
+      },
+      "worktrees": {
+        "firstMs": 47.082499999999996,
+        "lastCount": 44,
+        "p50Ms": 34.809833,
+        "p95Ms": 45.863209000000005,
+        "samples": 30
+      },
+      "peakRssBytes": 56016896
+    }
+  }
+}

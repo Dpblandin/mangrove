@@ -14,9 +14,14 @@ async fn blocking<T: Send + 'static>(
 }
 
 #[tauri::command]
-async fn open_repository(state: State<'_, Arc<Workspace>>, path: String) -> Result<RepositoryInfo> {
+async fn open_repository(
+    state: State<'_, Arc<Workspace>>,
+    path: String,
+    solo_refs: Option<Vec<String>>,
+) -> Result<RepositoryInfo> {
     let workspace = state.inner().clone();
-    blocking(move || workspace.open_repository(&path)).await
+    blocking(move || workspace.open_repository_with_solo(&path, &solo_refs.unwrap_or_default()))
+        .await
 }
 
 #[tauri::command]
@@ -26,6 +31,11 @@ async fn fetch_repository(
 ) -> Result<FetchResult> {
     let workspace = state.inner().clone();
     blocking(move || workspace.fetch_repository(&session_id)).await
+}
+
+#[tauri::command]
+async fn repository_names(paths: Vec<String>) -> Result<Vec<RepositoryName>> {
+    blocking(move || mangrove_core::repository_names(&paths)).await
 }
 
 #[tauri::command]
@@ -145,6 +155,43 @@ async fn working_tree_diff(
     blocking(move || workspace.working_tree_diff(&session_id, &area, &file_key)).await
 }
 
+#[tauri::command]
+async fn list_worktrees(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+) -> Result<WorktreeList> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.list_worktrees(&session_id)).await
+}
+
+#[tauri::command]
+async fn list_stashes(state: State<'_, Arc<Workspace>>, session_id: String) -> Result<StashList> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.list_stashes(&session_id)).await
+}
+
+#[tauri::command]
+async fn stash_details(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    sha: String,
+) -> Result<StashDetails> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.stash_details(&session_id, &sha)).await
+}
+
+#[tauri::command]
+async fn stash_diff(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+    sha: String,
+    area: String,
+    file_key: String,
+) -> Result<FileDiff> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.stash_diff(&session_id, &sha, &area, &file_key)).await
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -157,6 +204,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_repository,
             fetch_repository,
+            repository_names,
             index_status,
             list_commits,
             commit_position,
@@ -168,6 +216,10 @@ fn main() {
             file_revision_diff,
             working_tree_status,
             working_tree_diff,
+            list_worktrees,
+            list_stashes,
+            stash_details,
+            stash_diff,
         ])
         .run(tauri::generate_context!())
         .expect("Unable to start Mangrove");

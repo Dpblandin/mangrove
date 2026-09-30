@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import { ArrowLeft, ArrowRight, GitBranch, GitCommitHorizontal, SearchX, Tag } from '@lucide/vue'
 import GraphCanvas from './GraphCanvas.vue'
+import BranchContextMenu from './BranchContextMenu.vue'
 import { initials, shortDate, shortSha } from '../lib/format'
 import type { CommitRow, Reference } from '../lib/types'
 import { PAGE_SIZE } from '../composables/useRepository'
@@ -13,6 +14,8 @@ const props = defineProps<{
   selectedSha: string
   selectedIndex: number
   references: Reference[]
+  contextReferences?: Reference[]
+  soloRefs?: ReadonlySet<string>
   filtered: boolean
   loading: boolean
   indexing: boolean
@@ -22,9 +25,11 @@ const emit = defineEmits<{
   range: [start: number, end: number]
   select: [row: CommitRow, index: number]
   navigate: [direction: -1 | 1]
+  solo: [reference: Reference]
 }>()
 const ROW_HEIGHT = 44
 const container = ref<HTMLElement>()
+const branchMenu = ref<InstanceType<typeof BranchContextMenu>>()
 const height = ref(500)
 const graphWidth = ref(116)
 const scrollTop = ref(0)
@@ -43,15 +48,22 @@ const virtualizer = useVirtualizer(
   })),
 )
 const items = computed(() => virtualizer.value.getVirtualItems())
-const referenceMap = computed(() => {
+function referencesBySha(references: Reference[]) {
   const map = new Map<string, Reference[]>()
-  for (const reference of props.references) {
+  for (const reference of references) {
     const existing = map.get(reference.sha) ?? []
     existing.push(reference)
     map.set(reference.sha, existing)
   }
   return map
-})
+}
+const referenceMap = computed(() => referencesBySha(props.references))
+const contextReferences = computed(() => props.contextReferences ?? props.references)
+const contextReferenceMap = computed(() =>
+  contextReferences.value === props.references
+    ? referenceMap.value
+    : referencesBySha(contextReferences.value),
+)
 function row(index: number) {
   return props.pages.get(Math.floor(index / PAGE_SIZE) * PAGE_SIZE)?.[index % PAGE_SIZE]
 }
@@ -72,8 +84,13 @@ watch(graphRows, (rows) => {
   maxLanes.value = Math.max(maxLanes.value, ...rows.map(({ row }) => row.graph.width))
 })
 watch(
+  () => graphRows.value.map(({ row, start }) => `${start}:${row.sha}`).join(','),
+  () => branchMenu.value?.close(),
+)
+watch(
   () => props.sessionId,
   () => {
+    branchMenu.value?.close()
     laneOffset.value = 0
     maxLanes.value = 1
   },
@@ -81,6 +98,7 @@ watch(
 watch(
   () => items.value.map((item) => item.index).join(','),
   () => {
+    branchMenu.value?.close()
     const first = items.value[0]
     const last = items.value.at(-1)
     if (first && last) emit('range', first.index, last.index)
@@ -112,6 +130,13 @@ function chooseRow(commit: CommitRow, index: number) {
 }
 
 function keydown(event: KeyboardEvent) {
+  if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+    const selected = row(props.selectedIndex)
+    const anchor = activeDescendant.value ? document.getElementById(activeDescendant.value) : null
+    if (selected?.sha === props.selectedSha && anchor)
+      branchMenu.value?.open(event, contextReferenceMap.value.get(selected.sha) ?? [], anchor)
+    return
+  }
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
   event.preventDefault()
   emit('navigate', event.key === 'ArrowDown' ? 1 : -1)
@@ -172,6 +197,9 @@ function keydown(event: KeyboardEvent) {
               :aria-setsize="total"
               :aria-label="row(item.index)!.summary + ', ' + row(item.index)!.author"
               @click="chooseRow(row(item.index)!, item.index)"
+              @contextmenu="
+                branchMenu?.open($event, contextReferenceMap.get(row(item.index)!.sha) ?? [])
+              "
             >
               <span class="graph-cell"></span>
               <span class="commit-subject" :title="row(item.index)!.summary">
@@ -181,6 +209,7 @@ function keydown(event: KeyboardEvent) {
                   class="ref-badge"
                   :class="{ tag: reference.kind === 'tag' }"
                   :title="reference.label"
+                  @contextmenu.stop="branchMenu?.open($event, [reference])"
                 >
                   <Tag v-if="reference.kind === 'tag'" :size="10" /><GitBranch v-else :size="10" />
                   <span class="ref-label">{{ reference.label }}</span>
@@ -225,6 +254,12 @@ function keydown(event: KeyboardEvent) {
       </div>
     </div>
   </div>
+  <BranchContextMenu
+    ref="branchMenu"
+    :references="contextReferences"
+    :solo-refs="soloRefs"
+    @solo="emit('solo', $event)"
+  />
 </template>
 
 <style scoped>

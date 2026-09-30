@@ -18,6 +18,7 @@ export interface RepositoryInfo {
   head: string | null
   headName: string
   references: Reference[]
+  soloRefs?: string[]
   remotes: string[]
   index: IndexProgress
 }
@@ -161,4 +162,50 @@ export interface BlameGroup {
 export interface FileBlame {
   groups: BlameGroup[]
   limitation: string | null
+}
+
+export interface WorktreeInfo {
+  name: string
+  path: string
+  primary: boolean
+  current: boolean
+  available: boolean
+  head: string | null
+  headName: string
+  detached: boolean
+  locked: string | null
+  reason: string | null
+}
+export interface WorktreeList {
+  worktrees: WorktreeInfo[]
+  truncated: boolean
+}
+export interface StashInfo {
+  sha: string
+  index: number
+  message: string
+  author: string
+  time: number
+  baseSha: string
+}
+export interface StashList {
+  stashes: StashInfo[]
+  truncated: boolean
+}
+export type StashArea = 'worktree' | 'index' | 'untracked'
+export interface StashGroup {
+  area: StashArea
+  comparison: string
+  oldSha: string | null
+  newSha: string
+  files: ChangedFile[]
+  fileCount: number
+}
+export interface StashDetails {
+  sha: string
+  message: string
+  author: string
+  time: number
+  baseSha: string
+  groups: StashGroup[]
 }
