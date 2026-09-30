@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
@@ -20,23 +20,39 @@ pub(crate) fn status(repository: &Repository) -> Result<WorkingTreeStatus> {
     if repository.is_bare() {
         return Ok(WorkingTreeStatus::default());
     }
-    let staged = area_diff(repository, "staged")?;
-    let unstaged = area_diff(repository, "unstaged")?;
+    let index = read_index(repository)?;
+    let flags = index_flags(&index);
+    let staged = area_diff(repository, "staged", &index)?;
+    let unstaged = area_diff(repository, "unstaged", &index)?;
     Ok(WorkingTreeStatus {
         available: true,
-        staged_count: staged.deltas().len(),
-        unstaged_count: unstaged.deltas().len(),
+        staged_count: staged
+            .deltas()
+            .filter(|delta| eligible(&flags, "staged", delta))
+            .count(),
+        unstaged_count: unstaged
+            .deltas()
+            .filter(|delta| eligible(&flags, "unstaged", delta))
+            .count(),
         staged: staged
             .deltas()
-            .take(MAX_CHANGED_FILES)
             .enumerate()
+            .filter(|(_, delta)| eligible(&flags, "staged", delta))
+            .take(MAX_CHANGED_FILES)
             .map(|(index, delta)| working_file(index, &delta))
             .collect(),
         unstaged: unstaged
             .deltas()
-            .take(MAX_CHANGED_FILES)
             .enumerate()
-            .map(|(index, delta)| working_file(index, &delta))
+            .filter(|(_, delta)| eligible(&flags, "unstaged", delta))
+            .take(MAX_CHANGED_FILES)
+            .map(|(index, delta)| {
+                let mut file = working_file(index, &delta);
+                if delta_flags(&flags, &delta).is_intent_to_add() {
+                    file.file.status = "added".into();
+                }
+                file
+            })
             .collect(),
     })
 }
@@ -90,24 +106,28 @@ pub(crate) fn diff(repository: &Repository, area: &str, key: &str) -> Result<Fil
     if repository.is_bare() {
         return Err("Ce dépôt bare ne possède pas de fichiers non commités.".into());
     }
-    let diff = area_diff(repository, area)?;
+    let git_index = read_index(repository)?;
+    let flags = index_flags(&git_index);
+    let diff = area_diff(repository, area, &git_index)?;
     let index = diff
         .deltas()
         .position(|delta| {
-            delta
-                .new_file()
-                .path_bytes()
-                .or_else(|| delta.old_file().path_bytes())
-                .is_some_and(|path| path == bytes)
+            eligible(&flags, area, &delta)
+                && delta
+                    .new_file()
+                    .path_bytes()
+                    .or_else(|| delta.old_file().path_bytes())
+                    .is_some_and(|path| path == bytes)
         })
         .ok_or("Ce fichier a changé ou n'est plus présent dans cette liste.")?;
     let delta = diff.get_delta(index).ok_or("Fichier introuvable.")?;
-    let path = delta
+    let path_bytes = delta
         .new_file()
-        .path()
-        .or_else(|| delta.old_file().path())
+        .path_bytes()
+        .or_else(|| delta.old_file().path_bytes())
         .ok_or("Chemin de fichier introuvable.")?;
-    validate_relative_path(path)?;
+    let path = relative_path(path_bytes)?;
+    validate_relative_path(&path)?;
     if matches!(
         delta.status(),
         git2::Delta::Conflicted | git2::Delta::Unreadable
@@ -115,12 +135,12 @@ pub(crate) fn diff(repository: &Repository, area: &str, key: &str) -> Result<Fil
         return Err("Le patch de ce fichier en conflit ou illisible n'est pas disponible.".into());
     }
     if area == "unstaged" {
-        return worktree_patch(repository, &delta, path);
+        return worktree_patch(repository, &delta, &path);
     }
     render_file_diff(&diff, index)
 }
 
-fn area_diff<'a>(repository: &'a Repository, area: &str) -> Result<Diff<'a>> {
+fn area_diff<'a>(repository: &'a Repository, area: &str, index: &git2::Index) -> Result<Diff<'a>> {
     let mut options = DiffOptions::new();
     // Never persist the stat-cache refresh performed during a worktree diff.
     options
@@ -128,7 +148,6 @@ fn area_diff<'a>(repository: &'a Repository, area: &str) -> Result<Diff<'a>> {
         .include_typechange(true)
         .include_unreadable(true)
         .max_size(MAX_FILE_SIZE);
-    let index = repository.index().map_err(|e| e.to_string())?;
     let mut diff = match area {
         "staged" => {
             let head = match repository.head() {
@@ -140,7 +159,7 @@ fn area_diff<'a>(repository: &'a Repository, area: &str) -> Result<Diff<'a>> {
                 }
                 Err(error) => return Err(error.to_string()),
             };
-            repository.diff_tree_to_index(head.as_ref(), Some(&index), Some(&mut options))
+            repository.diff_tree_to_index(head.as_ref(), Some(index), Some(&mut options))
         }
         "unstaged" => {
             options
@@ -148,7 +167,7 @@ fn area_diff<'a>(repository: &'a Repository, area: &str) -> Result<Diff<'a>> {
                 .recurse_untracked_dirs(true)
                 .show_untracked_content(true)
                 .ignore_submodules(true);
-            repository.diff_index_to_workdir(Some(&index), Some(&mut options))
+            repository.diff_index_to_workdir(Some(index), Some(&mut options))
         }
         _ => return Err("Zone de modifications invalide : staged ou unstaged attendue.".into()),
     }
@@ -160,6 +179,55 @@ fn area_diff<'a>(repository: &'a Repository, area: &str) -> Result<Diff<'a>> {
     diff.find_similar(Some(&mut find))
         .map_err(|e| e.to_string())?;
     Ok(diff)
+}
+
+fn relative_path(bytes: &[u8]) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(std::ffi::OsString::from_vec(bytes.to_vec()).into())
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(bytes)
+            .map(PathBuf::from)
+            .map_err(|_| "Ce chemin Git non UTF-8 n'est pas représentable sur cet OS.".into())
+    }
+}
+
+fn read_index(repository: &Repository) -> Result<git2::Index> {
+    repository.index().map_err(|error| {
+        if error.message().contains("sdir") {
+            "L'index sparse n'est pas encore pris en charge. Utilisez un index complet pour consulter les modifications locales.".into()
+        } else { error.to_string() }
+    })
+}
+type IndexFlags = std::collections::HashMap<Vec<u8>, git2::IndexEntryExtendedFlag>;
+fn index_flags(index: &git2::Index) -> IndexFlags {
+    index
+        .iter()
+        .filter(|entry| entry.flags_extended != 0)
+        .map(|entry| {
+            (
+                entry.path,
+                git2::IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended),
+            )
+        })
+        .collect()
+}
+fn delta_flags(flags: &IndexFlags, delta: &DiffDelta<'_>) -> git2::IndexEntryExtendedFlag {
+    delta
+        .new_file()
+        .path_bytes()
+        .or_else(|| delta.old_file().path_bytes())
+        .and_then(|path| flags.get(path))
+        .copied()
+        .unwrap_or_else(git2::IndexEntryExtendedFlag::empty)
+}
+fn eligible(flags: &IndexFlags, area: &str, delta: &DiffDelta<'_>) -> bool {
+    let flags = delta_flags(flags, delta);
+    !(area == "staged" && flags.is_intent_to_add()
+        || area == "unstaged" && delta.status() == git2::Delta::Deleted && flags.is_skip_worktree())
 }
 
 fn validate_relative_path(path: &Path) -> Result<()> {
@@ -267,6 +335,26 @@ fn truncated_diff() -> FileDiff {
 }
 
 fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -> Result<FileDiff> {
+    let diff_attribute = repository
+        .get_attr_bytes(path, "diff", git2::AttrCheckFlags::empty())
+        .map_err(|error| error.to_string())?;
+    let force_binary = matches!(
+        git2::AttrValue::from_bytes(diff_attribute),
+        git2::AttrValue::False
+    );
+    if force_binary {
+        return Ok(FileDiff {
+            binary: true,
+            truncated: false,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    }
+    let force_text = matches!(
+        git2::AttrValue::from_bytes(diff_attribute),
+        git2::AttrValue::True
+    );
     let old_id = delta.old_file().id();
     let old = if old_id.is_zero() {
         None
@@ -301,10 +389,20 @@ fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -
         WorktreeContent::Oversized => return Ok(truncated_diff()),
     };
     let mut options = DiffOptions::new();
-    options.max_size(MAX_FILE_SIZE);
+    options.max_size(MAX_FILE_SIZE).force_text(force_text);
+    let new = if delta.new_file().mode() == git2::FileMode::Link {
+        new
+    } else {
+        crate::worktree_filter::clean(repository, path.as_os_str().as_encoded_bytes(), &new)?
+    };
+    let old_path = delta
+        .old_file()
+        .path_bytes()
+        .map(relative_path)
+        .transpose()?;
     let patch = git2::Patch::from_buffers(
         old.as_ref().map_or(&[], |blob| blob.content()),
-        delta.old_file().path(),
+        old_path.as_deref(),
         &new,
         Some(path),
         Some(&mut options),

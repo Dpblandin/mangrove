@@ -644,7 +644,7 @@ kbd {
   position: absolute;
   bottom: 43px;
   left: 20px;
-  right: 410px;
+  right: calc(var(--details-width, 390px) + 20px);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -683,9 +683,6 @@ kbd {
   }
   .sidebar {
     width: 210px;
-  }
-  .error-toast {
-    right: 370px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

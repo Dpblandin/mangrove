@@ -5,15 +5,23 @@ const fullDate = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long', timeStyle
 const number = new Intl.NumberFormat('fr-FR')
 
 export const count = (value: number) => number.format(value)
-export const shortDate = (timestamp: number) => date.format(new Date(timestamp * 1000))
-export const commitDate = (timestamp: number) => fullDate.format(new Date(timestamp * 1000))
+export function commitDateTime(timestamp: number): string | undefined {
+  const value = new Date(timestamp * 1000)
+  return Number.isFinite(value.getTime()) ? value.toISOString() : undefined
+}
+function formatDate(timestamp: number, formatter: Intl.DateTimeFormat) {
+  const value = new Date(timestamp * 1000)
+  return Number.isFinite(value.getTime()) ? formatter.format(value) : 'Date inconnue'
+}
+export const shortDate = (timestamp: number) => formatDate(timestamp, date)
+export const commitDate = (timestamp: number) => formatDate(timestamp, fullDate)
 export const shortSha = (sha: string) => sha.slice(0, 7)
 export function initials(name: string) {
   return name
     .trim()
     .split(/\s+/)
     .slice(0, 2)
-    .map((part) => part[0] ?? '')
+    .map((part) => Array.from(part)[0] ?? '')
     .join('')
     .toUpperCase()
 }

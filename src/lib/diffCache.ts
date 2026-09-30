@@ -18,13 +18,14 @@ type Context<File> = {
   files: File[]
   read: (file: File, signal: AbortSignal) => Promise<FileDiff>
 }
-type Cached = { value: PreparedDiff; characters: number; tokens: number }
+type Cached = { value: PreparedDiff; characters: number; tokens: number; retryHighlight: boolean }
 type DiffJob<File> = {
   key: string
   generation: number
   file: File
   controller: AbortController
   background: boolean
+  retryHighlight?: boolean
   waiters: Set<symbol>
   state: 'reading' | 'ready' | 'highlighting' | 'settled'
   diff?: FileDiff
@@ -118,7 +119,7 @@ export function createDiffCache<File extends { path: string }>(
     previous?.terminate()
   }
 
-  function remember(job: Job, value: PreparedDiff) {
+  function remember(job: Job, value: PreparedDiff, retryHighlight: boolean) {
     const size = tokenSize(value.tokens)
     let characters = size.characters
     for (const hunk of value.diff.hunks) {
@@ -138,7 +139,13 @@ export function createDiffCache<File extends { path: string }>(
       return
     }
     if (characters > MAX_CHARACTERS || size.count > MAX_CACHED_TOKENS) return
-    cache.set(job.key, { value, characters, tokens: size.count })
+    const previous = cache.get(job.key)
+    if (previous) {
+      cachedCharacters -= previous.characters
+      cachedTokens -= previous.tokens
+    }
+    cache.delete(job.key)
+    cache.set(job.key, { value, characters, tokens: size.count, retryHighlight })
     cachedCharacters += characters
     cachedTokens += size.count
     while (
@@ -154,10 +161,10 @@ export function createDiffCache<File extends { path: string }>(
     }
   }
 
-  function finish(job: Job, tokens: HighlightedDiff | null) {
+  function finish(job: Job, tokens: HighlightedDiff | null, retryHighlight = false) {
     if (!current(job) || !job.diff) return
     const value = { diff: job.diff, tokens }
-    remember(job, value)
+    remember(job, value, retryHighlight)
     jobs.delete(job.key)
     job.state = 'settled'
     job.resolve(value)
@@ -229,12 +236,15 @@ export function createDiffCache<File extends { path: string }>(
       active = {
         job,
         id,
-        timer: setTimeout(() => {
-          if (active?.id !== id) return
-          stopWorker()
-          finish(job, null)
-          pumpWorker()
-        }, TIMEOUT_MS),
+        timer: setTimeout(
+          () => {
+            if (active?.id !== id) return
+            stopWorker()
+            finish(job, null, true)
+            pumpWorker()
+          },
+          job.retryHighlight ? 8_000 : TIMEOUT_MS,
+        ),
       }
       const request: SyntaxRequest = {
         id,
@@ -351,7 +361,7 @@ export function createDiffCache<File extends { path: string }>(
     if (!target)
       return Promise.reject(new Error('Ce fichier n’appartient pas à la sélection courante.'))
     const cached = cache.get(key)
-    if (cached) {
+    if (cached && (!cached.retryHighlight || !workerEnabled)) {
       cache.delete(key)
       cache.set(key, cached)
       return Promise.resolve(cached.value)
@@ -361,7 +371,14 @@ export function createDiffCache<File extends { path: string }>(
     const subscriber = Symbol()
     job.waiters.add(subscriber)
     pumpWorker()
-    if (!existing) start(job)
+    if (!existing) {
+      if (cached?.retryHighlight) {
+        job.diff = cached.value.diff
+        job.state = 'ready'
+        job.retryHighlight = true
+        pumpWorker()
+      } else start(job)
+    }
     return new Promise<PreparedDiff>((resolve, reject) => {
       let settled = false
       function settle(value?: PreparedDiff, reason?: unknown) {
@@ -436,9 +453,17 @@ export function createCommitDiffCache(
   workerFactory?: DiffHighlightWorkerFactory,
 ) {
   const cache = createDiffCache<ChangedFile>((file) => `${file.index}:${file.path}`, workerFactory)
+  let preloadAllowed = true
   return {
     ...cache,
-    reset(context: { sessionId: string; sha: string; files: ChangedFile[] } | null) {
+    preload() {
+      if (preloadAllowed) cache.preload()
+    },
+    reset(
+      context: { sessionId: string; sha: string; files: ChangedFile[]; fileCount?: number } | null,
+    ) {
+      // Native file_diff recalculates the whole commit; large commits stay on demand.
+      preloadAllowed = (context?.fileCount ?? context?.files.length ?? 0) <= 1_000
       cache.reset(
         context
           ? {

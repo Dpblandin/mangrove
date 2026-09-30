@@ -56,9 +56,9 @@ const activeDescendant = computed(() =>
 )
 
 watch(
-  selectedIndex,
-  (index) => {
-    if (index >= 0) activeIndex.value = index
+  [selectedIndex, () => props.files.length],
+  ([index, length]) => {
+    activeIndex.value = index >= 0 ? index : Math.min(activeIndex.value, Math.max(0, length - 1))
   },
   { immediate: true },
 )

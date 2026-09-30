@@ -60,6 +60,7 @@ export function useRepository(client: GitClient = request) {
   let diffEpoch = 0
   let navigationEpoch = 0
   let diffPreloadPaused = false
+  let visibleRange: { start: number; end: number } | null = null
   let navigating = false
   let requestedIndex: number | null = null
   let desiredQuery = ''
@@ -139,6 +140,7 @@ export function useRepository(client: GitClient = request) {
   }
 
   function loadRange(start: number, end: number) {
+    visibleRange = { start, end }
     const last = Math.min(end, total.value - 1)
     for (
       let offset = Math.floor(Math.max(0, start) / PAGE_SIZE) * PAGE_SIZE;
@@ -154,7 +156,13 @@ export function useRepository(client: GitClient = request) {
     const existing = pending.get(offset)
     if (existing) return existing.promise
     const cached = pages.value.get(offset)
-    if (!force && cached && !pageNeedsRefresh(offset, cached)) return Promise.resolve()
+    if (!force && cached && !pageNeedsRefresh(offset, cached)) {
+      const next = new Map(pages.value)
+      next.delete(offset)
+      next.set(offset, cached)
+      pages.value = next
+      return Promise.resolve()
+    }
     const generation = pageEpoch
     const controller = new AbortController()
     const entry: PendingPage = { controller, promise: Promise.resolve() }
@@ -179,7 +187,16 @@ export function useRepository(client: GitClient = request) {
           const next = new Map(pages.value)
           next.delete(offset)
           next.set(offset, page.commits)
-          while (next.size > PAGE_CACHE_SIZE) next.delete(next.keys().next().value!)
+          while (next.size > PAGE_CACHE_SIZE) {
+            const oldest = [...next.keys()].find(
+              (candidate) =>
+                candidate !== offset &&
+                (!visibleRange ||
+                  candidate + PAGE_SIZE <= visibleRange.start ||
+                  candidate > visibleRange.end),
+            )
+            next.delete(oldest ?? next.keys().next().value!)
+          }
           pages.value = next
           mergeProgress(page.index)
           // The walk only appends within this view. An older SQLite snapshot must
@@ -245,6 +262,7 @@ export function useRepository(client: GitClient = request) {
   }
 
   function close() {
+    diffPreloadPaused = false
     epoch += 1
     clearTimeout(poll)
     clearQuery()
@@ -252,6 +270,7 @@ export function useRepository(client: GitClient = request) {
     cancelNavigation()
     resetPages()
     clearSelection()
+    visibleRange = null
     repository.value = null
     progress.value = { indexed: 0, complete: false, error: null }
     total.value = 0
@@ -286,7 +305,6 @@ export function useRepository(client: GitClient = request) {
     if (!repo) return
     cancelNavigation()
     cancelSelectionReads()
-    diffPreloadPaused = false
     const generation = selectionEpoch
     const controller = new AbortController()
     detailController = controller
@@ -300,7 +318,12 @@ export function useRepository(client: GitClient = request) {
         controller,
       )
       if (generation !== selectionEpoch || repo.id !== repository.value?.id) return
-      diffCache.reset({ sessionId: repo.id, sha: row.sha, files: value.files })
+      diffCache.reset({
+        sessionId: repo.id,
+        sha: row.sha,
+        files: value.files,
+        fileCount: value.fileCount,
+      })
       const file = value.files[0] ?? null
       let patch: FileDiff | null = null
       let patchTokens: HighlightedDiff | null = null
@@ -451,6 +474,18 @@ export function useRepository(client: GitClient = request) {
         controller,
       )
       if (generation !== navigationEpoch || repo.id !== repository.value?.id) return null
+      if (visibleRange) {
+        const { start, end } = visibleRange
+        const reads = []
+        for (
+          let offset = Math.floor(start / PAGE_SIZE) * PAGE_SIZE;
+          offset <= Math.min(end, total.value - 1);
+          offset += PAGE_SIZE
+        )
+          reads.push(loadPage(offset))
+        await Promise.all(reads)
+        if (generation !== navigationEpoch || repo.id !== repository.value?.id) return null
+      }
       if (position === null) {
         error.value = 'Cette référence n’est pas encore indexée.'
         navigating = false

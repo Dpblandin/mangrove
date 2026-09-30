@@ -951,3 +951,67 @@ describe('keyboard selection', () => {
     },
   )
 })
+
+describe('visible page retention', () => {
+  it('keeps both visible pages present when returning across an evicted page boundary', async () => {
+    const { state, transport } = setup()
+    const total = PAGE_SIZE * 13
+    await openReady(state, transport, repository('repo', total), fullPage(0, total))
+    for (let offset = PAGE_SIZE; offset < total; offset += PAGE_SIZE) {
+      const reading = state.loadPage(offset)
+      transport.take('list_commits', { offset }).resolve(fullPage(offset, total))
+      await reading
+    }
+    // Page 1 is consulted first, while page 0 finishes its slower native read.
+    state.loadRange(115, 140)
+    expect(
+      transport.calls.filter((call) => call.command === 'list_commits' && !call.settled),
+    ).toHaveLength(1)
+    transport.take('list_commits', { offset: 0 }).resolve(fullPage(0, total))
+    await flush()
+    expect(state.getRow(120)?.sha).toBe('commit-120')
+    expect(state.getRow(130)?.sha).toBe('commit-130')
+    expect(state.pages.value.size).toBeLessThanOrEqual(12)
+  })
+
+  it.each([120, null])(
+    'restores the same visible range after a reference jump to %s',
+    async (position) => {
+      const { state, transport } = setup()
+      await openReady(state, transport, repository('repo', 256), fullPage(0, 256))
+      state.loadRange(115, 140)
+      transport.take('list_commits', { offset: 128 }).resolve(fullPage(128, 256))
+      await flush()
+      const jumping = state.jump('target')
+      transport.take('commit_position').resolve(position)
+      await flush()
+      transport.take('list_commits', { offset: 0 }).resolve(fullPage(0, 256))
+      transport.take('list_commits', { offset: 128 }).resolve(fullPage(128, 256))
+      expect(await jumping).toBe(position)
+      expect(state.getRow(130)?.sha).toBe('commit-130')
+    },
+  )
+
+  it('keeps commit background preparation paused when a search auto-selects a result', async () => {
+    const workers = controlledWorkers()
+    const { state, transport } = setup()
+    await openReady(state, transport)
+    state.pauseDiffPreload()
+    state.query.value = 'result'
+    await vi.advanceTimersByTimeAsync(160)
+    transport.take('list_commits', { query: 'result' }).resolve(page([row(0, 'result')]))
+    await flush()
+    transport
+      .take('commit_details', { sha: 'result' })
+      .resolve(details('result', [file(0), file(1)]))
+    await flush()
+    transport.take('file_diff', { fileIndex: 0 }).resolve(textDiff('const value = 1'))
+    await flush()
+    workers.at(-1)!.complete(colored('const value = 1'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(1)
+    state.resumeDiffPreload()
+    await vi.advanceTimersByTimeAsync(150)
+    expect(transport.calls.filter((call) => call.command === 'file_diff')).toHaveLength(2)
+  })
+})

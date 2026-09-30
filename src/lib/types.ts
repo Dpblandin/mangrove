@@ -105,7 +105,7 @@ export interface FileDiff {
   hunks: {
     header: string
     lines: {
-      kind: 'addition' | 'deletion' | 'context'
+      kind: 'addition' | 'deletion' | 'context' | 'annotation'
       oldLine: number | null
       newLine: number | null
       content: string

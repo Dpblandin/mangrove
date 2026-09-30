@@ -186,3 +186,13 @@ describe('repository tabs', () => {
     expect(registry.open('/').name).toBe('/')
   })
 })
+
+it('restores the new tab after a failed folder opening so the next path reuses it', () => {
+  const registry = useRepositoryTabs()
+  const draft = registry.createNew()
+  const attempted = registry.open('/not-a-repository')
+  registry.rejectOpen(attempted.id, draft)
+  const valid = registry.open('/projects/mangrove')
+  expect(valid.id).toBe(draft.id)
+  expect(registry.tabs.value).toEqual([valid])
+})

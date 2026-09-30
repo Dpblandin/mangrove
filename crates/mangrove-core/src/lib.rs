@@ -2,6 +2,7 @@ mod cache;
 mod graph;
 pub mod model;
 mod working_tree;
+mod worktree_filter;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -173,8 +174,15 @@ impl Workspace {
         if !path.is_dir() {
             return Err("Choisissez un dossier contenant un dépôt Git local.".into());
         }
-        let repository = Repository::discover(path)
-            .map_err(|e| format!("Impossible d'ouvrir ce dépôt Git : {e}"))?;
+        // Read repository state in the same critical section that publishes its
+        // session; a delayed open must not replace a newer fingerprint.
+        let mut sessions = self.sessions.lock().unwrap();
+        let repository = Repository::open_ext(
+            path,
+            git2::RepositoryOpenFlags::empty(),
+            &[] as &[&std::ffi::OsStr],
+        )
+        .map_err(|e| format!("Impossible d'ouvrir ce dépôt Git : {e}"))?;
         let git_dir = repository
             .path()
             .canonicalize()
@@ -237,7 +245,16 @@ impl Workspace {
             let reference = reference.map_err(|e| e.to_string())?;
             // T3 snapshots are operational refs, not history roots. Filtering
             // here also keeps their updates out of the traversal fingerprint.
-            if reference.name_bytes().starts_with(b"refs/t3/checkpoints/") {
+            let raw_name = reference.name_bytes();
+            if raw_name == b"refs/stash"
+                || [
+                    b"refs/t3/checkpoints/".as_slice(),
+                    b"refs/notes/",
+                    b"refs/prefetch/",
+                ]
+                .iter()
+                .any(|prefix| raw_name.starts_with(prefix))
+            {
                 continue;
             }
             if reference.symbolic_target_bytes().is_some() {
@@ -255,9 +272,16 @@ impl Workspace {
             } else {
                 "other"
             };
-            let name = reference.name().unwrap_or_default().to_owned();
+            let name = reference.name().map(str::to_owned).unwrap_or_else(|_| {
+                let mut key = String::from("git-bytes:");
+                for byte in raw_name {
+                    use std::fmt::Write;
+                    write!(&mut key, "{byte:02x}").unwrap();
+                }
+                key
+            });
             references.push(Reference {
-                label: reference.shorthand().unwrap_or(&name).to_owned(),
+                label: String::from_utf8_lossy(reference.shorthand_bytes()).into_owned(),
                 name,
                 kind: kind.into(),
                 sha: commit.id().to_string(),
@@ -298,19 +322,21 @@ impl Workspace {
         let fingerprint = format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&(4u32, &head_sha, &head_name, &references, &remotes, &shallow))
+                serde_json::to_vec(&(5u32, &head_sha, &head_name, &references, &remotes, &shallow))
                     .map_err(|e| e.to_string())?,
             )
         );
-        let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get(&key) {
             if session.fingerprint == fingerprint
                 && !session.cancel.load(Ordering::Acquire)
                 && session.error.lock().unwrap().is_none()
             {
-                let mut connection = cache::connect(&session.database, true)?;
-                let snapshot = connection.transaction().map_err(|e| e.to_string())?;
-                if is_current(&snapshot, session)? {
+                let reusable = (|| {
+                    let mut connection = cache::connect(&session.database, true)?;
+                    let snapshot = connection.transaction().map_err(|e| e.to_string())?;
+                    is_current(&snapshot, session)
+                })();
+                if reusable == Ok(true) {
                     let mut info = session.info.clone();
                     info.index = session.progress();
                     return Ok(info);
@@ -389,7 +415,7 @@ impl Workspace {
             info: info.clone(),
             fingerprint,
             index_run,
-            source: git_dir,
+            source,
             database,
             write_lock,
             indexed: AtomicUsize::new(indexed),
@@ -862,18 +888,24 @@ fn render_patch(patch: git2::Patch<'_>) -> Result<FileDiff> {
             }
             count += 1;
             bytes += line.content().len();
+            let annotation = matches!(line.origin(), '=' | '>' | '<');
+            let content = String::from_utf8_lossy(line.content());
             output.lines.push(DiffLine {
                 kind: match line.origin() {
                     '+' => "addition",
                     '-' => "deletion",
+                    '=' | '>' | '<' => "annotation",
                     _ => "context",
                 }
                 .into(),
-                old_line: line.old_lineno(),
-                new_line: line.new_lineno(),
-                content: String::from_utf8_lossy(line.content())
-                    .trim_end_matches(['\r', '\n'])
-                    .into(),
+                old_line: (!annotation).then(|| line.old_lineno()).flatten(),
+                new_line: (!annotation).then(|| line.new_lineno()).flatten(),
+                content: if annotation {
+                    content.trim_matches(['\r', '\n'])
+                } else {
+                    content.trim_end_matches(['\r', '\n'])
+                }
+                .into(),
             });
         }
         result.hunks.push(output);
@@ -882,19 +914,21 @@ fn render_patch(patch: git2::Patch<'_>) -> Result<FileDiff> {
 }
 
 fn changed_file(index: usize, delta: &git2::DiffDelta<'_>) -> ChangedFile {
-    let path = delta.new_file().path().or_else(|| delta.old_file().path());
+    let path = delta
+        .new_file()
+        .path_bytes()
+        .or_else(|| delta.old_file().path_bytes());
     ChangedFile {
         index,
         path: path
-            .unwrap_or_else(|| Path::new("(sans nom)"))
-            .to_string_lossy()
-            .into_owned(),
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .unwrap_or_else(|| "(sans nom)".into()),
         old_path: (delta.status() == git2::Delta::Renamed)
             .then(|| {
                 delta
                     .old_file()
-                    .path()
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .path_bytes()
+                    .map(|path| String::from_utf8_lossy(path).into_owned())
             })
             .flatten(),
         status: match delta.status() {

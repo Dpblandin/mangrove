@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { AlertCircle, FileText } from '@lucide/vue'
 import { useDiffHighlighting } from '../composables/useDiffHighlighting'
 import type { HighlightedDiff } from '../lib/diffSyntax'
@@ -13,6 +13,12 @@ const props = defineProps<{
   highlighted?: HighlightedDiff | null
 }>()
 const viewer = ref<HTMLElement>()
+const lineNumberWidth = computed(() => {
+  let largest = 1
+  for (const hunk of props.diff?.hunks ?? [])
+    for (const line of hunk.lines) largest = Math.max(largest, line.oldLine ?? 0, line.newLine ?? 0)
+  return `${String(largest).length + 2}ch`
+})
 const generatedTokens = useDiffHighlighting(
   () => (props.highlighted === undefined ? props.file : null),
   () => (props.highlighted === undefined ? props.diff : null),
@@ -110,6 +116,7 @@ onBeforeUnmount(() => {
           v-for="(hunk, hunkIndex) in diff.hunks"
           :key="hunkIndex"
           class="diff-hunk min-w-max font-mono"
+          :style="{ '--line-number-width': lineNumberWidth }"
         >
           <div
             class="hunk-header min-w-full border-t border-border bg-surface px-[13px] py-[5px] whitespace-pre text-accent"
@@ -123,12 +130,12 @@ onBeforeUnmount(() => {
             :class="line.kind"
           >
             <span
-              class="inline-block w-[30px] shrink-0 border-r border-border pr-[5px] text-right text-muted select-none"
+              class="inline-block w-[var(--line-number-width)] shrink-0 border-r border-border pr-[5px] text-right text-muted select-none"
               aria-hidden="true"
               >{{ line.oldLine }}</span
             >
             <span
-              class="inline-block w-[30px] shrink-0 border-r border-border pr-[5px] text-right text-muted select-none"
+              class="inline-block w-[var(--line-number-width)] shrink-0 border-r border-border pr-[5px] text-right text-muted select-none"
               aria-hidden="true"
               >{{ line.newLine }}</span
             >

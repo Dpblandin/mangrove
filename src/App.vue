@@ -136,6 +136,7 @@ function openWorkingFile(area: WorkingTreeArea, file: WorkingTreeFile) {
 function selectCommit(row: CommitRow, index: number) {
   interactionRevision++
   selection.value = 'commit'
+  state.resumeDiffPreload()
   diffOpen.value = false
   void state.select(row, index)
 }
@@ -260,12 +261,16 @@ const latestReference = computed(() =>
 )
 const hasReferences = computed(() => groups.value.some((group) => group.references.length))
 
+let openingRevision = 0
 async function openPath(path: string, refreshing = false) {
+  const attempt = ++openingRevision
+  const previousTabs = tabs.value
   if (!refreshing) interactionRevision++
   const tab = refreshing
     ? tabs.value.find((item) => item.id === activeTabId.value)
     : repositoryTabs.open(path)
   const previousPath = repository.value?.path
+  const previousTab = previousTabs.find((item) => item.id === tab?.id)
   if (await state.open(path)) {
     showDialog.value = false
     const info = repository.value
@@ -290,6 +295,8 @@ async function openPath(path: string, refreshing = false) {
         other: new Set(),
       }
     }
+  } else if (!refreshing && tab && attempt === openingRevision) {
+    repositoryTabs.rejectOpen(tab.id, previousTab)
   }
 }
 async function activateTab(id: string) {
@@ -334,6 +341,7 @@ async function openDialog() {
 async function jump(reference: Reference) {
   interactionRevision++
   selection.value = 'commit'
+  state.resumeDiffPreload()
   diffOpen.value = false
   const index = await state.jump(reference.sha)
   if (index !== null) {
@@ -357,9 +365,11 @@ async function navigate(direction: -1 | 1) {
     return
   }
   const fromWorkingTree = selection.value === 'working'
-  selection.value = 'commit'
+  const revision = interactionRevision
   const index = fromWorkingTree ? await state.selectIndex(0) : await state.moveSelection(direction)
-  if (index !== null && selectedIndex.value === index) {
+  if (index !== null && selectedIndex.value === index && revision === interactionRevision) {
+    selection.value = 'commit'
+    state.resumeDiffPreload()
     list.value?.scrollToIndex(index)
     if (fromWorkingTree && selection.value === 'commit') {
       await nextTick()
@@ -425,6 +435,7 @@ onBeforeUnmount(() => {
     />
     <div
       ref="layoutRoot"
+      :style="{ '--details-width': rightWidth + 'px' }"
       :id="activeTabId ? 'repository-tab-panel' : undefined"
       :role="activeTabId ? 'tabpanel' : undefined"
       :aria-labelledby="activeTabId ?? undefined"

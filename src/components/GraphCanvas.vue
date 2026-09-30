@@ -16,6 +16,13 @@ const canvas = ref<HTMLCanvasElement>()
 let palette: { colors: string[]; node: string; selectedNode: string; halo: string } | undefined
 let themeObserver: MutationObserver | undefined
 let frame = 0
+let resolution: MediaQueryList | undefined
+function resolutionChanged() {
+  resolution?.removeEventListener('change', resolutionChanged)
+  resolution = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+  resolution.addEventListener('change', resolutionChanged)
+  schedule()
+}
 
 function readPalette() {
   const style = getComputedStyle(document.documentElement)
@@ -87,6 +94,7 @@ function schedule() {
   frame = requestAnimationFrame(draw)
 }
 onMounted(() => {
+  resolutionChanged()
   readPalette()
   schedule()
   themeObserver = new MutationObserver(() => {
@@ -111,6 +119,7 @@ watch(
   schedule,
 )
 onBeforeUnmount(() => {
+  resolution?.removeEventListener('change', resolutionChanged)
   cancelAnimationFrame(frame)
   themeObserver?.disconnect()
 })

@@ -1853,3 +1853,365 @@ fn working_tree_patch_races_never_follow_replaced_leaves_or_parent_directories()
         );
     }
 }
+
+fn git_at(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(path)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.test")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.test")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn separate_git_directory_keeps_the_selected_worktree_and_cache_guards() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    let administration = root.path().join("administration");
+    git_at(
+        root.path(),
+        &[
+            "init",
+            "--separate-git-dir",
+            administration.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let repository = Repository::open(&worktree).unwrap();
+    repository.set_head("refs/heads/main").unwrap();
+    commit(
+        &repository,
+        "initial",
+        &[],
+        &[("tracked.txt", b"before\n")],
+        Some("HEAD"),
+    );
+    repository
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    fs::write(worktree.join("tracked.txt"), "after\n").unwrap();
+    fs::write(root.path().join("outside-secret.txt"), "EXTERNAL SECRET").unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new(cache.path()).unwrap();
+    // Search from a subdirectory must still preserve the .git indirection.
+    fs::create_dir(worktree.join("nested")).unwrap();
+    let before = snapshot(root.path());
+    let info = workspace
+        .open_repository(worktree.join("nested").to_str().unwrap())
+        .unwrap();
+    finish(&workspace, &info.id);
+    assert_eq!(PathBuf::from(&info.path), worktree.canonicalize().unwrap());
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert_eq!(status.unstaged.len(), 1);
+    assert_eq!(status.unstaged[0].file.path, "tracked.txt");
+    assert!(patch_text(
+        &workspace
+            .working_tree_diff(&info.id, "unstaged", &status.unstaged[0].key)
+            .unwrap()
+    )
+    .contains("after"));
+    assert!(workspace
+        .commit_details(&info.id, info.head.as_ref().unwrap())
+        .is_ok());
+    assert_eq!(before, snapshot(root.path()));
+    assert!(Workspace::new(worktree.join("cache"))
+        .unwrap()
+        .open_repository(worktree.to_str().unwrap())
+        .unwrap_err()
+        .contains("en dehors"));
+}
+
+#[test]
+fn operational_refs_are_not_history_roots_or_refresh_triggers() {
+    let fixture = Fixture::new();
+    let root = commit(&fixture.repository, "visible", &[], &[], Some("HEAD"));
+    for name in [
+        "refs/stash",
+        "refs/notes/commits",
+        "refs/prefetch/remotes/origin/main",
+    ] {
+        commit(
+            &fixture.repository,
+            "operational-only",
+            &[root],
+            &[],
+            Some(name),
+        );
+    }
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    assert_eq!(
+        workspace.list_commits(&info.id, 0, 100, "").unwrap().total,
+        1
+    );
+    assert_eq!(
+        workspace
+            .list_commits(&info.id, 0, 100, "operational-only")
+            .unwrap()
+            .total,
+        0
+    );
+    let old = fixture
+        .repository
+        .find_reference("refs/stash")
+        .unwrap()
+        .target()
+        .unwrap();
+    commit(
+        &fixture.repository,
+        "new-stash",
+        &[old],
+        &[],
+        Some("refs/stash"),
+    );
+    assert_eq!(fixture.open(&workspace).id, info.id);
+}
+
+#[test]
+fn removing_the_persistent_cache_recovers_on_reopen() {
+    let fixture = Fixture::new();
+    commit(&fixture.repository, "cached", &[], &[], Some("HEAD"));
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    fs::remove_dir_all(&fixture.cache).unwrap();
+    let reopened = fixture.open(&workspace);
+    assert_ne!(info.id, reopened.id);
+    finish(&workspace, &reopened.id);
+    assert_eq!(
+        workspace
+            .list_commits(&reopened.id, 0, 100, "")
+            .unwrap()
+            .total,
+        1
+    );
+}
+
+#[test]
+fn punctuation_only_search_terms_do_not_hide_matching_commits() {
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "Release 1.2 - hotfix",
+        &[],
+        &[],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    for query in [
+        "Release 1.2 - hotfix",
+        "1.2 — hotfix",
+        "hotfix !",
+        "hotfix /",
+        "— hotfix |",
+    ] {
+        assert_eq!(
+            workspace
+                .list_commits(&info.id, 0, 100, query)
+                .unwrap()
+                .total,
+            1,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        workspace.list_commits(&info.id, 0, 100, "!").unwrap().total,
+        0
+    );
+}
+
+#[test]
+fn non_utf8_references_keep_distinct_identity_and_readable_labels() {
+    let fixture = Fixture::new();
+    let oid = commit(&fixture.repository, "initial", &[], &[], Some("HEAD"));
+    let mut packed = Vec::new();
+    for name in [b"refs/heads/caf\xe9".as_slice(), b"refs/heads/caf\xff"] {
+        packed.extend_from_slice(format!("{oid} ").as_bytes());
+        packed.extend_from_slice(name);
+        packed.push(b'\n');
+    }
+    fs::write(fixture.repository.path().join("packed-refs"), packed).unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    assert_eq!(info.references.len(), 3);
+    let keys: std::collections::HashSet<_> = info
+        .references
+        .iter()
+        .map(|reference| &reference.name)
+        .collect();
+    assert_eq!(keys.len(), 3);
+    assert!(info
+        .references
+        .iter()
+        .all(|reference| !reference.label.is_empty()));
+}
+
+#[test]
+fn missing_final_newlines_are_annotations_without_line_numbers() {
+    let fixture = Fixture::new();
+    let first = commit(
+        &fixture.repository,
+        "before",
+        &[],
+        &[("a.ts", b"const a = 1;\nconst b = 2;")],
+        Some("HEAD"),
+    );
+    let second = commit(
+        &fixture.repository,
+        "after",
+        &[first],
+        &[("a.ts", b"const a = 1;\nconst b = 3;")],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let patch = workspace
+        .file_diff(&info.id, &second.to_string(), 0)
+        .unwrap();
+    let annotations: Vec<_> = patch
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == "annotation")
+        .collect();
+    assert_eq!(annotations.len(), 2);
+    assert!(annotations.iter().all(|line| line.old_line.is_none()
+        && line.new_line.is_none()
+        && line.content == "\\ No newline at end of file"));
+}
+
+#[test]
+fn local_diffs_respect_clean_filters_binary_attributes_and_index_flags() {
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "before",
+        &[],
+        &[
+            ("a.txt", b"one\ntwo\nthree\n"),
+            ("secret.lock", b"secret before\n"),
+            ("excluded.txt", b"sparse\n"),
+        ],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    git_at(&fixture.source, &["config", "core.autocrlf", "true"]);
+    fs::write(fixture.source.join("a.txt"), "one\r\nTWO\r\nthree\r\n").unwrap();
+    fs::write(fixture.source.join(".gitattributes"), "secret.lock -diff\n").unwrap();
+    fs::write(fixture.source.join("secret.lock"), "secret after\n").unwrap();
+    fs::write(fixture.source.join("intent.txt"), "intent\n").unwrap();
+    git_at(&fixture.source, &["add", "-N", "intent.txt"]);
+    git_at(
+        &fixture.source,
+        &["update-index", "--skip-worktree", "excluded.txt"],
+    );
+    fs::remove_file(fixture.source.join("excluded.txt")).unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert!(!status
+        .staged
+        .iter()
+        .any(|file| file.file.path == "intent.txt"));
+    assert!(!status
+        .unstaged
+        .iter()
+        .any(|file| file.file.path == "excluded.txt"));
+    for path in ["a.txt", "secret.lock", "intent.txt"] {
+        assert!(
+            status.unstaged.iter().any(|file| file.file.path == path),
+            "{path}"
+        );
+    }
+    for file in status.unstaged {
+        if file.file.path == "intent.txt" {
+            assert_eq!(file.file.status, "added");
+        }
+        let patch = workspace
+            .working_tree_diff(&info.id, "unstaged", &file.key)
+            .unwrap();
+        if file.file.path == "a.txt" {
+            assert_eq!((patch.additions, patch.deletions), (1, 1));
+        }
+        if file.file.path == "secret.lock" {
+            assert!(patch.binary);
+            assert!(patch.hunks.is_empty());
+        }
+    }
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn sparse_index_reports_an_explicit_limitation_without_expanding_or_writing_it() {
+    let fixture = Fixture::new();
+    for directory in ["keep", "other"] {
+        fs::create_dir(fixture.source.join(directory)).unwrap();
+        fs::write(fixture.source.join(directory).join("file.txt"), "content\n").unwrap();
+    }
+    git_at(&fixture.source, &["add", "keep", "other"]);
+    git_at(&fixture.source, &["commit", "-m", "sparse tree"]);
+    git_at(
+        &fixture.source,
+        &["sparse-checkout", "init", "--cone", "--sparse-index"],
+    );
+    git_at(&fixture.source, &["sparse-checkout", "set", "keep"]);
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    assert!(workspace
+        .working_tree_status(&info.id)
+        .unwrap_err()
+        .contains("index sparse"));
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn index_only_non_utf8_paths_can_be_listed_without_host_path_conversion() {
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "initial",
+        &[],
+        &[("normal.txt", b"normal\n")],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    let mut index = fixture.repository.index().unwrap();
+    let mut entry = index.get(0).unwrap();
+    entry.path = b"index-only-\xff.txt".to_vec();
+    entry.flags = entry.path.len() as u16;
+    entry.flags_extended = 0;
+    index.add(&entry).unwrap();
+    index.write().unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let status = workspace.working_tree_status(&info.id).unwrap();
+    assert_eq!(status.staged.len(), 1);
+    assert_eq!(status.staged[0].file.status, "added");
+    assert!(status.staged[0].file.path.contains('\u{fffd}'));
+    assert!(status.staged[0].key.contains("ff"));
+    assert_eq!(before, snapshot(&fixture.source));
+}

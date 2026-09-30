@@ -173,17 +173,23 @@ export async function tokenizeDiff(
       const old = tokenizeSide(
         highlighter,
         language as Language,
-        lines.filter((_, index) => hunk.lines[index]!.kind !== 'addition'),
+        lines.filter((_, index) => ['context', 'deletion'].includes(hunk.lines[index]!.kind)),
       )
       const current = tokenizeSide(
         highlighter,
         language as Language,
-        lines.filter((_, index) => hunk.lines[index]!.kind !== 'deletion'),
+        lines.filter((_, index) => ['context', 'addition'].includes(hunk.lines[index]!.kind)),
       )
       let oldIndex = 0
       let currentIndex = 0
       const highlighted: SyntaxToken[][] = []
       for (const line of hunk.lines) {
+        if (line.kind === 'annotation') {
+          highlighted.push([{ content: line.content, kind: 'plain' }])
+          tokenCount++
+          if (tokenCount > MAX_SYNTAX_TOKENS) return null
+          continue
+        }
         const oldTokens = line.kind === 'addition' ? undefined : old[oldIndex++]
         const currentTokens = line.kind === 'deletion' ? undefined : current[currentIndex++]
         const tokens = currentTokens ?? oldTokens ?? []

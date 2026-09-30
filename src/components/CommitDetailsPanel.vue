@@ -6,7 +6,7 @@ import DiffFontControls from './DiffFontControls.vue'
 import ChangedFileList from './ChangedFileList.vue'
 import type { ChangedFile, CommitDetails, FileDiff } from '../lib/types'
 import type { HighlightedDiff } from '../lib/diffSyntax'
-import { commitDate, count, filename, initials, shortSha } from '../lib/format'
+import { commitDate, commitDateTime, count, filename, initials, shortSha } from '../lib/format'
 
 const props = defineProps<{
   details: CommitDetails | null
@@ -92,7 +92,7 @@ const description = computed(
             }}</strong>
             <time
               class="truncate text-[calc(10px_+_var(--font-size-offset))] text-muted"
-              :datetime="new Date(details.time * 1000).toISOString()"
+              :datetime="commitDateTime(details.time)"
               >{{ commitDate(details.time) }}</time
             >
           </div>

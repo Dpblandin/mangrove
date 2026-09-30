@@ -411,7 +411,7 @@ describe('bounded LRU and fallbacks', () => {
     expect((await reading).tokens).toBeNull()
   })
 
-  it.each(['error', 'messageerror', 'timeout'] as const)(
+  it.each(['error', 'messageerror'] as const)(
     'returns the raw diff after %s and ignores a late response',
     async (failure) => {
       const state = setup()
@@ -419,9 +419,7 @@ describe('bounded LRU and fallbacks', () => {
       state.calls[0]!.resolve(patch())
       await flush()
       const worker = state.workers[0]!
-      if (failure === 'timeout') await vi.advanceTimersByTimeAsync(2_000)
-      else if (failure === 'error')
-        worker.onerror?.call(worker as unknown as Worker, {} as ErrorEvent)
+      if (failure === 'error') worker.onerror?.call(worker as unknown as Worker, {} as ErrorEvent)
       else worker.onmessageerror?.call(worker as unknown as Worker, {} as MessageEvent)
       const prepared = await reading
       expect(prepared.tokens).toBeNull()
@@ -476,4 +474,33 @@ describe('bounded LRU and fallbacks', () => {
     expect(vi.getTimerCount()).toBe(0)
     await expect(state.cache.read(file(0))).rejects.toMatchObject({ name: 'AbortError' })
   })
+})
+
+it('retries timed-out highlighting on explicit reopening without reading Git again', async () => {
+  const state = setup()
+  const first = state.cache.read(file(0))
+  state.calls[0]!.resolve(patch())
+  await flush()
+  await vi.advanceTimersByTimeAsync(2_000)
+  expect((await first).tokens).toBeNull()
+  state.workers[0]!.respond(colored('obsolete'))
+  const retry = state.cache.read(file(0))
+  await flush()
+  expect(state.calls).toHaveLength(1)
+  await vi.advanceTimersByTimeAsync(2_500)
+  state.workers.at(-1)!.respond()
+  expect((await retry).tokens).toEqual(colored())
+})
+
+it('keeps large commits on demand instead of scanning every file in the background', async () => {
+  const state = setup()
+  state.cache.reset({ sessionId: 'session', sha: 'large', files: state.files, fileCount: 6_000 })
+  state.cache.preload()
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(state.calls).toHaveLength(0)
+  const explicit = state.cache.read(file(1))
+  state.calls[0]!.resolve(patch())
+  await flush()
+  state.workers[0]!.respond()
+  expect((await explicit).tokens).toEqual(colored())
 })

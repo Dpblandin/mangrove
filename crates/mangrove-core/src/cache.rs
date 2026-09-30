@@ -159,12 +159,18 @@ pub(crate) const COLUMNS: &str =
     "c.sha, c.summary, c.author, c.email, c.time, c.parents, w.position, w.graph";
 
 pub(crate) fn search_terms(query: &str) -> String {
-    query
+    let terms = query
         .split_whitespace()
+        .filter(|term| term.chars().any(char::is_alphanumeric))
         .take(12)
         .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND ")
+        .join(" AND ");
+    if terms.is_empty() {
+        "\"\"".into()
+    } else {
+        terms
+    }
 }
 
 pub(crate) fn like_prefix(query: &str) -> String {

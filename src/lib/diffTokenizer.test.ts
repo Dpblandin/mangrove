@@ -163,3 +163,25 @@ describe('diff tokenization', () => {
     expect(text(tokens!)).toEqual([[line.slice(0, -1)]])
   })
 })
+
+it('does not put newline annotations inside reconstructed code or color their words', async () => {
+  const hunks = [
+    hunk([
+      ['deletion', 'const value = 1;'],
+      ['annotation', '\\ No newline at end of file'],
+      ['addition', 'const value = 2;'],
+      ['annotation', '\\ No newline at end of file'],
+    ]),
+  ]
+  const tokens = (await tokenizeDiff('a.ts', hunks))!
+  expect(tokens[0]![1]).toEqual([{ content: '\\ No newline at end of file', kind: 'plain' }])
+  expect(tokens[0]![3]).toEqual(tokens[0]![1])
+  const without = (await tokenizeDiff('a.ts', [
+    hunk([
+      ['deletion', 'const value = 1;'],
+      ['addition', 'const value = 2;'],
+    ]),
+  ]))!
+  expect(tokens[0]![0]).toEqual(without[0]![0])
+  expect(tokens[0]![2]).toEqual(without[0]![1])
+})

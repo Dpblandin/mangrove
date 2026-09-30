@@ -31,6 +31,9 @@ const scrollTop = ref(0)
 const laneOffset = ref(0)
 const maxLanes = ref(1)
 const visibleLanes = computed(() => Math.max(1, Math.floor((graphWidth.value - 30) / 18)))
+watch([maxLanes, visibleLanes], () => {
+  laneOffset.value = Math.min(laneOffset.value, Math.max(0, maxLanes.value - visibleLanes.value))
+})
 const virtualizer = useVirtualizer(
   computed(() => ({
     count: props.total,

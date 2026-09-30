@@ -43,6 +43,13 @@ export function useRepositoryTabs() {
     return tab
   }
 
+  function rejectOpen(id: string, previous: RepositoryTab | undefined) {
+    if (activeId.value !== id) return
+    tabs.value = tabs.value.map((tab) =>
+      tab.id === id ? (previous ?? { id, path: null, name: 'Nouvel onglet' }) : tab,
+    )
+  }
+
   function activate(id: string): RepositoryTab | null {
     const tab = tabs.value.find((candidate) => candidate.id === id) ?? null
     if (tab) activeId.value = tab.id
@@ -70,5 +77,5 @@ export function useRepositoryTabs() {
     )
   }
 
-  return { tabs, activeId, createNew, open, activate, close, update }
+  return { tabs, activeId, createNew, open, rejectOpen, activate, close, update }
 }
