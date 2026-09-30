@@ -86,8 +86,8 @@ export function useDiffHighlighting(
           id,
           path: currentFile.path,
           hunks: currentDiff.hunks.map((hunk) => ({
-            // Headers stay in the raw view; the tokenizer only needs the bounded lines.
-            header: '',
+            // Hunk context helps identify embedded script/style fragments.
+            header: hunk.header,
             lines: hunk.lines.map((line) => ({
               kind: line.kind,
               oldLine: line.oldLine,

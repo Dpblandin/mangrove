@@ -93,7 +93,7 @@ describe('diff highlighting worker lifecycle', () => {
     expect(state.workers[0]!.requests[0]).toEqual({
       id: 1,
       path: 'src/main.ts',
-      hunks: [{ header: '', lines: patch().hunks[0]!.lines }],
+      hunks: patch().hunks,
     })
     const result = colored()
     state.workers[0]!.respond(result)
@@ -272,7 +272,7 @@ describe('diff highlighting worker lifecycle', () => {
     const source = reactive(patch('let answer = 42\r\n'))
     const state = setup(reactive(file()), source)
     const request = state.workers[0]!.requests[0]!
-    expect(request.hunks).toEqual([{ header: '', lines: source.hunks[0]!.lines }])
+    expect(request.hunks).toEqual(source.hunks)
     expect(request.hunks).not.toBe(source.hunks)
     state.workers[0]!.respond(colored('let answer = 42'))
     expect(state.tokens.value).not.toBeNull()

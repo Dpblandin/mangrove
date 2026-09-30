@@ -25,7 +25,6 @@ type DiffJob<File> = {
   file: File
   controller: AbortController
   background: boolean
-  retryHighlight?: boolean
   waiters: Set<symbol>
   state: 'reading' | 'ready' | 'highlighting' | 'settled'
   diff?: FileDiff
@@ -38,6 +37,7 @@ const MAX_CHARACTERS = 8 * 1024 * 1024
 const MAX_CACHED_TOKENS = 200_000
 const MAX_ENTRIES = 256
 const TIMEOUT_MS = 2_000
+const FOREGROUND_TIMEOUT_MS = 8_000
 const PRELOAD_PAUSE_MS = 150
 
 function aborted() {
@@ -69,7 +69,7 @@ export function createDiffCache<File extends { path: string }>(
   workerFactory?: DiffHighlightWorkerFactory,
 ) {
   type Job = DiffJob<File>
-  type Active = { job: Job; id: number; timer: ReturnType<typeof setTimeout> }
+  type Active = { job: Job; id: number; startedAt: number; timer: ReturnType<typeof setTimeout> }
   const factory = workerFactory ?? createWorker
   let workerEnabled = Boolean(workerFactory) || typeof Worker !== 'undefined'
   let context: Context<File> | null = null
@@ -210,6 +210,15 @@ export function createDiffCache<File extends { path: string }>(
     return created
   }
 
+  function highlightTimer(job: Job, id: number, delay: number) {
+    return setTimeout(() => {
+      if (active?.id !== id) return
+      stopWorker()
+      finish(job, null, true)
+      pumpWorker()
+    }, delay)
+  }
+
   function pumpWorker() {
     if (active) {
       if (active.job.waiters.size === 0 && hasForeground()) stopWorker()
@@ -236,21 +245,14 @@ export function createDiffCache<File extends { path: string }>(
       active = {
         job,
         id,
-        timer: setTimeout(
-          () => {
-            if (active?.id !== id) return
-            stopWorker()
-            finish(job, null, true)
-            pumpWorker()
-          },
-          job.retryHighlight ? 8_000 : TIMEOUT_MS,
-        ),
+        startedAt: Date.now(),
+        timer: highlightTimer(job, id, job.waiters.size > 0 ? FOREGROUND_TIMEOUT_MS : TIMEOUT_MS),
       }
       const request: SyntaxRequest = {
         id,
         path: job.file.path,
         hunks: job.diff.hunks.map((hunk) => ({
-          header: '',
+          header: hunk.header,
           lines: hunk.lines.map((line) => ({
             kind: line.kind,
             oldLine: line.oldLine,
@@ -370,12 +372,20 @@ export function createDiffCache<File extends { path: string }>(
     const job = existing ?? makeJob(target, false)
     const subscriber = Symbol()
     job.waiters.add(subscriber)
+    if (active?.job === job && job.waiters.size === 1) {
+      // An opened file needs time to load its grammar, even if preparation began in the background.
+      clearTimeout(active.timer)
+      active.timer = highlightTimer(
+        job,
+        active.id,
+        Math.max(0, FOREGROUND_TIMEOUT_MS - (Date.now() - active.startedAt)),
+      )
+    }
     pumpWorker()
     if (!existing) {
       if (cached?.retryHighlight) {
         job.diff = cached.value.diff
         job.state = 'ready'
-        job.retryHighlight = true
         pumpWorker()
       } else start(job)
     }

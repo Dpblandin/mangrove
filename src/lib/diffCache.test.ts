@@ -136,7 +136,7 @@ describe('current commit preparation', () => {
     state.calls[0]!.resolve(patch())
     await flush()
     expect(published).toBe(false)
-    expect(state.workers[0]!.requests[0]!.hunks[0]!.header).toBe('')
+    expect(state.workers[0]!.requests[0]!.hunks[0]!.header).toBe(patch().hunks[0]!.header)
     state.workers[0]!.respond()
     const prepared = await reading
     expect(prepared.tokens).toEqual(colored())
@@ -231,6 +231,45 @@ describe('sequential background preparation', () => {
     await flush()
     state.workers[0]!.respond(colored('promoted'))
     expect((await foreground).tokens).toEqual(colored('promoted'))
+  })
+
+  it('lets a promoted background parser finish before publishing the selected diff', async () => {
+    const state = setup()
+    await firstPrepared(state)
+    state.cache.preload()
+    await vi.advanceTimersByTimeAsync(150)
+    state.calls[1]!.resolve(patch('promoted'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_500)
+    let published = false
+    const foreground = state.cache.read(file(1)).then((value) => {
+      published = true
+      return value
+    })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(published).toBe(false)
+    expect(state.workers[0]!.terminate).not.toHaveBeenCalled()
+    state.workers[0]!.respond(colored('promoted'))
+    expect((await foreground).tokens).toEqual(colored('promoted'))
+    expect(state.calls).toHaveLength(2)
+  })
+
+  it('bounds a promoted parser from its original start despite later subscribers', async () => {
+    const state = setup()
+    await firstPrepared(state)
+    state.cache.preload()
+    await vi.advanceTimersByTimeAsync(150)
+    state.calls[1]!.resolve(patch('promoted'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_500)
+    const first = state.cache.read(file(1))
+    await vi.advanceTimersByTimeAsync(6_000)
+    const second = state.cache.read(file(1))
+    await vi.advanceTimersByTimeAsync(500)
+    expect((await first).tokens).toBeNull()
+    expect((await second).tokens).toBeNull()
+    expect(state.workers[0]!.terminate).toHaveBeenCalledOnce()
+    expect(state.calls).toHaveLength(2)
   })
 
   it('holds the actual native background slot across reset even when abort is ignored', async () => {
@@ -481,7 +520,7 @@ it('retries timed-out highlighting on explicit reopening without reading Git aga
   const first = state.cache.read(file(0))
   state.calls[0]!.resolve(patch())
   await flush()
-  await vi.advanceTimersByTimeAsync(2_000)
+  await vi.advanceTimersByTimeAsync(8_000)
   expect((await first).tokens).toBeNull()
   state.workers[0]!.respond(colored('obsolete'))
   const retry = state.cache.read(file(0))

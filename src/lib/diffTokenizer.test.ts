@@ -124,6 +124,28 @@ describe('diff tokenization', () => {
     ['Cargo.toml', '[package]\nname = "hello"'],
     ['config.xml', '<root name="hello">42</root>'],
     ['Dockerfile', 'FROM alpine\nRUN echo "hello"'],
+    ['main.c', 'int main(void) { return 42; }'],
+    ['main.hpp', 'class Example { public: int value = 42; };'],
+    ['Main.cs', 'public class Example { public string Value = "hello"; }'],
+    ['Main.java', 'public class Example { public int value = 42; }'],
+    ['main.kt', 'val greeting: String = "hello"'],
+    ['main.go', 'package main\nfunc main() { println("hello") }'],
+    ['Gemfile', 'gem "rails"\n# application dependencies'],
+    ['main.swift', 'let greeting: String = "hello"'],
+    ['App.svelte', '<script lang="ts">\nconst value = "hello"\n</script>'],
+    ['index.astro', '---\nconst value = "hello"\n---\n<div>{value}</div>'],
+    ['style.less', '@color: red;\n.button { color: @color; }'],
+    ['tsconfig.jsonc', '// compiler options\n{ "strict": true }'],
+    ['config.json5', '{ name: "hello", count: 42 }'],
+    ['query.graphql', 'query Hello { users { name } }'],
+    ['.env.local', 'GREETING="hello"\n# local configuration'],
+    ['settings.ini', '[settings]\nname="hello"'],
+    ['messages.properties', 'greeting=hello\n# translations'],
+    ['CMakeLists.txt', 'project(hello)\nset(VALUE "hello")'],
+    ['Makefile', '# build the application\nall:\n\techo "hello"'],
+    ['Cargo.lock', 'version = 4\n[[package]]\nname = "hello"'],
+    ['composer.lock', '{ "packages": [], "content-hash": "hello" }'],
+    ['changes.patch', 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n+hello'],
   ])(
     'loads the explicit grammar for %s and produces exact semantic tokens',
     async (path, source) => {
@@ -134,6 +156,71 @@ describe('diff tokenization', () => {
       expect(tokens!.flat(2).some((token) => token.kind !== 'plain')).toBe(true)
     },
   )
+
+  it('colors Vue script hunks without their opening tag, preserving both sides and every displayed byte', async () => {
+    const partial = hunk([
+      ['context', 'let frame = 0'],
+      ['addition', 'let resolution: MediaQueryList | undefined'],
+      ['addition', 'function resolutionChanged() {'],
+      ['addition', "  resolution?.removeEventListener('change', resolutionChanged)"],
+      ['addition', '}'],
+    ])
+    partial.header = '@@ -16,3 +16,7 @@ const canvas = ref<HTMLCanvasElement>()'
+    const tokens = (await tokenizeDiff('GraphCanvas.vue', [partial]))!
+    expect(text(tokens)).toEqual([partial.lines.map((line) => line.content)])
+    const flat = tokens.flat(2)
+    expect(
+      flat.some((token) => token.kind === 'keyword' && token.content.includes('function')),
+    ).toBe(true)
+    expect(
+      flat.some((token) => token.kind === 'type' && token.content.includes('MediaQueryList')),
+    ).toBe(true)
+    expect(flat.some((token) => token.kind === 'string' && token.content.includes('change'))).toBe(
+      true,
+    )
+    expect(flat.some((token) => token.content.includes('<script'))).toBe(false)
+  })
+
+  it('recognizes missing embedded delimiters without contaminating disconnected template or style hunks', async () => {
+    const hunks = [
+      hunk([
+        ['addition', '  resolutionChanged()'],
+        ['context', '</script>'],
+      ]),
+      hunk([['addition', '<button :title="label">Save</button>']]),
+      hunk([
+        ['addition', '.button { color: red; }'],
+        ['context', '</style>'],
+      ]),
+    ]
+    hunks[1]!.header = '@@ -80,3 +90,3 @@ function previousScriptBlock() {'
+    const tokens = (await tokenizeDiff('App.vue', hunks))!
+    expect(text(tokens)).toEqual(hunks.map((block) => block.lines.map((line) => line.content)))
+    for (const rows of tokens) expect(rows[0]!.some((token) => token.kind !== 'plain')).toBe(true)
+    expect(
+      tokens[1]![0]!.some((token) => token.kind === 'keyword' && token.content.includes('button')),
+    ).toBe(true)
+  })
+
+  it('colors PHP code fragments without a <?php tag while leaving template text intact', async () => {
+    const hunks = [
+      hunk([['addition', 'public function hello(): string { return "hello"; }']]),
+      hunk([['addition', '<div title="hello">Content</div>']]),
+    ]
+    const tokens = (await tokenizeDiff('Reader.php', hunks))!
+    expect(text(tokens)).toEqual(hunks.map((block) => block.lines.map((line) => line.content)))
+    expect(
+      tokens[0]![0]!.some(
+        (token) => token.kind === 'keyword' && token.content.includes('function'),
+      ),
+    ).toBe(true)
+    expect(
+      tokens[0]![0]!.some((token) => token.kind === 'string' && token.content.includes('hello')),
+    ).toBe(true)
+    expect(
+      tokens[1]![0]!.some((token) => token.kind === 'keyword' && token.content.includes('div')),
+    ).toBe(true)
+  })
 
   it('falls back to plain text for unknown, empty or oversized input', async () => {
     expect(await tokenizeDiff('unknown.txt', [hunk([['context', 'text\n']])])).toBeNull()

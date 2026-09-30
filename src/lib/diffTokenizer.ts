@@ -17,10 +17,15 @@ const languages = {
   tsx: () => import('shiki/langs/tsx.mjs'),
   jsx: () => import('shiki/langs/jsx.mjs'),
   vue: () => import('shiki/langs/vue.mjs'),
+  svelte: () => import('shiki/langs/svelte.mjs'),
+  astro: () => import('shiki/langs/astro.mjs'),
   html: () => import('shiki/langs/html.mjs'),
   css: () => import('shiki/langs/css.mjs'),
   scss: () => import('shiki/langs/scss.mjs'),
+  less: () => import('shiki/langs/less.mjs'),
   json: () => import('shiki/langs/json.mjs'),
+  jsonc: () => import('shiki/langs/jsonc.mjs'),
+  json5: () => import('shiki/langs/json5.mjs'),
   yaml: () => import('shiki/langs/yaml.mjs'),
   php: () => import('shiki/langs/php.mjs'),
   rust: () => import('shiki/langs/rust.mjs'),
@@ -31,6 +36,21 @@ const languages = {
   toml: () => import('shiki/langs/toml.mjs'),
   xml: () => import('shiki/langs/xml.mjs'),
   docker: () => import('shiki/langs/docker.mjs'),
+  c: () => import('shiki/langs/c.mjs'),
+  cpp: () => import('shiki/langs/cpp.mjs'),
+  csharp: () => import('shiki/langs/csharp.mjs'),
+  java: () => import('shiki/langs/java.mjs'),
+  kotlin: () => import('shiki/langs/kotlin.mjs'),
+  go: () => import('shiki/langs/go.mjs'),
+  ruby: () => import('shiki/langs/ruby.mjs'),
+  swift: () => import('shiki/langs/swift.mjs'),
+  graphql: () => import('shiki/langs/graphql.mjs'),
+  ini: () => import('shiki/langs/ini.mjs'),
+  properties: () => import('shiki/langs/properties.mjs'),
+  cmake: () => import('shiki/langs/cmake.mjs'),
+  make: () => import('shiki/langs/make.mjs'),
+  dotenv: () => import('shiki/langs/dotenv.mjs'),
+  diff: () => import('shiki/langs/diff.mjs'),
 }
 type Language = keyof typeof languages
 
@@ -48,16 +68,27 @@ const markers: Record<SyntaxKind, string> = {
 }
 const kinds = new Map(Object.entries(markers).map(([kind, marker]) => [marker, kind as SyntaxKind]))
 const scopes: Partial<Record<SyntaxKind, string[]>> = {
-  keyword: ['keyword', 'storage', 'constant.language'],
-  string: ['string', 'constant.character', 'markup.inline.raw', 'markup.fenced_code'],
-  comment: ['comment'],
+  keyword: [
+    'keyword',
+    'storage',
+    'constant.language',
+    'entity.other.attribute-name',
+    'entity.name.tag',
+  ],
+  string: [
+    'string',
+    'constant.character',
+    'markup.inline.raw',
+    'markup.fenced_code',
+    'punctuation.definition.string',
+  ],
+  comment: ['comment', 'punctuation.definition.comment'],
   number: ['constant.numeric'],
   type: [
     'entity.name.type',
     'entity.name.class',
     'support.type',
     'support.class',
-    'entity.name.tag',
     'markup.heading',
   ],
   function: ['entity.name.function', 'support.function'],
@@ -67,7 +98,6 @@ const scopes: Partial<Record<SyntaxKind, string[]>> = {
     'variable.other.object.property',
     'support.type.property-name',
     'support.variable.property-name',
-    'entity.other.attribute-name',
     'meta.object-literal.key',
     'support.type.property-name.json',
     'entity.name.tag.yaml',
@@ -117,19 +147,53 @@ function append(tokens: SyntaxToken[], content: string, kind: SyntaxKind) {
   else tokens.push({ content, kind })
 }
 
-function tokenizeSide(highlighter: HighlighterCore, language: Language, lines: string[]) {
-  if (!lines.length) return []
+// A patch often starts inside an embedded block, without its opening delimiter.
+// Seed only recognizable fragments; never insert that delimiter into displayed tokens.
+function fragmentPrefix(language: Language, lines: string[], header: string) {
+  if (!['vue', 'svelte', 'astro'].includes(language)) return ''
   const code = lines.join('\n')
+  const context = header.replace(/^@@.*?@@\s*/, '')
+  const script = [context, ...lines].some((line) =>
+    /^\s*(?:(?:import|export|const|let|var|function|class|interface|type|return|async|if|for|while|throw)\b|[\w$][\w$.?]*\s*(?:\(|=(?!=)))/.test(
+      line,
+    ),
+  )
+  const block = code.match(/^[\t ]*<(\/?)(script|style|template)\b[^\n>]*>/im)
+  if (block && block[1] !== '/') return ''
+  if (block?.[2]?.toLowerCase() === 'template') return ''
+  if (!block && /^\s*<\/?[a-z][\w:-]*(?:\s|>|\/)/i.test(code)) return ''
+  const style =
+    block?.[2]?.toLowerCase() === 'style' ||
+    (!script && /^\s*(?:[.#&][^{\n]+\{|[\w-]+\s*:\s*[^{}\n]+;)/m.test(code))
+  if (style) return '<style lang="scss">\n'
+  if (script || block?.[2]?.toLowerCase() === 'script')
+    return language === 'astro' ? '---\n' : '<script lang="ts">\n'
+  return ''
+}
+
+function tokenizeSide(
+  highlighter: HighlighterCore,
+  language: Language,
+  lines: string[],
+  header: string,
+) {
+  if (!lines.length) return []
+  // PHP's grammar starts in code. Its bundled HTML grammar handles a separate
+  // template fragment whose opening PHP block is outside the patch.
+  const fragmentLanguage =
+    language === 'php' && /^\s*<\/?[a-z!]/i.test(lines.join('\n')) ? 'html' : language
+  const prefix = fragmentPrefix(language, lines, header)
+  const code = prefix + lines.join('\n')
   const tokens: ThemedToken[] = highlighter
     .codeToTokensBase(code, {
-      lang: language,
+      lang: fragmentLanguage,
       theme: 'mangrove-kinds',
       tokenizeMaxLineLength: 20 * 1_024,
       tokenizeTimeLimit: 500,
     })
     .flat()
   let tokenIndex = 0
-  let start = 0
+  let start = prefix.length
   return lines.map((line) => {
     const end = start + line.length
     const result: SyntaxToken[] = []
@@ -174,11 +238,13 @@ export async function tokenizeDiff(
         highlighter,
         language as Language,
         lines.filter((_, index) => ['context', 'deletion'].includes(hunk.lines[index]!.kind)),
+        hunk.header,
       )
       const current = tokenizeSide(
         highlighter,
         language as Language,
         lines.filter((_, index) => ['context', 'addition'].includes(hunk.lines[index]!.kind)),
+        hunk.header,
       )
       let oldIndex = 0
       let currentIndex = 0
