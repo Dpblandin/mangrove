@@ -36,6 +36,10 @@ function git(args, input) {
       '--work-tree=' + directory,
       '-c',
       'core.hooksPath=' + resolve(directory, '.no-hooks'),
+      '-c',
+      'maintenance.auto=false',
+      '-c',
+      'gc.auto=0',
       ...args,
     ],
     {

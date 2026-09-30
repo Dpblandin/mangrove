@@ -36,6 +36,10 @@ function git(path, ...args) {
       'user.email=fixture@example.test',
       '-c',
       'core.hooksPath=/dev/null',
+      '-c',
+      'maintenance.auto=false',
+      '-c',
+      'gc.auto=0',
       ...args,
     ],
     {
