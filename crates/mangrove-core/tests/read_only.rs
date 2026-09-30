@@ -2215,3 +2215,775 @@ fn index_only_non_utf8_paths_can_be_listed_without_host_path_conversion() {
     assert!(status.staged[0].key.contains("ff"));
     assert_eq!(before, snapshot(&fixture.source));
 }
+
+#[test]
+fn file_views_use_revision_objects_and_preserve_every_source_file() {
+    let fixture = Fixture::new();
+    let initial = commit(
+        &fixture.repository,
+        "initial",
+        &[],
+        &[(
+            "élève.ts",
+            "const prénom = 'Élodie';\nconst value = 1;\n".as_bytes(),
+        )],
+        Some("HEAD"),
+    );
+    let modified = commit(
+        &fixture.repository,
+        "modify",
+        &[initial],
+        &[(
+            "élève.ts",
+            "const prénom = 'Élodie';\nconst value = 2;\n".as_bytes(),
+        )],
+        Some("HEAD"),
+    );
+    fs::write(fixture.source.join("élève.ts"), "uncommitted worktree text").unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let details = workspace
+        .commit_details(&info.id, &modified.to_string())
+        .unwrap();
+    let key = &details.files[0].file_key;
+    let content = workspace
+        .file_content(&info.id, &initial.to_string(), key)
+        .unwrap();
+    assert_eq!(
+        content.lines,
+        ["const prénom = 'Élodie';", "const value = 1;"]
+    );
+    assert!(content.ends_with_newline);
+    let history = workspace
+        .file_history(&info.id, &modified.to_string(), key, None)
+        .unwrap();
+    assert_eq!(
+        history
+            .entries
+            .iter()
+            .map(|entry| entry.sha.as_str())
+            .collect::<Vec<_>>(),
+        [modified.to_string(), initial.to_string()]
+    );
+    let blame = workspace
+        .file_blame(&info.id, &modified.to_string(), key)
+        .unwrap();
+    assert_eq!(blame.groups.len(), 2);
+    assert_eq!(blame.groups[0].sha, initial.to_string());
+    assert_eq!(blame.groups[1].sha, modified.to_string());
+    assert_eq!(blame.groups[0].author, "Élodie Müller");
+    assert_eq!(
+        workspace
+            .file_revision_diff(&info.id, &modified.to_string(), key)
+            .unwrap()
+            .additions,
+        1
+    );
+    assert_eq!(snapshot(&fixture.source), before);
+}
+
+#[test]
+fn file_history_follows_renames_deletions_and_first_parent_merges() {
+    let fixture = Fixture::new();
+    let first = commit(
+        &fixture.repository,
+        "add",
+        &[],
+        &[("old.rs", b"let original = 1;\n")],
+        Some("HEAD"),
+    );
+    let renamed = commit(
+        &fixture.repository,
+        "rename",
+        &[first],
+        &[("new.rs", b"let original = 1;\n")],
+        Some("HEAD"),
+    );
+    let side = commit(
+        &fixture.repository,
+        "side",
+        &[renamed],
+        &[("new.rs", b"let original = 1;\nlet side = 2;\n")],
+        None,
+    );
+    let merge = commit(
+        &fixture.repository,
+        "merge",
+        &[renamed, side],
+        &[("new.rs", b"let original = 1;\nlet side = 2;\n")],
+        Some("HEAD"),
+    );
+    let deleted = commit(&fixture.repository, "delete", &[merge], &[], Some("HEAD"));
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let key = workspace
+        .commit_details(&info.id, &deleted.to_string())
+        .unwrap()
+        .files[0]
+        .file_key
+        .clone();
+    let history = workspace
+        .file_history(&info.id, &deleted.to_string(), &key, None)
+        .unwrap();
+    assert_eq!(
+        history
+            .entries
+            .iter()
+            .map(|entry| entry.sha.as_str())
+            .collect::<Vec<_>>(),
+        [
+            deleted.to_string(),
+            merge.to_string(),
+            renamed.to_string(),
+            first.to_string()
+        ]
+    );
+    assert!(history.entries[1].merge);
+    assert_eq!(history.entries[2].status, "renamed");
+    assert_eq!(history.entries[2].old_path.as_deref(), Some("old.rs"));
+    assert_eq!(history.entries[3].path, "old.rs");
+    let absent = workspace
+        .file_content(&info.id, &deleted.to_string(), &key)
+        .unwrap();
+    assert_eq!(absent.kind, "deleted");
+    assert_eq!(absent.parent_sha, Some(merge.to_string()));
+    assert!(workspace
+        .file_blame(&info.id, &deleted.to_string(), &key)
+        .is_err());
+    let blame = workspace
+        .file_blame(&info.id, &merge.to_string(), &key)
+        .unwrap();
+    assert_eq!(blame.groups[0].sha, first.to_string());
+    assert_eq!(blame.groups[1].sha, merge.to_string());
+}
+
+#[test]
+fn file_views_define_binary_empty_non_newline_and_size_limits() {
+    let fixture = Fixture::new();
+    let many_lines = "é\n".repeat(2_100);
+    let oversized = vec![b'x'; 2 * 1024 * 1024 + 1];
+    let huge_line = vec![b'x'; 256 * 1024 + 1];
+    let id = commit(
+        &fixture.repository,
+        "edge cases",
+        &[],
+        &[
+            ("binary.bin", b"\0\xff\x01"),
+            ("empty.txt", b""),
+            ("final.txt", "é sans newline".as_bytes()),
+            ("lines.txt", many_lines.as_bytes()),
+            ("oversized.txt", &oversized),
+            ("long.txt", &huge_line),
+        ],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let details = workspace.commit_details(&info.id, &id.to_string()).unwrap();
+    let read = |name: &str| {
+        let file = details.files.iter().find(|file| file.path == name).unwrap();
+        workspace
+            .file_content(&info.id, &id.to_string(), &file.file_key)
+            .unwrap()
+    };
+    assert_eq!(read("binary.bin").kind, "binary");
+    let empty = read("empty.txt");
+    assert!(empty.lines.is_empty());
+    assert_eq!(empty.kind, "text");
+    let final_line = read("final.txt");
+    assert_eq!(final_line.lines, ["é sans newline"]);
+    assert!(!final_line.ends_with_newline);
+    let lines = read("lines.txt");
+    assert_eq!(lines.lines.len(), 2_000);
+    assert!(lines.truncated);
+    assert_eq!(read("oversized.txt").kind, "large");
+    assert!(read("long.txt").truncated);
+    let key = &details
+        .files
+        .iter()
+        .find(|file| file.path == "empty.txt")
+        .unwrap()
+        .file_key;
+    assert!(workspace
+        .file_blame(&info.id, &id.to_string(), key)
+        .unwrap()
+        .groups
+        .is_empty());
+}
+
+#[test]
+fn file_history_pages_continue_across_renames_without_duplicates() {
+    let fixture = Fixture::new();
+    let mut parent = None;
+    let mut ids = Vec::new();
+    for index in 0..48 {
+        let path = if index < 20 { "old.txt" } else { "new.txt" };
+        let text = if index == 20 {
+            "line 19\n".to_string()
+        } else {
+            format!("line {index}\n")
+        };
+        let id = commit(
+            &fixture.repository,
+            "change",
+            &parent.into_iter().collect::<Vec<_>>(),
+            &[(path, text.as_bytes())],
+            Some("HEAD"),
+        );
+        parent = Some(id);
+        ids.push(id.to_string());
+    }
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let sha = parent.unwrap().to_string();
+    let key = workspace.commit_details(&info.id, &sha).unwrap().files[0]
+        .file_key
+        .clone();
+    let page = workspace.file_history(&info.id, &sha, &key, None).unwrap();
+    assert_eq!(page.entries.len(), 40);
+    let cursor = page.next_cursor.unwrap();
+    let next = workspace
+        .file_history(&info.id, &sha, &key, Some(&cursor))
+        .unwrap();
+    let all = page
+        .entries
+        .iter()
+        .chain(next.entries.iter())
+        .map(|entry| entry.sha.clone())
+        .collect::<Vec<_>>();
+    ids.reverse();
+    assert_eq!(all, ids);
+    assert!(next.next_cursor.is_none());
+    assert!(workspace
+        .file_history(&info.id, &sha, "6f74686572", Some(&cursor))
+        .is_err());
+}
+
+#[test]
+fn sparse_file_history_returns_a_cursor_even_for_an_empty_page() {
+    let fixture = Fixture::new();
+    let mut parent = commit(
+        &fixture.repository,
+        "add",
+        &[],
+        &[("rare.txt", b"unchanged\n")],
+        Some("HEAD"),
+    );
+    let initial = parent.to_string();
+    for _ in 0..260 {
+        parent = commit(
+            &fixture.repository,
+            "other change",
+            &[parent],
+            &[("rare.txt", b"unchanged\n")],
+            Some("HEAD"),
+        );
+    }
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let page = workspace
+        .file_history(&info.id, &parent.to_string(), "726172652e747874", None)
+        .unwrap();
+    assert!(page.entries.is_empty());
+    assert_eq!(page.scanned, 256);
+    let next = workspace
+        .file_history(
+            &info.id,
+            &parent.to_string(),
+            "726172652e747874",
+            page.next_cursor.as_deref(),
+        )
+        .unwrap();
+    assert_eq!(next.entries[0].sha, initial);
+    let blame = workspace
+        .file_blame(&info.id, &parent.to_string(), "726172652e747874")
+        .unwrap();
+    assert!(blame.limitation.is_some());
+    assert!(blame.groups[0].boundary);
+}
+
+#[test]
+fn missing_file_objects_report_a_partial_repository_without_fetch_or_writes() {
+    let fixture = Fixture::new();
+    let id = commit(
+        &fixture.repository,
+        "add",
+        &[],
+        &[("partial.txt", b"missing blob\n")],
+        Some("HEAD"),
+    );
+    let blob = fixture
+        .repository
+        .find_commit(id)
+        .unwrap()
+        .tree()
+        .unwrap()
+        .get_name("partial.txt")
+        .unwrap()
+        .id()
+        .to_string();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let details = workspace.commit_details(&info.id, &id.to_string()).unwrap();
+    fs::remove_file(
+        fixture
+            .repository
+            .path()
+            .join("objects")
+            .join(&blob[..2])
+            .join(&blob[2..]),
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    let error = workspace
+        .file_content(&info.id, &id.to_string(), &details.files[0].file_key)
+        .unwrap_err();
+    assert!(error.contains("Objet Git absent"), "{error}");
+    assert!(error.contains("Aucun fetch"));
+    assert_eq!(snapshot(&fixture.source), before);
+}
+
+#[test]
+fn file_text_preserves_isolated_carriage_returns_and_normalizes_crlf() {
+    let fixture = Fixture::new();
+    let id = commit(
+        &fixture.repository,
+        "line endings",
+        &[],
+        &[("endings.txt", b"first\r\nsecond\rthird\r")],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let content = workspace
+        .file_content(&info.id, &id.to_string(), "656e64696e67732e747874")
+        .unwrap();
+    assert_eq!(content.lines, ["first", "second\rthird\r"]);
+    assert!(!content.ends_with_newline);
+}
+
+#[cfg(unix)]
+#[test]
+fn file_views_keep_raw_name_identities_and_never_follow_tree_symlinks() {
+    let fixture = Fixture::new();
+    let mut tree = fixture.repository.treebuilder(None).unwrap();
+    let names: [&[u8]; 2] = [b"same-\xfe.txt", b"same-\xff.txt"];
+    for (index, name) in names.iter().enumerate() {
+        let blob = fixture
+            .repository
+            .blob(format!("content {index}\n").as_bytes())
+            .unwrap();
+        tree.insert(*name, blob, 0o100644).unwrap();
+    }
+    let target = fixture.root.path().join("external-secret.txt");
+    fs::write(&target, "secret outside repository").unwrap();
+    let symlink = fixture
+        .repository
+        .blob(target.as_os_str().as_encoded_bytes())
+        .unwrap();
+    tree.insert("link.txt", symlink, 0o120000).unwrap();
+    let subtree = fixture
+        .repository
+        .treebuilder(None)
+        .unwrap()
+        .write()
+        .unwrap();
+    tree.insert("directory", subtree, 0o040000).unwrap();
+    let tree = fixture.repository.find_tree(tree.write().unwrap()).unwrap();
+    let signature = Signature::now("Author", "author@example.org").unwrap();
+    let id = fixture
+        .repository
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "raw names",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let external_before = snapshot(&target);
+    let details = workspace.commit_details(&info.id, &id.to_string()).unwrap();
+    let files: Vec<_> = details
+        .files
+        .iter()
+        .filter(|file| file.path.starts_with("same-"))
+        .collect();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].path, files[1].path);
+    assert_ne!(files[0].file_key, files[1].file_key);
+    for file in files {
+        let content = workspace
+            .file_content(&info.id, &id.to_string(), &file.file_key)
+            .unwrap();
+        let expected = if file.file_key.contains("fe") {
+            "content 0"
+        } else {
+            "content 1"
+        };
+        assert_eq!(content.lines, [expected]);
+        assert_eq!(
+            workspace
+                .file_history(&info.id, &id.to_string(), &file.file_key, None)
+                .unwrap()
+                .entries[0]
+                .file_key,
+            file.file_key
+        );
+        assert_eq!(
+            workspace
+                .file_blame(&info.id, &id.to_string(), &file.file_key)
+                .unwrap()
+                .groups[0]
+                .sha,
+            id.to_string()
+        );
+    }
+    let symlink = workspace
+        .file_content(&info.id, &id.to_string(), "6c696e6b2e747874")
+        .unwrap();
+    assert_eq!(symlink.kind, "text");
+    assert_eq!(symlink.lines, [target.to_str().unwrap()]);
+    assert_eq!(
+        workspace
+            .file_content(&info.id, &id.to_string(), "6469726563746f7279")
+            .unwrap()
+            .kind,
+        "unsupported"
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+    assert_eq!(external_before, snapshot(&target));
+}
+
+#[test]
+fn file_history_keeps_completed_entries_when_an_ancestor_tree_is_missing() {
+    let fixture = Fixture::new();
+    let initial = commit(
+        &fixture.repository,
+        "initial",
+        &[],
+        &[("partial.txt", b"one\n")],
+        Some("HEAD"),
+    );
+    let middle = commit(
+        &fixture.repository,
+        "middle",
+        &[initial],
+        &[("partial.txt", b"two\n")],
+        Some("HEAD"),
+    );
+    let newest = commit(
+        &fixture.repository,
+        "newest",
+        &[middle],
+        &[("partial.txt", b"three\n")],
+        Some("HEAD"),
+    );
+    let missing_tree = fixture
+        .repository
+        .find_commit(initial)
+        .unwrap()
+        .tree_id()
+        .to_string();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    fs::remove_file(
+        fixture
+            .repository
+            .path()
+            .join("objects")
+            .join(&missing_tree[..2])
+            .join(&missing_tree[2..]),
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    let history = workspace
+        .file_history(
+            &info.id,
+            &newest.to_string(),
+            "7061727469616c2e747874",
+            None,
+        )
+        .unwrap();
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].sha, newest.to_string());
+    assert!(history.next_cursor.is_none());
+    let limitation = history.limitation.unwrap();
+    assert!(limitation.contains("Objet Git absent"), "{limitation}");
+    assert!(limitation.contains("Aucun fetch"));
+    let content_error = workspace
+        .file_content(&info.id, &initial.to_string(), "7061727469616c2e747874")
+        .unwrap_err();
+    assert!(content_error.contains("Objet Git absent"));
+    let absent_commit = workspace
+        .file_content(
+            &info.id,
+            "1234567890123456789012345678901234567890",
+            "7061727469616c2e747874",
+        )
+        .unwrap_err();
+    assert!(absent_commit.contains("Objet Git absent"));
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn file_history_marks_an_apparent_creation_at_a_shallow_boundary() {
+    let fixture = Fixture::new();
+    let initial = commit(
+        &fixture.repository,
+        "initial",
+        &[],
+        &[("file.txt", b"one\n")],
+        Some("HEAD"),
+    );
+    let boundary = commit(
+        &fixture.repository,
+        "boundary",
+        &[initial],
+        &[("file.txt", b"two\n")],
+        Some("HEAD"),
+    );
+    fs::write(
+        fixture.repository.path().join("shallow"),
+        format!("{boundary}\n"),
+    )
+    .unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let history = workspace
+        .file_history(&info.id, &boundary.to_string(), "66696c652e747874", None)
+        .unwrap();
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].status, "added");
+    assert!(history
+        .limitation
+        .as_deref()
+        .unwrap()
+        .contains("Frontière shallow"));
+    let blame = workspace
+        .file_blame(&info.id, &boundary.to_string(), "66696c652e747874")
+        .unwrap();
+    assert!(blame
+        .limitation
+        .as_deref()
+        .unwrap()
+        .contains("Frontière shallow"));
+    assert!(blame.groups[0].boundary);
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn file_blame_stops_before_large_ancestors_and_reports_only_reached_boundaries() {
+    let fixture = Fixture::new();
+    let huge = vec![b'x'; 2 * 1024 * 1024 + 1];
+    let initial = commit(
+        &fixture.repository,
+        "large ancestor",
+        &[],
+        &[("file.txt", &huge)],
+        Some("HEAD"),
+    );
+    let reduced = commit(
+        &fixture.repository,
+        "reduce",
+        &[initial],
+        &[("file.txt", b"small\n")],
+        Some("HEAD"),
+    );
+    let newest = commit(
+        &fixture.repository,
+        "edit",
+        &[reduced],
+        &[("file.txt", b"new\n")],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let bounded = workspace
+        .file_blame(&info.id, &reduced.to_string(), "66696c652e747874")
+        .unwrap();
+    assert_eq!(bounded.groups[0].sha, reduced.to_string());
+    assert!(bounded.groups[0].boundary);
+    assert!(bounded.limitation.as_deref().unwrap().contains("2 Mio"));
+    let resolved = workspace
+        .file_blame(&info.id, &newest.to_string(), "66696c652e747874")
+        .unwrap();
+    assert_eq!(resolved.groups[0].sha, newest.to_string());
+    assert!(resolved.limitation.is_none());
+    let diff = workspace
+        .file_revision_diff(&info.id, &reduced.to_string(), "66696c652e747874")
+        .unwrap();
+    assert!(diff.truncated);
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn file_history_long_raw_path_cursors_continue_after_a_rename() {
+    let fixture = Fixture::new();
+    let old_path = format!("old-{}.txt", "a".repeat(9_000));
+    let new_path = format!("new-{}.txt", "b".repeat(9_000));
+    let mut parent = None;
+    let mut ids = Vec::new();
+    for index in 0..48 {
+        let path = if index < 10 { &old_path } else { &new_path };
+        let text = format!("line {}\n", if index == 10 { 9 } else { index });
+        let id = commit(
+            &fixture.repository,
+            "long path",
+            &parent.into_iter().collect::<Vec<_>>(),
+            &[(path, text.as_bytes())],
+            Some("HEAD"),
+        );
+        ids.push(id.to_string());
+        parent = Some(id);
+    }
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let sha = parent.unwrap().to_string();
+    let key = workspace.commit_details(&info.id, &sha).unwrap().files[0]
+        .file_key
+        .clone();
+    let first = workspace.file_history(&info.id, &sha, &key, None).unwrap();
+    assert_eq!(first.entries.len(), 40);
+    let cursor = first.next_cursor.unwrap();
+    assert!(cursor.len() > 33 * 1024);
+    let second = workspace
+        .file_history(&info.id, &sha, &key, Some(&cursor))
+        .unwrap();
+    let all: Vec<_> = first
+        .entries
+        .into_iter()
+        .chain(second.entries)
+        .map(|entry| entry.sha)
+        .collect();
+    ids.reverse();
+    assert_eq!(all, ids);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn file_blame_ignores_unrelated_large_modifications_for_a_stable_path() {
+    let fixture = Fixture::new();
+    let initial = commit(
+        &fixture.repository,
+        "initial",
+        &[],
+        &[("file.txt", b"stable\n")],
+        Some("HEAD"),
+    );
+    let huge = vec![b'x'; 2 * 1024 * 1024 + 1];
+    let changed = commit(
+        &fixture.repository,
+        "unrelated large file",
+        &[initial],
+        &[("file.txt", b"stable\n"), ("other.txt", &huge)],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let blame = workspace
+        .file_blame(&info.id, &changed.to_string(), "66696c652e747874")
+        .unwrap();
+    assert_eq!(blame.groups[0].sha, initial.to_string());
+    assert!(blame.limitation.is_none());
+}
+
+#[test]
+fn file_blame_reports_literal_pathspec_limits_without_confusing_other_files() {
+    for (literal, matching) in [
+        ("*.txt", "other.txt"),
+        ("?.txt", "a.txt"),
+        ("[ab].txt", "a.txt"),
+        ("a\\ file.txt", "a file.txt"),
+    ] {
+        let fixture = Fixture::new();
+        let initial = commit(
+            &fixture.repository,
+            "initial",
+            &[],
+            &[(literal, b"stable\n"), (matching, b"before\n")],
+            Some("HEAD"),
+        );
+        let changed = commit(
+            &fixture.repository,
+            "other file changed",
+            &[initial],
+            &[(literal, b"stable\n"), (matching, b"after\n")],
+            Some("HEAD"),
+        );
+        let workspace = fixture.workspace();
+        let info = fixture.open(&workspace);
+        let details = workspace
+            .commit_details(&info.id, &initial.to_string())
+            .unwrap();
+        let key = &details
+            .files
+            .iter()
+            .find(|file| file.path == literal)
+            .unwrap()
+            .file_key;
+        assert_eq!(
+            workspace
+                .file_content(&info.id, &changed.to_string(), key)
+                .unwrap()
+                .lines,
+            ["stable"]
+        );
+        let history = workspace
+            .file_history(&info.id, &changed.to_string(), key, None)
+            .unwrap();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].sha, initial.to_string());
+        assert!(workspace
+            .file_blame(&info.id, &changed.to_string(), key)
+            .unwrap_err()
+            .contains("attribution littérale"));
+    }
+}
+
+#[test]
+fn file_blame_stops_before_a_rename_to_an_unsafe_older_pathspec() {
+    let fixture = Fixture::new();
+    let initial = commit(
+        &fixture.repository,
+        "initial",
+        &[],
+        &[("*.txt", b"stable\n"), ("other.txt", b"before\n")],
+        Some("HEAD"),
+    );
+    let changed = commit(
+        &fixture.repository,
+        "other file changed",
+        &[initial],
+        &[("*.txt", b"stable\n"), ("other.txt", b"after\n")],
+        Some("HEAD"),
+    );
+    let renamed = commit(
+        &fixture.repository,
+        "rename to literal path",
+        &[changed],
+        &[("safe.txt", b"stable\n"), ("other.txt", b"after\n")],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let blame = workspace
+        .file_blame(&info.id, &renamed.to_string(), "736166652e747874")
+        .unwrap();
+    assert_eq!(blame.groups.len(), 1);
+    assert_eq!(blame.groups[0].sha, renamed.to_string());
+    assert!(blame.groups[0].boundary);
+    assert!(blame.limitation.unwrap().contains("attribution littérale"));
+}

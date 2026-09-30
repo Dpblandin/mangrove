@@ -11,6 +11,10 @@
     "allow-commit-position",
     "allow-commit-details",
     "allow-file-diff",
+    "allow-file-content",
+    "allow-file-history",
+    "allow-file-blame",
+    "allow-file-revision-diff",
     "allow-working-tree-status",
     "allow-working-tree-diff"
   ]

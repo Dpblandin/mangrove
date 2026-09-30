@@ -16,6 +16,7 @@ import {
 import CommitList from './components/CommitList.vue'
 import CommitDetailsPanel from './components/CommitDetailsPanel.vue'
 import DiffWorkspace from './components/DiffWorkspace.vue'
+import FileWorkspace from './components/FileWorkspace.vue'
 import OpenRepositoryDialog from './components/OpenRepositoryDialog.vue'
 import PaneDivider from './components/PaneDivider.vue'
 import ReferenceTree from './components/ReferenceTree.vue'
@@ -101,6 +102,7 @@ const theme = ref<ThemeId>(getStoredTheme())
 watch(theme, setTheme)
 const diffMode = ref<'central' | 'compact'>('central')
 const diffOpen = ref(false)
+const fileSelectionRevision = ref(0)
 const showCentralDiff = computed(() => diffMode.value === 'central' && diffOpen.value)
 watch(selectedSha, (sha) => {
   if (!sha && selection.value === 'commit') diffOpen.value = false
@@ -178,6 +180,7 @@ async function refreshRepository() {
 
 function openFile(file: ChangedFile) {
   interactionRevision++
+  fileSelectionRevision.value++
   diffOpen.value = true
   void state.selectFile(file)
 }
@@ -337,6 +340,15 @@ async function openDialog() {
       showDialog.value = true
     }
   } else showDialog.value = true
+}
+async function jumpToCommit(sha: string) {
+  interactionRevision++
+  diffOpen.value = false
+  const index = await state.jump(sha)
+  if (index !== null) {
+    await nextTick()
+    if (selectedSha.value === sha) list.value?.scrollToIndex(index)
+  }
 }
 async function jump(reference: Reference) {
   interactionRevision++
@@ -651,8 +663,23 @@ onBeforeUnmount(() => {
                   >
                 </footer>
               </section>
+              <FileWorkspace
+                v-if="showCentralDiff && selection === 'commit'"
+                :key="fileSelectionRevision"
+                class="absolute inset-0"
+                :session-id="repository.id"
+                :sha="details?.sha ?? ''"
+                :intent-sha="selectedSha"
+                :file="selectedFile"
+                :diff="diff"
+                :loading="detailLoading || diffLoading"
+                :error="detailError || diffError"
+                :highlighted="highlightedDiff"
+                @close="closeDiff"
+                @jump-commit="jumpToCommit"
+              />
               <DiffWorkspace
-                v-if="showCentralDiff"
+                v-else-if="showCentralDiff"
                 class="absolute inset-0"
                 :file="displayedFile"
                 :diff="displayedDiff"
