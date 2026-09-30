@@ -205,6 +205,213 @@ beforeEach(() => {
   cleanup = []
 })
 
+describe('background history refresh', () => {
+  it('shares concurrent position lookups and retries when the index advances', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const refreshing = state.refresh()
+    transport
+      .take('open_repository')
+      .resolve({ ...repository('updated', 0, false), path: '/tmp/repo' })
+    await flush()
+    transport.take('list_commits', { sessionId: 'updated' }).resolve(page([], 0, index(0, false)))
+    await flush()
+    const position = transport.take('commit_position', { sessionId: 'updated' })
+    transport.take('index_status', { sessionId: 'updated' }).resolve(index(0, false))
+    await flush()
+    expect(
+      transport.calls.filter(
+        (call) => call.command === 'commit_position' && call.args.sessionId === 'updated',
+      ),
+    ).toHaveLength(1)
+    position.resolve(null)
+    await refreshing
+    await vi.advanceTimersByTimeAsync(350)
+    transport.take('index_status', { sessionId: 'updated' }).resolve(index(3))
+    await flush()
+    transport
+      .take('list_commits', { sessionId: 'updated' })
+      .resolve(page([row(0, 'new'), row(1, 'commit-0'), row(2, 'commit-1')]))
+    await flush()
+    transport.take('commit_position', { sessionId: 'updated' }).resolve(1)
+    await flush()
+    expect(state.selectedIndex.value).toBe(1)
+    expect(state.selectedSha.value).toBe('commit-0')
+  })
+
+  it.each([1, PAGE_SIZE + 20])(
+    'reanchors the selected commit at position %i after an initially empty index finishes',
+    async (position) => {
+      const { state, transport } = setup()
+      await openDisplayed(state, transport)
+      const displayed = state.details.value
+      const displayedDiff = state.diff.value
+      const refreshing = state.refresh()
+      transport
+        .take('open_repository')
+        .resolve({ ...repository('updated', 0, false), path: '/tmp/repo' })
+      await flush()
+      transport.take('list_commits', { sessionId: 'updated' }).resolve(page([], 0, index(0, false)))
+      await flush()
+      transport.take('commit_position', { sessionId: 'updated' }).resolve(null)
+      await refreshing
+      expect(state.selectedSha.value).toBe('commit-0')
+      expect(state.details.value).toBe(displayed)
+      expect(state.diff.value).toBe(displayedDiff)
+
+      const count = position + 3
+      transport.take('index_status', { sessionId: 'updated' }).resolve(index(count))
+      await flush()
+      transport.take('list_commits', { sessionId: 'updated' }).resolve(
+        page(
+          Array.from({ length: Math.min(PAGE_SIZE, count) }, (_, current) =>
+            row(current, current === position ? 'commit-0' : `new-${current}`),
+          ),
+          count,
+        ),
+      )
+      await flush()
+      transport.take('commit_position', { sessionId: 'updated' }).resolve(position)
+      await flush()
+      expect(state.progress.value.complete).toBe(true)
+      expect(state.selectedIndex.value).toBe(position)
+      expect(state.selectedSha.value).toBe('commit-0')
+      expect(state.details.value).toBe(displayed)
+      expect(state.diff.value).toBe(displayedDiff)
+    },
+  )
+
+  it('keeps a newer selection when an indexing position lookup responds late', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const refreshing = state.refresh()
+    transport
+      .take('open_repository')
+      .resolve({ ...repository('updated', 0, false), path: '/tmp/repo' })
+    await flush()
+    transport.take('list_commits', { sessionId: 'updated' }).resolve(page([], 0, index(0, false)))
+    await flush()
+    transport.take('commit_position', { sessionId: 'updated' }).resolve(null)
+    await refreshing
+    transport.take('index_status', { sessionId: 'updated' }).resolve(index(3))
+    await flush()
+    const rows = [row(0, 'new'), row(1, 'commit-0'), row(2, 'commit-1')]
+    transport.take('list_commits', { sessionId: 'updated' }).resolve(page(rows))
+    await flush()
+    const oldPosition = transport.take('commit_position', { sessionId: 'updated' })
+    const selecting = state.select(rows[2]!, 2)
+    transport.take('commit_details', { sha: 'commit-1' }).resolve(details('commit-1'))
+    await selecting
+    oldPosition.resolve(1)
+    await flush()
+    expect(state.selectedSha.value).toBe('commit-1')
+    expect(state.selectedIndex.value).toBe(2)
+    expect(state.details.value?.sha).toBe('commit-1')
+  })
+
+  it('reanchors a filtered selection as results arrive during the renewed index', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    state.query.value = 'feature'
+    await vi.advanceTimersByTimeAsync(160)
+    transport.take('list_commits', { query: 'feature' }).resolve(page([row(0, 'feature-commit')]))
+    await flush()
+    transport.take('commit_details', { sha: 'feature-commit' }).resolve(details('feature-commit'))
+    await flush()
+    const displayed = state.details.value
+    const refreshing = state.refresh()
+    transport
+      .take('open_repository')
+      .resolve({ ...repository('updated', 0, false), path: '/tmp/repo' })
+    await flush()
+    transport
+      .take('list_commits', { sessionId: 'updated', query: 'feature' })
+      .resolve(page([], 0, index(0, false)))
+    await refreshing
+    transport.take('index_status', { sessionId: 'updated' }).resolve(index(4))
+    await flush()
+    transport
+      .take('list_commits', { sessionId: 'updated', query: 'feature' })
+      .resolve(page([row(0, 'new-feature'), row(3, 'feature-commit')], 2, index(4)))
+    await flush()
+    expect(state.progress.value.complete).toBe(true)
+    expect(state.selectedIndex.value).toBe(1)
+    expect(state.selectedSha.value).toBe('feature-commit')
+    expect(state.filter.value).toBe('feature')
+    expect(state.details.value).toBe(displayed)
+  })
+
+  it('keeps the selected commit and diff, and leaves an unchanged session alone', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const displayed = state.details.value
+    const displayedDiff = state.diff.value
+    const unchanged = state.refresh()
+    transport.take('open_repository').resolve(repository('repo', 3))
+    await unchanged
+    expect(state.details.value).toBe(displayed)
+    expect(state.diff.value).toBe(displayedDiff)
+    expect(transport.calls.filter((call) => call.command === 'list_commits')).toHaveLength(1)
+
+    const refreshing = state.refresh()
+    transport.take('open_repository').resolve({ ...repository('updated', 4), path: '/tmp/repo' })
+    await flush()
+    expect(state.repository.value?.id).toBe('updated')
+    expect(state.opening.value).toBe(false)
+    expect(state.selectedSha.value).toBe('commit-0')
+    expect(state.details.value).toBe(displayed)
+    expect(state.diff.value).toBe(displayedDiff)
+    transport
+      .take('list_commits', { sessionId: 'updated' })
+      .resolve(page([row(0, 'new'), row(1, 'commit-0'), row(2, 'commit-1'), row(3, 'commit-2')]))
+    await flush()
+    transport.take('commit_position', { sessionId: 'updated' }).resolve(1)
+    await refreshing
+    expect(state.selectedIndex.value).toBe(1)
+    expect(state.details.value).toBe(displayed)
+    expect(state.diff.value).toBe(displayedDiff)
+  })
+
+  it('preserves the active search during a refresh', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    state.query.value = 'feature'
+    await vi.advanceTimersByTimeAsync(160)
+    transport.take('list_commits', { query: 'feature' }).resolve(page([row(0, 'feature-commit')]))
+    await flush()
+    transport
+      .take('commit_details', { sha: 'feature-commit' })
+      .resolve(details('feature-commit', []))
+    await flush()
+    const refreshing = state.refresh()
+    transport.take('open_repository').resolve({ ...repository('updated'), path: '/tmp/repo' })
+    await flush()
+    transport
+      .take('list_commits', { sessionId: 'updated', query: 'feature' })
+      .resolve(page([row(0, 'feature-commit')]))
+    await refreshing
+    expect(state.query.value).toBe('feature')
+    expect(state.filter.value).toBe('feature')
+    expect(state.selectedSha.value).toBe('feature-commit')
+    expect(state.details.value?.sha).toBe('feature-commit')
+  })
+
+  it('ignores an obsolete refresh after another repository opens', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const refreshing = state.refresh()
+    const oldOpen = transport.take('open_repository')
+    const opening = state.open('/tmp/second')
+    transport.take('open_repository', { path: '/tmp/second' }).resolve(repository('second'))
+    await flush()
+    transport.take('list_commits', { sessionId: 'second' }).resolve(page())
+    await opening
+    oldOpen.resolve({ ...repository('updated'), path: '/tmp/repo' })
+    await refreshing
+    expect(state.repository.value?.id).toBe('second')
+  })
+})
+
 afterEach(() => {
   for (const dispose of cleanup) dispose()
   vi.unstubAllGlobals()

@@ -103,14 +103,17 @@ export function useWorkingTree(
     )
   }
 
-  function resetSession() {
+  function resetSession(keepSelection = false) {
     generation++
     for (const controller of controllers) controller.abort()
     pendingRefresh = undefined
     refreshing.value = false
-    status.value = null
     statusError.value = ''
-    clearSelection()
+    if (keepSelection) cancelFileRead()
+    else {
+      status.value = null
+      clearSelection()
+    }
     diffCache.reset(null)
   }
 
@@ -210,10 +213,11 @@ export function useWorkingTree(
     { flush: 'sync' },
   )
   watch(
-    () => repository.value?.id ?? null,
-    (id) => {
-      resetSession()
-      if (id !== null) void refresh()
+    repository,
+    (repo, previous) => {
+      if (repo?.id === previous?.id) return
+      resetSession(Boolean(repo && repo.path === previous?.path))
+      if (repo) void refresh()
     },
     { immediate: true, flush: 'sync' },
   )

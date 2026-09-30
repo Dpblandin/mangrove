@@ -1919,6 +1919,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "git2",
+ "libc",
  "libgit2-sys",
  "rusqlite",
  "serde",

@@ -66,12 +66,14 @@ export function useRepository(client: GitClient = request) {
   let desiredQuery = ''
   let settingQuery = false
   let searchIndexed = 0
+  let positionNeedsRefresh = false
   let debounce: ReturnType<typeof setTimeout> | undefined
   let poll: ReturnType<typeof setTimeout> | undefined
   let detailController: AbortController | undefined
   let diffController: AbortController | undefined
   let navigationController: AbortController | undefined
   const pending = new Map<number, PendingPage>()
+  const positionRequests = new Map<number, Promise<number | null>>()
   const controllers = new Set<AbortController>()
 
   async function call<T>(
@@ -95,6 +97,8 @@ export function useRepository(client: GitClient = request) {
   }
 
   function cancelSelectionReads() {
+    positionNeedsRefresh = false
+    positionRequests.clear()
     selectionEpoch += 1
     diffEpoch += 1
     detailController?.abort()
@@ -205,6 +209,7 @@ export function useRepository(client: GitClient = request) {
           if (page.index.error) error.value = page.index.error
           if (!selectedSha.value && !navigating && offset === 0 && page.commits[0])
             void select(page.commits[0], 0)
+          if (filter.value) void refreshSelectionPosition(epoch)
           refresh = pageNeedsRefresh(offset, page.commits)
           if (!refresh) void revalidatePages(offset)
         } while (refresh)
@@ -229,6 +234,38 @@ export function useRepository(client: GitClient = request) {
     loadingPages.value = 0
   }
 
+  async function refreshSelectionPosition(generation: number) {
+    const repo = repository.value
+    const sha = selectedSha.value
+    if (!positionNeedsRefresh || !repo || !sha || generation !== epoch) return
+    const selectionGeneration = selectionEpoch
+    let position: number | null = null
+    if (filter.value) {
+      for (const [offset, rows] of pages.value) {
+        const found = rows.findIndex((row) => row.sha === sha)
+        if (found !== -1) {
+          position = offset + found
+          break
+        }
+      }
+    } else {
+      const indexed = progress.value.indexed
+      let lookup = positionRequests.get(indexed)
+      if (!lookup) {
+        lookup = call<number | null>('commit_position', { sessionId: repo.id, sha })
+        positionRequests.set(indexed, lookup)
+      }
+      try {
+        position = await lookup
+      } finally {
+        if (positionRequests.get(indexed) === lookup) positionRequests.delete(indexed)
+      }
+    }
+    if (generation !== epoch || selectionGeneration !== selectionEpoch || position === null) return
+    selectedIndex.value = position
+    positionNeedsRefresh = false
+  }
+
   async function readProgress(generation: number) {
     const repo = repository.value
     if (!repo || generation !== epoch) return
@@ -242,6 +279,8 @@ export function useRepository(client: GitClient = request) {
         if (generation !== epoch) return
         await revalidatePages()
       }
+      if (generation !== epoch) return
+      await refreshSelectionPosition(generation)
       if (generation !== epoch) return
       if (status.error) error.value = status.error
       if (!progress.value.complete && !progress.value.error)
@@ -297,6 +336,51 @@ export function useRepository(client: GitClient = request) {
       return false
     } finally {
       if (generation === epoch) opening.value = false
+    }
+  }
+
+  async function refresh() {
+    const repo = repository.value
+    if (!repo || opening.value) return
+    let generation = epoch
+    try {
+      const info = await call<RepositoryInfo>('open_repository', { path: repo.path })
+      if (generation !== epoch || repository.value?.id !== repo.id) return
+      if (info.id === repo.id) return
+
+      generation = ++epoch
+      const pendingSelection = detailLoading.value ? getRow(selectedIndex.value) : undefined
+      clearTimeout(poll)
+      for (const controller of controllers) controller.abort()
+      cancelNavigation()
+      resetPages()
+      cancelSelectionReads()
+      repository.value = info
+      progress.value = info.index
+      total.value = filter.value ? 0 : info.index.indexed
+      // Commits and their patches are immutable. Keep the displayed selection
+      // while rebuilding the history and retargeting future reads to the session.
+      const displayed = snapshot.value.details
+      if (displayed && displayed.sha === selectedSha.value) {
+        diffCache.reset({
+          sessionId: info.id,
+          sha: displayed.sha,
+          files: displayed.files,
+          fileCount: displayed.fileCount,
+        })
+        if (!diffPreloadPaused) diffCache.preload()
+      }
+      if (pendingSelection?.sha === selectedSha.value)
+        void select(pendingSelection, selectedIndex.value)
+      // The selected SHA may only appear in a later batch of the new index.
+      positionNeedsRefresh = Boolean(selectedSha.value)
+      await loadPage(0)
+      if (generation !== epoch) return
+      if (!progress.value.complete) void readProgress(generation)
+      if (visibleRange) loadRange(visibleRange.start, visibleRange.end)
+      await refreshSelectionPosition(generation)
+    } catch (cause) {
+      if (generation === epoch) error.value = String(cause)
     }
   }
 
@@ -562,6 +646,7 @@ export function useRepository(client: GitClient = request) {
     loadRange,
     close,
     open,
+    refresh,
     select,
     selectIndex,
     moveSelection,

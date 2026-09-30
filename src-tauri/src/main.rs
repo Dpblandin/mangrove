@@ -20,6 +20,15 @@ async fn open_repository(state: State<'_, Arc<Workspace>>, path: String) -> Resu
 }
 
 #[tauri::command]
+async fn fetch_repository(
+    state: State<'_, Arc<Workspace>>,
+    session_id: String,
+) -> Result<FetchResult> {
+    let workspace = state.inner().clone();
+    blocking(move || workspace.fetch_repository(&session_id)).await
+}
+
+#[tauri::command]
 async fn index_status(
     state: State<'_, Arc<Workspace>>,
     session_id: String,
@@ -102,6 +111,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_repository,
+            fetch_repository,
             index_status,
             list_commits,
             commit_position,

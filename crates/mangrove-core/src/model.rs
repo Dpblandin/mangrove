@@ -136,3 +136,8 @@ pub struct FileDiff {
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
 }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchResult {
+    pub error: Option<String>,
+}

@@ -1,6 +1,6 @@
 # Mangrove
 
-Application **desktop** pour explorer Git en lecture seule. Tauri embarque l’interface Vue et le moteur Rust dans une application native : la version distribuée ne nécessite ni serveur local, ni navigateur, ni Node.js.
+Application **desktop** pour explorer Git. La consultation conserve les fichiers et l’index ; l’auto-fetch met à jour les références distantes. Tauri embarque l’interface Vue et le moteur Rust dans une application native : la version distribuée ne nécessite ni serveur local, ni navigateur, ni Node.js.
 
 Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpblandin/mangrove/issues/1).
 
@@ -23,12 +23,14 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Aucun loader animé pendant les lectures de commits ou de diffs : le contenu précédent reste affiché jusqu’à ce que la nouvelle sélection soit prête.
 - Indexation progressive dans un cache SQLite FTS5 séparé du dépôt ; réutilisation à la prochaine ouverture.
 - Trois thèmes mémorisés : **Classique** par défaut, gris/bleu ; **Mangrove**, vert ; **Catppuccin Macchiato**.
+- Paramètres dans une vue dédiée avec navigation par rubrique, accessibles par **Cmd + ,** sur macOS ou **Ctrl + ,** sur Windows/Linux. **Échap** ou le bouton de retour retrouve l’espace de travail précédent.
+- Auto-fetch des remotes du dépôt actif : dans **Paramètres → Général**, intervalle mémorisé de **0 à 60 minutes**, **1 minute** par défaut et **0** pour désactiver. L’historique et les références sont actualisés en conservant la recherche et la sélection. Un bouton dans la barre supérieure permet un fetch immédiat, même lorsque l’auto-fetch est désactivé. Les erreurs sont affichées sans interrompre les autres remotes ; les objets LFS ne sont pas récupérés automatiquement.
 - Fond sombre pour l’historique et les diffs ; Macchiato utilise le même fond que le panneau des détails.
 - Panneaux branches et détails redimensionnables à la souris ou au clavier ; leurs largeurs sont mémorisées et les colonnes de l’historique s’adaptent à l’espace disponible. Double clic sur un séparateur pour réinitialiser.
 - Taille des textes mémorisée : **Cmd/Ctrl + +** (ou **=**) agrandit, **Cmd/Ctrl + −** réduit, **Cmd/Ctrl + 0** rétablit la taille par défaut, augmentée d’un pixel par rapport à la première version du prototype.
 - Le texte des diffs démarre à **11 px**. Les boutons **− / +** dans leur en-tête règlent uniquement cette taille, mémorisée et partagée entre les vues centrale et compacte. Les raccourcis globaux ajustent les deux tailles ; **Cmd/Ctrl + 0** rétablit aussi le diff à 11 px.
 
-Les intégrations authentifiées GitHub/GitLab/Bitbucket, les profils et le SSH restent à implémenter. Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Ce prototype n’effectue ni clone ni fetch et ne contient aucune fonctionnalité d’IA.
+Les intégrations de comptes GitHub/GitLab/Bitbucket et les profils restent à implémenter. Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Le fetch utilise **Git installé sur la machine**, les gestionnaires d’identifiants et l’agent SSH existants, sans invite interactive ; aucun clone ni fonctionnalité d’IA n’est fourni.
 
 ## Lancer l’application desktop
 
@@ -79,7 +81,7 @@ L’option ajoute un commit de préparation, puis `feat(fixture): showcase 46 mi
 ## Organisation
 
 - `crates/mangrove-core` : lecture Git, graphe, indexation et cache ; indépendant de l’interface et du transport.
-- `src-tauri` : application desktop, commandes natives de lecture et sélection de dossier.
+- `src-tauri` : application desktop, commandes natives de consultation et de fetch, sélection de dossier.
 - `src` : Vue 3, TypeScript, Tailwind CSS 4, historique virtualisé et rendu Canvas.
 - `scripts/create-fixture.mjs` : génération isolée de dépôts synthétiques pour la QA et les mesures. Aucun bridge HTTP de lecture des dépôts n’est fourni.
 
