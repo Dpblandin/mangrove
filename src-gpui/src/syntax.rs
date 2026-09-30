@@ -305,6 +305,9 @@ fn tokenize_side(
     header: &str,
     deadline: Instant,
 ) -> Option<Vec<Vec<Token>>> {
+    if Instant::now() >= deadline {
+        return None;
+    }
     if lines.is_empty() {
         return Some(Vec::new());
     }
@@ -326,17 +329,22 @@ fn tokenize_side(
     let mut available = LanguageRegistry::singleton()
         .language(grammar)
         .is_some_and(|language| language.has_grammar() && !language.highlights.is_empty());
+    if Instant::now() >= deadline {
+        return None;
+    }
     let mut ranges = Vec::new();
-    if available && Instant::now() < deadline {
+    if available {
         let mut highlighter = SyntaxHighlighter::new(grammar);
         // A grammar can be registered while its query is incompatible with
         // the parser version. Kit then constructs an inert plain highlighter.
         available = highlighter.language().as_ref() == grammar;
-        if !highlighter.update(
-            None,
-            &Rope::from(source.as_str()),
-            Some(deadline.saturating_duration_since(Instant::now())),
-        ) {
+        let text = Rope::from(source.as_str());
+        // Query construction is outside Kit's parse timeout and can consume
+        // the whole budget before update begins.
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())?;
+        if !highlighter.update(None, &text, Some(remaining)) || Instant::now() >= deadline {
             return None;
         }
         for (range, style) in highlighter.styles(&(0..source.len()), &Markers) {
@@ -361,11 +369,17 @@ fn tokenize_side(
             ranges.push(Token { range, kind });
         }
     }
+    if Instant::now() >= deadline {
+        return None;
+    }
     // A stateful lexical fallback covers configuration formats without a
     // bundled parser. It also colors syntax accepted by JSON5/SCSS grammars
     // that the stricter host grammar does not understand.
     if !available || matches!(language, "jsonc" | "json5" | "scss" | "less") {
         ranges = lexical(&source, language);
+    }
+    if Instant::now() >= deadline {
+        return None;
     }
     let mut offset = prefix.len();
     let mut token_index = 0;
@@ -400,7 +414,7 @@ fn tokenize_side(
             tokens
         })
         .collect();
-    Some(result)
+    (Instant::now() < deadline).then_some(result)
 }
 
 /// Linear fallback with multiline comment/string state and UTF-8 byte ranges.
@@ -501,6 +515,14 @@ fn lexical(text: &str, language: &str) -> Vec<Token> {
 }
 
 pub fn diff_tokens(path: &str, diff: &FileDiff) -> Option<Vec<Vec<Token>>> {
+    diff_tokens_with_deadline(path, diff, Instant::now() + Duration::from_millis(500))
+}
+
+fn diff_tokens_with_deadline(
+    path: &str,
+    diff: &FileDiff,
+    deadline: Instant,
+) -> Option<Vec<Vec<Token>>> {
     let language = language(path)?;
     if diff.hunks.len() > MAX_LINES {
         return None;
@@ -517,7 +539,6 @@ pub fn diff_tokens(path: &str, diff: &FileDiff) -> Option<Vec<Vec<Token>>> {
     if lines == 0 {
         return None;
     }
-    let deadline = Instant::now() + Duration::from_millis(500);
     let mut result = Vec::with_capacity(lines + diff.hunks.len());
     let mut total = 0;
     for hunk in &diff.hunks {
@@ -556,10 +577,18 @@ pub fn diff_tokens(path: &str, diff: &FileDiff) -> Option<Vec<Vec<Token>>> {
             result.push(tokens);
         }
     }
-    Some(result)
+    (Instant::now() < deadline).then_some(result)
 }
 
 pub fn content_tokens(path: &str, lines: &[String]) -> Option<Vec<Vec<Token>>> {
+    content_tokens_with_deadline(path, lines, Instant::now() + Duration::from_millis(500))
+}
+
+fn content_tokens_with_deadline(
+    path: &str,
+    lines: &[String],
+    deadline: Instant,
+) -> Option<Vec<Vec<Token>>> {
     let language = language(path)?;
     if lines.len() > MAX_LINES
         || lines.iter().any(|line| line.len() > MAX_LINE_BYTES)
@@ -568,19 +597,50 @@ pub fn content_tokens(path: &str, lines: &[String]) -> Option<Vec<Vec<Token>>> {
         return None;
     }
     let borrowed: Vec<_> = lines.iter().map(String::as_str).collect();
-    let result = tokenize_side(
-        language,
-        &borrowed,
-        "",
-        Instant::now() + Duration::from_millis(500),
-    )?;
-    (result.iter().map(Vec::len).sum::<usize>() <= MAX_TOKENS).then_some(result)
+    let result = tokenize_side(language, &borrowed, "", deadline)?;
+    (result.iter().map(Vec::len).sum::<usize>() <= MAX_TOKENS && Instant::now() < deadline)
+        .then_some(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mangrove_core::model::{DiffHunk, DiffLine};
+
+    fn semantic_deadline() -> Instant {
+        // These assertions verify token semantics, not cold-query speed on a
+        // shared CI runner. Production retains its separate 500 ms budget.
+        Instant::now() + Duration::from_secs(30)
+    }
+
+    #[test]
+    fn expired_deadline_rejects_parser_and_lexical_fallback_without_partial_tokens() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        for (path, language, source) in [
+            ("file.ts", "typescript", "/* comment */ const value = 1;"),
+            (".env", "dotenv", "NAME=\"éclair\" # comment"),
+            ("file.scss", "scss", "$color: red;"),
+        ] {
+            assert!(tokenize_side(language, &[source], "", deadline).is_none());
+            assert!(content_tokens_with_deadline(path, &[source.into()], deadline).is_none());
+            let diff = FileDiff {
+                binary: false,
+                truncated: false,
+                additions: 1,
+                deletions: 0,
+                hunks: vec![DiffHunk {
+                    header: "@@ -0,0 +1 @@".into(),
+                    lines: vec![DiffLine {
+                        kind: "addition".into(),
+                        content: source.into(),
+                        old_line: None,
+                        new_line: Some(1),
+                    }],
+                }],
+            };
+            assert!(diff_tokens_with_deadline(path, &diff, deadline).is_none());
+        }
+    }
     #[test]
     fn filenames_and_language_aliases_match_web() {
         for (path, expected) in [
@@ -619,7 +679,7 @@ mod tests {
                 ],
             }],
         };
-        let tokens = diff_tokens("file.ts", &diff).unwrap();
+        let tokens = diff_tokens_with_deadline("file.ts", &diff, semantic_deadline()).unwrap();
         assert!(tokens[1].iter().any(|token| token.kind == Kind::Comment));
         assert!(tokens[3].iter().any(|token| token.kind == Kind::Comment));
         assert!(tokens[4].iter().any(|token| token.kind == Kind::Keyword));
@@ -645,7 +705,7 @@ mod tests {
             "x.json5",
         ] {
             let lines = vec!["NAME = \"éclair\" # comment".into()];
-            let tokens = content_tokens(path, &lines).unwrap();
+            let tokens = content_tokens_with_deadline(path, &lines, semantic_deadline()).unwrap();
             assert!(
                 tokens[0].iter().any(|token| token.kind != Kind::Plain),
                 "{path}"
@@ -703,8 +763,8 @@ mod tests {
         assert_eq!(cases.len(), 39);
         for (path, source) in cases {
             let lines: Vec<String> = source.lines().map(str::to_owned).collect();
-            let tokens =
-                content_tokens(path, &lines).unwrap_or_else(|| panic!("{path}: missing syntax"));
+            let tokens = content_tokens_with_deadline(path, &lines, semantic_deadline())
+                .unwrap_or_else(|| panic!("{path}: missing syntax"));
             assert!(
                 tokens
                     .iter()
