@@ -327,7 +327,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard))
         >
           <div class="relative flex min-h-0 min-w-0 overflow-hidden">
             <section
-              class="history-panel flex min-h-0 min-w-0 flex-1 flex-col bg-bg"
+              class="history-panel flex min-h-0 min-w-0 flex-1 flex-col bg-reading"
               :class="{ invisible: showCentralDiff }"
               :inert="showCentralDiff"
               :aria-hidden="showCentralDiff"

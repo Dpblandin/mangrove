@@ -34,6 +34,7 @@ function directory(path: string) {
 function statusClass(status: ChangedFile['status']) {
   if (status === 'added') return 'text-success'
   if (status === 'deleted') return 'text-danger'
+  if (status === 'renamed') return 'text-renamed'
   if (status === 'unmodified' || status === 'unknown') return 'text-muted'
   return 'text-warning'
 }
@@ -211,7 +212,7 @@ function selected(file: ChangedFile) {
 
       <section
         v-if="diffMode === 'compact'"
-        class="flex min-h-[110px] flex-1 flex-col border-t border-border bg-bg"
+        class="flex min-h-[110px] flex-1 flex-col border-t border-border bg-reading"
         aria-label="Modifications du fichier"
       >
         <div

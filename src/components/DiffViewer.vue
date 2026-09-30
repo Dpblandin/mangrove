@@ -12,7 +12,7 @@ defineProps<{
 
 <template>
   <div
-    class="diff-viewer flex min-h-0 min-w-0 flex-1 flex-col bg-bg"
+    class="diff-viewer flex min-h-0 min-w-0 flex-1 flex-col bg-reading"
     role="region"
     aria-label="Modifications du fichier"
     :aria-busy="loading"
@@ -85,7 +85,7 @@ defineProps<{
         </div>
         <div
           v-if="diff.truncated"
-          class="sticky left-0 flex max-w-full items-start gap-2 bg-bg px-[17px] py-[13px] text-[10px] leading-relaxed text-warning"
+          class="sticky left-0 flex max-w-full items-start gap-2 bg-reading px-[17px] py-[13px] text-[10px] leading-relaxed text-warning"
         >
           <AlertCircle :size="14" class="mt-0.5 shrink-0" /><span
             >Aperçu limité pour préserver la réactivité. Le fichier est volumineux ou le diff
@@ -120,10 +120,10 @@ defineProps<{
   border-top: 0;
 }
 .diff-line.addition {
-  background: color-mix(in srgb, var(--success) 9%, var(--bg));
+  background: color-mix(in srgb, var(--success) 9%, var(--reading-bg));
 }
 .diff-line.deletion {
-  background: color-mix(in srgb, var(--danger) 9%, var(--bg));
+  background: color-mix(in srgb, var(--danger) 9%, var(--reading-bg));
 }
 .addition .line-sign,
 .addition code {

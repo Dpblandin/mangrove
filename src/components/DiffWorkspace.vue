@@ -49,7 +49,7 @@ const emit = defineEmits<{ close: [] }>()
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--bg);
+  background: var(--reading-bg);
 }
 .file-heading {
   display: flex;

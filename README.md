@@ -11,10 +11,12 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Branches locales, références distantes et tags ; navigation vers leur commit.
 - Recherche locale dans les messages, auteurs et emails, avec préfixes de mots ; recherche par préfixe de SHA ou de référence.
 - Détails des commits, fichiers modifiés et diffs unifiés à la demande. Les merges sont comparés au premier parent.
+- Fichiers ajoutés en vert, supprimés en rouge, modifiés en jaune et renommés en bleu, dans les trois thèmes.
 - Un clic sur un fichier ouvre son diff dans la zone centrale, avec les détails et fichiers du commit à droite. La vue compacte reste disponible ; fermer le diff ramène à l’historique à la même position.
 - Aucun loader animé pendant les lectures de commits ou de diffs : le contenu précédent reste affiché jusqu’à ce que la nouvelle sélection soit prête.
 - Indexation progressive dans un cache SQLite FTS5 séparé du dépôt ; réutilisation à la prochaine ouverture.
 - Trois thèmes mémorisés : **Classique** par défaut, gris/bleu ; **Mangrove**, vert ; **Catppuccin Macchiato**.
+- Fond sombre pour l’historique et les diffs ; Macchiato utilise le même fond que le panneau des détails.
 - Panneaux branches et détails redimensionnables à la souris ou au clavier ; leurs largeurs sont mémorisées et les colonnes de l’historique s’adaptent à l’espace disponible. Double clic sur un séparateur pour réinitialiser.
 
 Les intégrations authentifiées GitHub/GitLab/Bitbucket, les profils et le SSH restent à implémenter. Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Ce prototype n’effectue ni clone ni fetch et ne contient aucune fonctionnalité d’IA.
