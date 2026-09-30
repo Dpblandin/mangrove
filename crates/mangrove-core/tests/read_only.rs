@@ -2285,6 +2285,161 @@ fn file_views_use_revision_objects_and_preserve_every_source_file() {
 }
 
 #[test]
+fn file_history_follows_a_rename_over_a_former_directory() {
+    let fixture = Fixture::new();
+    let signature = Signature::now("Author", "author@example.org").unwrap();
+    let mut revisions = Vec::new();
+    for (message, bytes) in [
+        ("create nested file", b"original\n".as_slice()),
+        ("modify nested file", b"changed\n".as_slice()),
+    ] {
+        let mut folder = fixture.repository.treebuilder(None).unwrap();
+        folder
+            .insert(
+                "contents.txt",
+                fixture.repository.blob(bytes).unwrap(),
+                0o100644,
+            )
+            .unwrap();
+        let mut root = fixture.repository.treebuilder(None).unwrap();
+        root.insert("item", folder.write().unwrap(), 0o040000)
+            .unwrap();
+        let tree = fixture.repository.find_tree(root.write().unwrap()).unwrap();
+        let parents: Vec<_> = revisions
+            .last()
+            .map(|id| fixture.repository.find_commit(*id).unwrap())
+            .into_iter()
+            .collect();
+        revisions.push(
+            fixture
+                .repository
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &parents.iter().collect::<Vec<_>>(),
+                )
+                .unwrap(),
+        );
+    }
+    let renamed = commit(
+        &fixture.repository,
+        "move file over its folder",
+        &[revisions[1]],
+        &[("item", b"changed\n")],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let details = workspace
+        .commit_details(&info.id, &renamed.to_string())
+        .unwrap();
+    let file = details
+        .files
+        .iter()
+        .find(|file| file.path == "item")
+        .unwrap();
+    assert_eq!(file.status, "renamed");
+    let history = workspace
+        .file_history(&info.id, &renamed.to_string(), &file.file_key, None)
+        .unwrap();
+    assert_eq!(history.entries.len(), 3);
+    assert_eq!(history.entries[0].status, "renamed");
+    assert_eq!(
+        history.entries[0].old_path.as_deref(),
+        Some("item/contents.txt")
+    );
+    for (entry, (sha, text)) in history.entries[1..]
+        .iter()
+        .zip([(revisions[1], "changed"), (revisions[0], "original")])
+    {
+        assert_eq!(entry.sha, sha.to_string());
+        assert_eq!(entry.path, "item/contents.txt");
+        let content = workspace
+            .file_content(&info.id, &entry.sha, &entry.file_key)
+            .unwrap();
+        assert_eq!(content.kind, "text");
+        assert_eq!(content.lines, [text]);
+    }
+    assert!(history.next_cursor.is_none());
+    assert!(history.limitation.is_none());
+    assert_eq!(snapshot(&fixture.source), before);
+}
+
+#[test]
+fn file_history_treats_a_replacing_directory_as_a_file_deletion() {
+    let fixture = Fixture::new();
+    let initial = commit(
+        &fixture.repository,
+        "create file",
+        &[],
+        &[("item", b"original file\n")],
+        Some("HEAD"),
+    );
+    let mut folder = fixture.repository.treebuilder(None).unwrap();
+    folder
+        .insert(
+            "contents.txt",
+            fixture.repository.blob(b"unrelated nested file\n").unwrap(),
+            0o100644,
+        )
+        .unwrap();
+    let mut root = fixture.repository.treebuilder(None).unwrap();
+    root.insert("item", folder.write().unwrap(), 0o040000)
+        .unwrap();
+    let tree = fixture.repository.find_tree(root.write().unwrap()).unwrap();
+    let signature = Signature::now("Author", "author@example.org").unwrap();
+    let replaced = fixture
+        .repository
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "replace file with directory",
+            &tree,
+            &[&fixture.repository.find_commit(initial).unwrap()],
+        )
+        .unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let details = workspace
+        .commit_details(&info.id, &replaced.to_string())
+        .unwrap();
+    let file = details
+        .files
+        .iter()
+        .find(|file| file.path == "item")
+        .unwrap();
+    assert_eq!(file.status, "deleted");
+    let history = workspace
+        .file_history(&info.id, &replaced.to_string(), &file.file_key, None)
+        .unwrap();
+    assert_eq!(history.entries.len(), 2);
+    assert_eq!(history.entries[0].sha, replaced.to_string());
+    assert_eq!(history.entries[0].status, "deleted");
+    assert_eq!(history.entries[1].sha, initial.to_string());
+    assert_eq!(history.entries[1].status, "added");
+    let content = workspace
+        .file_content(
+            &info.id,
+            &history.entries[1].sha,
+            &history.entries[1].file_key,
+        )
+        .unwrap();
+    assert_eq!(content.kind, "text");
+    assert_eq!(content.lines, ["original file"]);
+    assert!(history.next_cursor.is_none());
+    assert!(history.limitation.is_none());
+    assert_eq!(snapshot(&fixture.source), before);
+}
+
+#[test]
 fn file_history_follows_renames_deletions_and_first_parent_merges() {
     let fixture = Fixture::new();
     let first = commit(

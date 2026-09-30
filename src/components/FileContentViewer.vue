@@ -16,6 +16,7 @@ const emit = defineEmits<{ inspect: [sha: string]; parent: [] }>()
 const scroll = ref<HTMLElement>()
 const activeLine = ref(0)
 const id = useId()
+const previewText = computed(() => props.content.lines.join('\n'))
 const patch = computed<FileDiff | null>(() =>
   props.content.kind === 'text'
     ? {
@@ -183,6 +184,11 @@ const unavailable = computed(
         '--number-width': String(content.lines.length).length + 2 + 'ch',
       }"
     >
+      <div class="file-width-sizer" aria-hidden="true">
+        <span v-if="showBlame" class="blame-attribution" />
+        <span class="file-line-number" />
+        <code>{{ previewText }}</code>
+      </div>
       <div
         v-for="row in rows"
         :key="row.index"
@@ -260,8 +266,18 @@ const unavailable = computed(
 }
 .file-code {
   position: relative;
-  min-width: max-content;
+  width: max-content;
+  min-width: 100%;
   font: var(--diff-font-size, 11px)/1.7 var(--mono);
+}
+.file-width-sizer {
+  /* Reserve the preview's full width even when its longest line is unmounted. */
+  display: flex;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  white-space: pre;
+  user-select: none;
 }
 .file-code-line {
   position: absolute;
@@ -271,7 +287,7 @@ const unavailable = computed(
   min-width: 100%;
   white-space: pre;
 }
-.file-code-line code {
+.file-code code {
   padding-right: 20px;
   font: inherit;
   color: var(--text);

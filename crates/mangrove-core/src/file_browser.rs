@@ -331,12 +331,14 @@ fn history_step(
         .as_ref()
         .map(|parent| parent.tree().map_err(object_error))
         .transpose()?;
-    let current = entry(repository, &tree, path)?;
+    // A tree at this address is not the previous or current file identity.
+    let current = entry(repository, &tree, path)?.filter(|(_, mode)| *mode != 0o040000);
     let previous = parent_tree
         .as_ref()
         .map(|tree| entry(repository, tree, path))
         .transpose()?
-        .flatten();
+        .flatten()
+        .filter(|(_, mode)| *mode != 0o040000);
     let mut step = HistoryStep {
         entry: None,
         next: parent.as_ref().map(|parent| parent.id()),
