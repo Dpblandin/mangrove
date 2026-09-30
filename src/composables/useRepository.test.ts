@@ -179,7 +179,7 @@ async function openReady(
   info = repository(),
   firstPage = page(),
 ) {
-  const opening = state.open(info.path)
+  const opening = state.open(info.path, info.soloRefs ?? [])
   transport.take('open_repository').resolve(info)
   await flush()
   transport.take('list_commits', { offset: 0, sessionId: info.id }).resolve(firstPage)
@@ -190,8 +190,9 @@ async function openReady(
 async function openDisplayed(
   state: ReturnType<typeof useRepository>,
   transport: ReturnType<typeof delayedClient>,
+  info = repository('repo', 3),
 ) {
-  await openReady(state, transport, repository('repo', 3), fullPage(0, 3))
+  await openReady(state, transport, info, fullPage(0, 3))
   transport
     .take('commit_details', { sha: 'commit-0' })
     .resolve(details('commit-0', [file(0), file(1)]))
@@ -206,6 +207,69 @@ beforeEach(() => {
 })
 
 describe('background history refresh', () => {
+  it('serializes overlapping refreshes and rereads refs requested after a fetch without losing Solo or the patch', async () => {
+    const { state, transport } = setup()
+    const initial = { ...repository('repo', 3), soloRefs: ['refs/heads/topic'] }
+    await openDisplayed(state, transport, initial)
+    const displayed = state.details.value
+    const patch = state.diff.value
+    const first = state.refresh()
+    const afterFetch = state.refresh()
+    const anotherFocus = state.refresh()
+    expect(transport.calls.filter((call) => call.command === 'open_repository')).toHaveLength(2)
+    transport
+      .take('open_repository')
+      .resolve({ ...repository('intermediate', 3), path: initial.path, soloRefs: initial.soloRefs })
+    await flush()
+    transport
+      .take('list_commits', { sessionId: 'intermediate' })
+      .resolve(page([row(0, 'commit-0'), row(1), row(2)]))
+    await flush()
+    expect(transport.calls.filter((call) => call.command === 'open_repository')).toHaveLength(2)
+    transport.take('commit_position', { sessionId: 'intermediate' }).resolve(0)
+    await flush()
+    const latest = transport.take('open_repository')
+    expect(latest.args).toEqual({ path: initial.path, soloRefs: initial.soloRefs })
+    latest.resolve({
+      ...repository('post-fetch', 4),
+      path: initial.path,
+      soloRefs: initial.soloRefs,
+    })
+    await flush()
+    transport
+      .take('list_commits', { sessionId: 'post-fetch' })
+      .resolve(page([row(0, 'new-tip'), row(1, 'commit-0'), row(2), row(3)]))
+    await flush()
+    transport.take('commit_position', { sessionId: 'post-fetch' }).resolve(1)
+    expect(await Promise.all([first, afterFetch, anotherFocus])).toEqual([true, true, true])
+    expect(transport.calls.filter((call) => call.command === 'open_repository')).toHaveLength(3)
+    expect(state.repository.value?.id).toBe('post-fetch')
+    expect(state.repository.value?.soloRefs).toEqual(initial.soloRefs)
+    expect(state.selectedSha.value).toBe('commit-0')
+    expect(state.selectedIndex.value).toBe(1)
+    expect(state.details.value).toBe(displayed)
+    expect(state.diff.value).toBe(patch)
+  })
+
+  it('cancels queued refreshes when a newer explicit opening replaces the view, even at the same path', async () => {
+    const { state, transport } = setup()
+    await openDisplayed(state, transport)
+    const first = state.refresh()
+    const oldOpen = transport.take('open_repository')
+    const queued = state.refresh()
+    const reopening = state.open('/tmp/repo')
+    transport.calls
+      .find((call) => !call.settled && call.command === 'open_repository' && call !== oldOpen)!
+      .resolve({ ...repository('reopened'), path: '/tmp/repo' })
+    await flush()
+    transport.take('list_commits', { sessionId: 'reopened' }).resolve(page())
+    await reopening
+    oldOpen.resolve({ ...repository('obsolete'), path: '/tmp/repo' })
+    expect(await Promise.all([first, queued])).toEqual([false, false])
+    expect(state.repository.value?.id).toBe('reopened')
+    expect(transport.calls.filter((call) => call.command === 'open_repository')).toHaveLength(3)
+  })
+
   it('shares concurrent position lookups and retries when the index advances', async () => {
     const { state, transport } = setup()
     await openDisplayed(state, transport)
@@ -1401,23 +1465,33 @@ describe('repository refresh', () => {
     expect(state.query.value).toBe('active search')
   })
 
-  it('loads a new traversal when the native session changes and releases old selection', async () => {
+  it('preserves the Solo selection and patch while a new native traversal is indexed', async () => {
     const { state, transport } = setup()
-    await openDisplayed(state, transport)
+    const initial = { ...repository('repo', 3), soloRefs: ['refs/heads/topic'] }
+    await openDisplayed(state, transport, initial)
+    const displayed = state.details.value
+    const patch = state.diff.value
     const refreshing = state.refresh()
     const updated = {
       ...repository('new-generation'),
       path: '/tmp/repo',
       soloRefs: ['refs/heads/topic'],
     }
-    transport.take('open_repository').resolve(updated)
+    const request = transport.take('open_repository')
+    expect(request.args).toEqual({ path: initial.path, soloRefs: initial.soloRefs })
+    request.resolve(updated)
     await flush()
     transport
       .take('list_commits', { sessionId: updated.id, offset: 0 })
       .resolve(page([row(0, 'new-tip')]))
+    await flush()
+    transport.take('commit_position').resolve(1)
     expect(await refreshing).toBe(true)
     expect(state.repository.value?.id).toBe(updated.id)
-    expect(state.selectedSha.value).toBe('new-tip')
-    expect(state.diff.value).toBeNull()
+    expect(state.repository.value?.soloRefs).toEqual(initial.soloRefs)
+    expect(state.selectedSha.value).toBe('commit-0')
+    expect(state.selectedIndex.value).toBe(1)
+    expect(state.details.value).toBe(displayed)
+    expect(state.diff.value).toBe(patch)
   })
 })

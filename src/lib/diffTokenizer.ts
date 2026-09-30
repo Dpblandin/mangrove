@@ -1,5 +1,5 @@
 import { createHighlighterCore, type HighlighterCore, type ThemedToken } from 'shiki/core'
-import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
+import { createOnigurumaEngine } from 'shiki/engine/oniguruma'
 import {
   canHighlight,
   MAX_SYNTAX_TOKENS,
@@ -121,7 +121,9 @@ async function highlighterFor(language: Language) {
         ],
       },
     ],
-    engine: createJavaScriptRegexEngine(),
+    // WebKit is slow to compile the translated TypeScript regexes on first use.
+    // Keep the bundled native regex engine inside the highlighting worker.
+    engine: createOnigurumaEngine(import('shiki/wasm')),
   }).catch((cause) => {
     highlighterPromise = undefined
     throw cause

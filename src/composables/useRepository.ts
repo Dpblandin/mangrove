@@ -74,6 +74,9 @@ export function useRepository(client: GitClient = request) {
   let detailController: AbortController | undefined
   let diffController: AbortController | undefined
   let navigationController: AbortController | undefined
+  let pendingRefresh:
+    | { promise: Promise<boolean>; requested: boolean; cancelled: boolean }
+    | undefined
   const pending = new Map<number, PendingPage>()
   const positionRequests = new Map<number, Promise<number | null>>()
   const controllers = new Set<AbortController>()
@@ -302,7 +305,13 @@ export function useRepository(client: GitClient = request) {
     filter.value = ''
   }
 
+  function cancelRefresh() {
+    if (pendingRefresh) pendingRefresh.cancelled = true
+    pendingRefresh = undefined
+  }
+
   function close() {
+    cancelRefresh()
     diffPreloadPaused = false
     epoch += 1
     clearTimeout(poll)
@@ -346,49 +355,45 @@ export function useRepository(client: GitClient = request) {
     }
   }
 
-  async function refresh() {
-    const current = repository.value
-    if (!current || opening.value) return false
-    let generation = epoch
-    opening.value = true
-    try {
-      const info = await call<RepositoryInfo>('open_repository', {
-        path: current.path,
-        soloRefs: current.soloRefs ?? [],
-      })
-      if (generation !== epoch) return false
-      // An unchanged native session retains its walk and immutable commit diffs.
-      // Mutable worktree and stash lists are refreshed by their own readers.
-      if (info.id === current.id) {
-        repository.value = info
-        mergeProgress(info.index)
-        if (!filter.value && debounce === undefined) total.value = progress.value.indexed
-        await loadPage(0)
-        if (generation !== epoch) return false
-        await revalidatePages()
-        return generation === epoch
-      }
-      const currentQuery = query.value
-      close()
-      generation = epoch
-      opening.value = true
-      return await loadOpenedRepository(info, generation, currentQuery)
-    } catch (cause) {
-      if (generation === epoch) error.value = String(cause)
-      return false
-    } finally {
-      if (generation === epoch) opening.value = false
+  function refresh(): Promise<boolean> {
+    if (!repository.value || opening.value) return Promise.resolve(false)
+    if (pendingRefresh) {
+      pendingRefresh.requested = true
+      return pendingRefresh.promise
     }
+    const entry = { promise: Promise.resolve(false), requested: false, cancelled: false }
+    pendingRefresh = entry
+    entry.promise = (async () => {
+      try {
+        let refreshed: boolean
+        // A fetch can finish after the in-flight refresh already read its references.
+        do {
+          entry.requested = false
+          refreshed = await refreshNow()
+        } while (entry.requested && !entry.cancelled)
+        return refreshed
+      } finally {
+        if (pendingRefresh === entry) pendingRefresh = undefined
+      }
+    })()
+    return entry.promise
   }
 
-  async function refresh() {
+  async function refreshNow() {
     const repo = repository.value
-    if (!repo || opening.value) return
+    if (!repo || opening.value) return false
     let generation = epoch
     try {
-      const info = await call<RepositoryInfo>('open_repository', { path: repo.path })
-      if (generation !== epoch || repository.value?.id !== repo.id) return
-      if (info.id === repo.id) return
+      const info = await call<RepositoryInfo>('open_repository', {
+        path: repo.path,
+        soloRefs: repo.soloRefs ?? [],
+      })
+      if (generation !== epoch || repository.value?.id !== repo.id) return false
+      if (info.id === repo.id) {
+        repository.value = info
+        mergeProgress(info.index)
+        return true
+      }
 
       generation = ++epoch
       const pendingSelection = detailLoading.value ? getRow(selectedIndex.value) : undefined
@@ -417,12 +422,14 @@ export function useRepository(client: GitClient = request) {
       // The selected SHA may only appear in a later batch of the new index.
       positionNeedsRefresh = Boolean(selectedSha.value)
       await loadPage(0)
-      if (generation !== epoch) return
+      if (generation !== epoch) return false
       if (!progress.value.complete) void readProgress(generation)
       if (visibleRange) loadRange(visibleRange.start, visibleRange.end)
       await refreshSelectionPosition(generation)
+      return generation === epoch
     } catch (cause) {
       if (generation === epoch) error.value = String(cause)
+      return false
     }
   }
 
@@ -688,6 +695,7 @@ export function useRepository(client: GitClient = request) {
   )
 
   onScopeDispose(() => {
+    cancelRefresh()
     epoch += 1
     cancelNavigation()
     resetPages()

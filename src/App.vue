@@ -79,7 +79,7 @@ const showSettings = ref(false)
 const settingsButton = ref<HTMLButtonElement>()
 const autoFetchInterval = ref(getStoredAutoFetchInterval())
 watch(autoFetchInterval, storeAutoFetchInterval)
-const autoFetch = useAutoFetch(repository, autoFetchInterval, state.refresh)
+const autoFetch = useAutoFetch(repository, autoFetchInterval, refreshRepository)
 const { fetching, error: fetchError } = autoFetch
 function dismissError() {
   error.value = ''
@@ -273,11 +273,29 @@ function refreshOnFocus() {
   if (repository.value) void refreshRepository()
   else void recentRepositories.refreshNames()
 }
-async function refreshRepository() {
+type RepositoryRefresh = {
+  path: string
+  tabId: string | null
+  revision: number
+  reading: Promise<boolean> | undefined
+  promise: Promise<void>
+}
+let pendingRepositoryRefresh: RepositoryRefresh | undefined
+function refreshRepository(): Promise<void> {
   const previousRepository = repository.value
-  if (!previousRepository || opening.value) return
+  if (!previousRepository || opening.value) return Promise.resolve()
   const path = previousRepository.path
+  const previousSession = previousRepository.id
   const tabId = activeTabId.value
+  const previous = pendingRepositoryRefresh
+  if (
+    previous?.path === path &&
+    previous.tabId === tabId &&
+    previous.revision === interactionRevision
+  ) {
+    previous.reading = state.refresh()
+    return previous.promise
+  }
   const previousSelection = selection.value
   const previousStash = stashSha.value
   const previousStashFile = stashFile.value
@@ -286,56 +304,79 @@ async function refreshRepository() {
   const previousFile = workingFile.value
   const previousArea = workingArea.value
   const previousDiffOpen = diffOpen.value
-  if (!(await state.refresh())) return
-  const info = repository.value
-  if (!info || info.path !== path || activeTabId.value !== tabId) return
-  if (tabId) repositoryTabs.update(tabId, info)
-  recentRepositories.updateName(info)
-  const sessionId = info.id
-  const current = () =>
+  const sameIntent = () =>
     repository.value?.path === path &&
-    repository.value?.id === sessionId &&
     activeTabId.value === tabId &&
     revision === interactionRevision
-  if (!current()) return
-  if (sessionId === previousRepository.id) {
-    await Promise.all([
-      worktreesExpanded.value ? context.loadWorktrees() : Promise.resolve(),
-      stashesExpanded.value || previousSelection === 'stash'
-        ? context.loadStashes()
-        : Promise.resolve(),
-      working.refresh(),
-    ])
-    return
-  }
-  if (previousSelection === 'stash') {
-    if (!stashes.value) await context.loadStashes()
-    if (!current()) return
-    if (!stashes.value?.stashes.some((stash) => stash.sha === previousStash)) return
-    selection.value = 'stash'
-    state.pauseDiffPreload()
-    await context.selectStash(previousStash)
-    if (!current() || selection.value !== 'stash') return
-    if (!previousStashFile || !previousStashArea) return
-    const file = stashDetails.value?.groups
-      .find((group) => group.area === previousStashArea)
-      ?.files.find((file) => file.fileKey === previousStashFile.fileKey)
-    if (!file) return
-    await context.selectFile(previousStashArea, file)
-    if (current() && selection.value === 'stash') diffOpen.value = previousDiffOpen
-    return
-  }
-  selection.value = previousSelection
-  if (previousSelection === 'working') state.pauseDiffPreload()
-  if (previousSelection === 'working' && previousFile && previousArea) {
-    await working.refresh()
-    if (!current() || selection.value !== 'working') return
-    const file = workingStatus.value?.[previousArea].find((file) => file.key === previousFile.key)
-    if (file) {
-      await working.selectFile(previousArea, file)
-      if (current() && selection.value === 'working') diffOpen.value = previousDiffOpen
+
+  async function restore() {
+    const info = repository.value
+    if (!info || !sameIntent()) return
+    if (tabId) repositoryTabs.update(tabId, info)
+    recentRepositories.updateName(info)
+    const sessionId = info.id
+    const current = () => sameIntent() && repository.value?.id === sessionId
+    if (sessionId === previousSession) {
+      await Promise.all([
+        worktreesExpanded.value ? context.loadWorktrees() : Promise.resolve(),
+        stashesExpanded.value || previousSelection === 'stash'
+          ? context.loadStashes()
+          : Promise.resolve(),
+        working.refresh(),
+      ])
+      return
+    }
+    if (previousSelection === 'stash') {
+      if (!stashes.value) await context.loadStashes()
+      if (!current()) return
+      if (!stashes.value?.stashes.some((stash) => stash.sha === previousStash)) return
+      selection.value = 'stash'
+      state.pauseDiffPreload()
+      await context.selectStash(previousStash)
+      if (!current() || selection.value !== 'stash') return
+      if (!previousStashFile || !previousStashArea) return
+      const file = stashDetails.value?.groups
+        .find((group) => group.area === previousStashArea)
+        ?.files.find((file) => file.fileKey === previousStashFile.fileKey)
+      if (!file) return
+      await context.selectFile(previousStashArea, file)
+      if (current() && selection.value === 'stash') diffOpen.value = previousDiffOpen
+      return
+    }
+    selection.value = previousSelection
+    if (previousSelection === 'working') state.pauseDiffPreload()
+    if (previousSelection === 'working' && previousFile && previousArea) {
+      await working.refresh()
+      if (!current() || selection.value !== 'working') return
+      const file = workingStatus.value?.[previousArea].find((file) => file.key === previousFile.key)
+      if (file) {
+        await working.selectFile(previousArea, file)
+        if (current() && selection.value === 'working') diffOpen.value = previousDiffOpen
+      }
     }
   }
+  const entry: RepositoryRefresh = {
+    path,
+    tabId,
+    revision,
+    reading: state.refresh(),
+    promise: Promise.resolve(),
+  }
+  pendingRepositoryRefresh = entry
+  entry.promise = (async () => {
+    try {
+      while (entry.reading && sameIntent()) {
+        const reading = entry.reading
+        if (!(await reading) || !sameIntent()) return
+        if (entry.reading !== reading) continue
+        entry.reading = undefined
+        await restore()
+      }
+    } finally {
+      if (pendingRepositoryRefresh === entry) pendingRepositoryRefresh = undefined
+    }
+  })()
+  return entry.promise
 }
 
 function openFile(file: ChangedFile) {
@@ -619,6 +660,8 @@ onMounted(() => {
   window.addEventListener('focus', refreshOnFocus)
 })
 onBeforeUnmount(() => {
+  interactionRevision++
+  pendingRepositoryRefresh = undefined
   window.removeEventListener('keydown', keyboard)
   window.removeEventListener('focus', refreshOnFocus)
 })
