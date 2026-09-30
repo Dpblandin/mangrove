@@ -1,0 +1,48 @@
+{
+  "coldOpenMs": 3.3936669999999998,
+  "commits": 10005,
+  "detailsAndFirstDiffMs": 0.5705410000000001,
+  "diffLines": 8,
+  "firstBatchMs": 54.302875,
+  "firstBatchRows": 256,
+  "fullIndexMs": 328.75149999999996,
+  "note": "Backend only, warm filesystem cache, one synthetic or local repository; excludes UI rendering and network.",
+  "search": [
+    {
+      "matches": 1668,
+      "p50Ms": 2.226792,
+      "p95Ms": 2.747333,
+      "query": "fix",
+      "samples": 30
+    },
+    {
+      "matches": 3340,
+      "p50Ms": 2.997541,
+      "p95Ms": 3.1470000000000002,
+      "query": "feat",
+      "samples": 30
+    },
+    {
+      "matches": 1666,
+      "p50Ms": 2.357375,
+      "p95Ms": 2.698,
+      "query": "cache",
+      "samples": 30
+    },
+    {
+      "matches": 1,
+      "p50Ms": 3.0930419999999996,
+      "p95Ms": 3.529125,
+      "query": "bdc09fc8",
+      "samples": 30
+    },
+    {
+      "matches": 3335,
+      "p50Ms": 3.365667,
+      "p95Ms": 3.533292,
+      "query": "Alice Martin",
+      "samples": 30
+    }
+  ],
+  "warmOpenAndPageMs": 1.72325
+}
