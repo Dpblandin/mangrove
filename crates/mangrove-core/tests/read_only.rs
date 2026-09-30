@@ -3378,15 +3378,14 @@ fn worktree_listing_from_a_linked_tree_preserves_missing_locked_and_detached_sta
         .find(|item| item.name == "missing")
         .unwrap();
     assert!(!missing.available);
+    let missing_directory = Path::new(&missing.path);
+    assert!(missing_directory.is_absolute());
+    assert_eq!(missing_directory.file_name(), missing_path.file_name());
+    // Windows canonicalization adds a verbatim prefix; the missing directory
+    // retains the Git registration spelling. Compare its existing parent.
     assert_eq!(
-        missing.path,
-        missing_path
-            .parent()
-            .unwrap()
-            .canonicalize()
-            .unwrap()
-            .join("missing")
-            .to_string_lossy()
+        missing_directory.parent().unwrap().canonicalize().unwrap(),
+        missing_path.parent().unwrap().canonicalize().unwrap()
     );
     assert!(missing.reason.is_some());
     let main = workspace.open_repository(&primary.path).unwrap();
