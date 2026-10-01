@@ -46,6 +46,18 @@ Deux passes `refactor` déléguées couvrent le backend et l’interface. La pas
 
 Le [rapport de comparaison du moteur](performance-integrations.json) mesure 50 recherches et 50 diffs par condition. Les p95 observés sont environ 0,83/0,79 ms pour la recherche et 1,48/1,26 ms pour les diffs, sans/avec une API synthétique en attente. L’annulation simulée prend environ 0,09 ms. Les valeurs montrent que les opérations locales terminent pendant la lecture distante ; elles ne constituent pas une estimation statistique de l’impact réseau ni du rendu natif.
 
+## Ajout de la connexion navigateur GitLab
+
+La passe suivante ajoute OAuth PKCE S256, avec une application publique et `read_api`, tout en conservant la connexion par PAT. Deux implémentations ont été parallélisées, suivies de revues `refactor` backend/UI et d’une passe `simplify` avec trois lectures parallèles. Les corrections incluent un diagnostic spécifique pour le port local occupé, la protection du refresh token dans les données normalisées et le retrait des accès bruts inutiles de l’API publique.
+
+Contrôles après les corrections : formatage et Clippy remote/GPUI sans warnings, 40 tests unitaires remote, 13 tests fournisseurs et 1 doctest, puis 82 tests GPUI production et 87 instrumentés. Le test opt-in du coffre macOS valide aussi la comparaison avant remplacement, la persistance d’une rotation et l’absence de recréation après suppression, avec une identité synthétique nettoyée.
+
+Les tests OAuth couvrent le challenge du RFC PKCE, l’état aléatoire, le callback loopback réel avec Host/path/paramètres stricts, les refus et bornes, l’annulation et le timeout des sockets, les scopes, la compatibilité des anciens comptes PAT, la rotation concurrente, l’échec de stockage et la déconnexion pendant le renouvellement. Les vérifications de fermeture observent EOF/reset sur une connexion détenue par le test ; un premier probe sur un port éphémère libéré pouvait échouer si un autre test recyclait ce port, et a été remplacé.
+
+QA native macOS : le bouton **Se connecter avec GitLab** est visible sans instructions de création lorsque l’ID est configuré ; le panneau de configuration révèle l’ID public prérempli, puis se replie. Le repli PAT et le formulaire GitHub restent disponibles. Le bundle production final a été relancé avec l’ID public fourni par l’utilisateur, sans inscrire cet ID dans les sources, et la rubrique Intégrations est affichée. SHA-256 de l’exécutable : `ebd31c7eda90f5362af1b9addc0a5b040ad9770be236c1d995fdd70ece46bbaf`.
+
+Cette passe n’a pas effectué le consentement utilisateur ni une connexion GitLab authentifiée réelle. Le retour navigateur, les lectures authentifiées, la persistance après relancement, le renouvellement réel et la déconnexion restent à confirmer avec l’application enregistrée. La coordination du coffre protège les opérations du processus ; elle ne garantit pas une comparaison atomique entre plusieurs processus Mangrove.
+
 ## Essais restants et statut
 
 La PR reste **draft à la demande de l’utilisateur**. Les essais suivants restent à effectuer :

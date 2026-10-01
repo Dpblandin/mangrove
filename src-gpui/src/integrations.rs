@@ -10,8 +10,9 @@ use gpui_kit::{
     *,
 };
 use mangrove_remote::{
-    Account, CancellationToken, CredentialVault, HttpTransport, OsCredentialVault, Profile,
-    ProfileSession, Provider, SecretToken, SessionTicket,
+    Account, Authentication, CancellationToken, CredentialVault, HttpTransport, OsCredentialVault,
+    Profile, ProfileSession, Provider, SecretToken, SessionTicket,
+    oauth::{self, GitLabOAuth, OAuthCredentials},
     providers::{
         ChangeRequest, CiStatus, Discussion, Page, PageCursor, ProviderClient, Repository,
     },
@@ -65,6 +66,46 @@ enum PendingOperation {
     Read,
 }
 
+enum ConnectionRequest {
+    PersonalToken(SecretToken),
+    GitLabBrowser { client_id: String },
+}
+
+enum ConnectionCredentials {
+    PersonalToken(SecretToken),
+    GitLabBrowser(GitLabOAuth),
+}
+
+enum ConnectedCredentials {
+    PersonalToken(SecretToken),
+    GitLabOAuth(OAuthCredentials),
+}
+
+impl ConnectedCredentials {
+    fn provider_client(
+        &self,
+        account: Account,
+    ) -> mangrove_remote::Result<ProviderClient<HttpTransport>> {
+        let transport = HttpTransport::new()?;
+        match self {
+            Self::PersonalToken(token) => ProviderClient::new(transport, account, token.clone()),
+            Self::GitLabOAuth(credentials) => credentials.provider_client(transport, account),
+        }
+    }
+
+    fn store(
+        &self,
+        vault: &dyn CredentialVault,
+        profile_id: &str,
+        account_id: &str,
+    ) -> mangrove_remote::Result<()> {
+        match self {
+            Self::PersonalToken(token) => vault.store(profile_id, account_id, token),
+            Self::GitLabOAuth(credentials) => credentials.store(vault, profile_id, account_id),
+        }
+    }
+}
+
 enum ReadResponse {
     Repositories(Page<Repository>),
     Changes(Page<ChangeRequest>),
@@ -87,6 +128,9 @@ pub struct IntegrationsView {
     server: Entity<InputState>,
     username: Entity<InputState>,
     token: Entity<InputState>,
+    client_id: Entity<InputState>,
+    gitlab_browser: bool,
+    gitlab_config_open: bool,
     key_path: Entity<InputState>,
     favorite: Entity<InputState>,
     ssh_remote: Entity<InputState>,
@@ -138,6 +182,8 @@ impl IntegrationsView {
                 input.set_value(path.to_string_lossy().to_string(), window, cx)
             });
         }
+        let client_id = configured_gitlab_client_id(&profile);
+        let gitlab_config_open = client_id.is_empty();
         Self {
             profiles: vec![profile.clone()],
             session: Arc::new(ProfileSession::new(&profile.id)),
@@ -155,6 +201,13 @@ impl IntegrationsView {
                     .placeholder("Token personnel")
                     .masked(true)
             }),
+            client_id: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Application ID public de Mangrove")
+                    .default_value(client_id)
+            }),
+            gitlab_browser: true,
+            gitlab_config_open,
             key_path,
             favorite: text_input("Chemin local ou URL d’un dépôt", window, cx),
             ssh_remote: text_input("ssh://git@serveur/groupe/depot.git", window, cx),
@@ -221,6 +274,11 @@ impl IntegrationsView {
                 input.update(cx, |state, cx| state.set_value("", window, cx));
             }
             self.provider = Provider::GitLab;
+            self.gitlab_browser = true;
+            let client_id = configured_gitlab_client_id(&profile);
+            self.gitlab_config_open = client_id.is_empty();
+            self.client_id
+                .update(cx, |input, cx| input.set_value(client_id, window, cx));
             self.server.update(cx, |input, cx| {
                 input.set_value("https://gitlab.com", window, cx)
             });
@@ -290,6 +348,7 @@ impl IntegrationsView {
 
     fn select_provider(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         self.provider = provider;
+        self.gitlab_browser = true;
         let url = match self.provider {
             Provider::GitLab => "https://gitlab.com",
             Provider::GitHub => "https://github.com",
@@ -302,6 +361,25 @@ impl IntegrationsView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.error = None;
         cx.notify();
+    }
+
+    fn set_gitlab_browser(&mut self, browser: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.gitlab_browser = browser;
+        self.token
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.error = None;
+        cx.notify();
+    }
+
+    fn open_gitlab_application_settings(&mut self, cx: &mut Context<Self>) {
+        let server_url = self.server.read(cx).value().trim().to_string();
+        match oauth::application_settings_url(&server_url) {
+            Ok(url) => cx.open_url(&url),
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+            }
+        }
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -318,18 +396,40 @@ impl IntegrationsView {
             cx.notify();
             return;
         }
-        let draft = self.token.read(cx).value();
-        let token: SecretToken = draft.to_string().into();
-        // set_value also clears input undo history; a submitted token cannot
-        // reappear through undo or be returned in an event payload.
-        self.token
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        if draft.is_empty() {
-            self.error = Some("Saisissez un token personnel.".into());
-            cx.notify();
-            return;
-        }
-        drop(draft);
+        let browser = self.provider == Provider::GitLab && self.gitlab_browser;
+        let (request, authentication) = if browser {
+            let client_id = self.client_id.read(cx).value().trim().to_string();
+            if client_id.is_empty() {
+                self.gitlab_config_open = true;
+                self.error = Some(
+                    "Créez une application GitLab puis saisissez son Application ID public.".into(),
+                );
+                cx.notify();
+                return;
+            }
+            (
+                ConnectionRequest::GitLabBrowser {
+                    client_id: client_id.clone(),
+                },
+                Authentication::GitLabOAuth { client_id },
+            )
+        } else {
+            let draft = self.token.read(cx).value();
+            let token: SecretToken = draft.to_string().into();
+            // set_value also clears input undo history; a submitted token cannot
+            // reappear through undo or be returned in an event payload.
+            self.token
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            if draft.is_empty() {
+                self.error = Some("Saisissez un token personnel.".into());
+                cx.notify();
+                return;
+            }
+            (
+                ConnectionRequest::PersonalToken(token),
+                Authentication::PersonalToken,
+            )
+        };
         let label = self.label.read(cx).value().trim().to_string();
         let server_url = self.server.read(cx).value().trim().to_string();
         let username = self.username.read(cx).value().trim().to_string();
@@ -342,12 +442,18 @@ impl IntegrationsView {
             },
             provider: self.provider,
             server_url,
-            username: (!username.is_empty()).then_some(username),
+            username: (self.provider == Provider::BitbucketCloud && !username.is_empty())
+                .then_some(username),
+            authentication,
         };
         self.cancel();
         self.pending = Some(PendingOperation::Connect);
         self.error = None;
-        self.message = Some("Vérification du compte…".into());
+        self.message = Some(if browser {
+            "Ouverture de GitLab dans votre navigateur…".into()
+        } else {
+            "Vérification du compte…".into()
+        });
         let ticket = self.session.ticket(&account.id);
         let session = self.session.clone();
         let vault = self.vault.clone();
@@ -357,20 +463,65 @@ impl IntegrationsView {
         // Detached ownership allows the background worker to remove a newly
         // written credential if cancellation races with the secure vault.
         cx.spawn(async move |this, cx| {
+            let preparation_account = worker_account.clone();
+            let credentials = cx
+                .background_executor()
+                .spawn(async move {
+                    preparation_account.validate()?;
+                    match request {
+                        ConnectionRequest::PersonalToken(token) => {
+                            Ok(ConnectionCredentials::PersonalToken(token))
+                        }
+                        ConnectionRequest::GitLabBrowser { client_id } => {
+                            GitLabOAuth::begin(&preparation_account.server_url, &client_id)
+                                .map(ConnectionCredentials::GitLabBrowser)
+                        }
+                    }
+                })
+                .await;
+            let current = this
+                .update(cx, |view, cx| {
+                    if !view.accepts(&ticket, generation) {
+                        return false;
+                    }
+                    if let Ok(ConnectionCredentials::GitLabBrowser(flow)) = &credentials {
+                        // The listener is bound before opening the browser. A
+                        // superseded profile cannot open a stale login page.
+                        cx.open_url(flow.authorization_url());
+                        view.message = Some(
+                            "Autorisez Mangrove dans votre navigateur, puis revenez ici.".into(),
+                        );
+                        cx.notify();
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    worker_account.validate()?;
-                    let client = ProviderClient::new(
-                        HttpTransport::new()?,
-                        worker_account.clone(),
-                        token.clone(),
-                    )?;
+                    let credentials = match credentials? {
+                        ConnectionCredentials::PersonalToken(token) => {
+                            ConnectedCredentials::PersonalToken(token)
+                        }
+                        ConnectionCredentials::GitLabBrowser(flow) => {
+                            ConnectedCredentials::GitLabOAuth(
+                                flow.finish(&worker_ticket.cancellation)?,
+                            )
+                        }
+                    };
+                    let client = credentials.provider_client(worker_account.clone())?;
                     let page = client.repositories(None, &worker_ticket.cancellation)?;
                     if !session.is_current(&worker_ticket) {
                         return Err(mangrove_remote::RemoteError::Cancelled);
                     }
-                    vault.store(&worker_ticket.profile_id, &worker_account.id, &token)?;
+                    credentials.store(
+                        vault.as_ref(),
+                        &worker_ticket.profile_id,
+                        &worker_account.id,
+                    )?;
                     if !session.is_current(&worker_ticket) {
                         vault.delete(&worker_ticket.profile_id, &worker_account.id)?;
                         return Err(mangrove_remote::RemoteError::Cancelled);
@@ -507,10 +658,12 @@ impl IntegrationsView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let token = vault
-                        .read(&worker_ticket.profile_id, &account.id)?
-                        .ok_or(mangrove_remote::RemoteError::CredentialsExpired)?;
-                    let client = ProviderClient::new(HttpTransport::new()?, account, token)?;
+                    let client = oauth::account_client(
+                        vault.as_ref(),
+                        &worker_ticket.profile_id,
+                        &account,
+                        &worker_ticket.cancellation,
+                    )?;
                     perform_read(&client, request, &worker_ticket.cancellation)
                 })
                 .await;
@@ -856,13 +1009,46 @@ impl IntegrationsView {
             );
         }
         content = content.child(providers)
-            .child(field(&self.label, "account-label", "Nom du compte", p, offset))
+            .child(field(&self.label, "account-label", "Nom du compte (facultatif)", p, offset))
             .child(field(&self.server, "account-server", "URL du serveur", p, offset))
             .when(self.provider == Provider::BitbucketCloud, |view| view.child(note("Bitbucket Cloud : indiquez https://bitbucket.org/votre-workspace. Pour un API token, saisissez aussi votre adresse e-mail ; les access tokens utilisent Bearer sans nom d’utilisateur.", p)))
-            .when(self.provider == Provider::BitbucketCloud, |view| view.child(field(&self.username, "account-username", "Adresse e-mail Atlassian", p, offset)))
-            .child(field(&self.token, "account-token", "Token personnel", p, offset))
-            .child(note("Le token est effacé du champ après validation et conservé dans le coffre sécurisé du système. GitLab : read_api. GitHub : dépôts, PR et checks en lecture. Bitbucket : dépôts, PR et statuts CI en lecture.", p))
-            .child(action("account-connect", "Connecter", p, offset).disabled(self.pending.is_some()).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))));
+            .when(self.provider == Provider::BitbucketCloud, |view| view.child(field(&self.username, "account-username", "Adresse e-mail Atlassian", p, offset)));
+        if self.provider == Provider::GitLab && self.gitlab_browser {
+            content = content
+                .child(action("gitlab-browser-connect", "Se connecter avec GitLab", p, offset)
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))
+                .child(note("L’autorisation s’effectue dans votre navigateur. Mangrove conserve la connexion dans le coffre sécurisé du système.", p))
+                .child(action("gitlab-application-config", if self.gitlab_config_open { "Masquer la configuration" } else { "Configurer l’application GitLab" }, p, offset)
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.gitlab_config_open = !this.gitlab_config_open;
+                        cx.notify();
+                    })))
+                .when(self.gitlab_config_open, |view| {
+                    view.child(field(&self.client_id, "gitlab-client-id", "Application ID public", p, offset))
+                        .child(note("Cet ID est fourni lorsque vous créez une application Mangrove dans GitLab. Il peut être partagé ; aucun secret d’application n’est nécessaire.", p))
+                        .child(action("gitlab-create-application", "Créer une application GitLab", p, offset)
+                            .disabled(self.pending.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.open_gitlab_application_settings(cx))))
+                        .child(note(&format!("Dans GitLab : nom Mangrove, option Confidential décochée, autorisation read_api et URL de redirection {}.", oauth::REDIRECT_URI), p))
+                })
+                .child(action("gitlab-personal-token", "Utiliser un token personnel", p, offset)
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.set_gitlab_browser(false, window, cx))));
+        } else {
+            content = content
+                .child(field(&self.token, "account-token", "Token personnel", p, offset))
+                .child(note("Le token est effacé du champ après validation et conservé dans le coffre sécurisé du système. GitLab : read_api. GitHub : dépôts, PR et checks en lecture. Bitbucket : dépôts, PR et statuts CI en lecture.", p))
+                .child(action("account-connect", "Connecter avec le token", p, offset)
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))
+                .when(self.provider == Provider::GitLab, |view| {
+                    view.child(action("gitlab-browser-mode", "Se connecter par navigateur", p, offset)
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| this.set_gitlab_browser(true, window, cx))))
+                });
+        }
         if self.selected_account.is_some() {
             content = content.child(
                 div()
@@ -1203,6 +1389,26 @@ fn fresh_account_id() -> String {
     )
 }
 
+fn configured_gitlab_client_id(profile: &Profile) -> String {
+    profile
+        .accounts
+        .iter()
+        .filter(|account| {
+            account.provider == Provider::GitLab
+                && account.server_url.trim_end_matches('/') == "https://gitlab.com"
+        })
+        .find_map(|account| match &account.authentication {
+            Authentication::GitLabOAuth { client_id } => Some(client_id.clone()),
+            Authentication::PersonalToken => None,
+        })
+        .unwrap_or_else(|| {
+            std::env::var("MANGROVE_GITLAB_CLIENT_ID")
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
+}
+
 fn provider_label(provider: Provider) -> &'static str {
     match provider {
         Provider::GitLab => "GitLab",
@@ -1279,8 +1485,49 @@ fn field(
 
 #[cfg(test)]
 mod tests {
-    use super::{IntegrationsEvent, accepts_response, bounded, disconnect_completion};
-    use mangrove_remote::{ProfileSession, RemoteError};
+    use super::{
+        IntegrationsEvent, accepts_response, bounded, configured_gitlab_client_id,
+        disconnect_completion,
+    };
+    use mangrove_remote::{
+        Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
+    };
+
+    #[test]
+    fn gitlab_application_id_prefill_uses_the_active_profile_and_instance() {
+        let account = |id: &str, server_url: &str, client_id: &str| Account {
+            id: id.into(),
+            label: "GitLab".into(),
+            provider: Provider::GitLab,
+            server_url: server_url.into(),
+            username: None,
+            authentication: Authentication::GitLabOAuth {
+                client_id: client_id.into(),
+            },
+        };
+        let mut personal = Profile::new("personal", "Personnel");
+        personal.accounts.push(account(
+            "enterprise",
+            "https://gitlab.example.com",
+            "enterprise-id",
+        ));
+        personal.accounts.push(account(
+            "personal-account",
+            "https://gitlab.com/",
+            "personal-id",
+        ));
+        let mut professional = Profile::new("professional", "Professionnel");
+        professional.accounts.push(account(
+            "professional-account",
+            "https://gitlab.com",
+            "professional-id",
+        ));
+        assert_eq!(configured_gitlab_client_id(&personal), "personal-id");
+        assert_eq!(
+            configured_gitlab_client_id(&professional),
+            "professional-id"
+        );
+    }
 
     #[test]
     fn completed_vault_deletion_keeps_its_profile_after_switch_without_touching_new_view() {

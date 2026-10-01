@@ -12,6 +12,7 @@ pub enum RemoteError {
     Cancelled,
     InvalidConfiguration,
     Network,
+    OAuthPortInUse,
     Timeout,
     CredentialsExpired,
     RateLimited { retry_after_seconds: Option<u64> },
@@ -32,6 +33,7 @@ impl fmt::Display for RemoteError {
             Self::Cancelled => "Lecture annulée.",
             Self::InvalidConfiguration => "Configuration distante invalide.",
             Self::Network => "Connexion au serveur impossible.",
+            Self::OAuthPortInUse => "Le port local de connexion est déjà utilisé. Terminez l’autre connexion puis réessayez.",
             Self::Timeout => "Le serveur n’a pas répondu dans le délai imparti.",
             Self::CredentialsExpired => "Identifiants expirés ou révoqués.",
             Self::RateLimited { .. } => "Limite de l’API atteinte. Réessayez plus tard.",
@@ -59,6 +61,17 @@ pub enum Provider {
     BitbucketServer,
 }
 
+/// Only public OAuth configuration is stored alongside account metadata.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Authentication {
+    #[default]
+    PersonalToken,
+    GitLabOAuth {
+        client_id: String,
+    },
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Account {
@@ -67,6 +80,8 @@ pub struct Account {
     pub provider: Provider,
     pub server_url: String,
     pub username: Option<String>,
+    #[serde(default)]
+    pub authentication: Authentication,
 }
 
 impl fmt::Debug for Account {
@@ -90,6 +105,12 @@ impl Account {
         SafeApiUrl::new(&self.server_url, "")?;
         if let Some(username) = &self.username {
             validate_text(username, 256)?;
+        }
+        if let Authentication::GitLabOAuth { client_id } = &self.authentication {
+            if self.provider != Provider::GitLab {
+                return Err(RemoteError::InvalidConfiguration);
+            }
+            crate::oauth::validate_client_id(client_id)?;
         }
         Ok(())
     }

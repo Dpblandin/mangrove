@@ -81,6 +81,7 @@ fn account(provider: Provider, server_url: &str) -> Account {
         provider,
         server_url: server_url.into(),
         username: None,
+        authentication: mangrove_remote::Authentication::PersonalToken,
     }
 }
 

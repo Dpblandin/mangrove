@@ -12,13 +12,14 @@
 //! ```
 
 mod model;
+pub mod oauth;
 mod profiles;
 pub mod providers;
 mod session;
 pub mod ssh;
 mod transport;
 
-pub use model::{Account, Profile, Profiles, Provider, RemoteError, Result};
+pub use model::{Account, Authentication, Profile, Profiles, Provider, RemoteError, Result};
 pub use profiles::{CredentialVault, OsCredentialVault, ProfileStore};
 pub use providers::{
     ChangeRequest, CiStatus, Comment, Discussion, Page, PageCursor, ProviderClient, Repository,

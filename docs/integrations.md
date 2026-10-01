@@ -7,20 +7,43 @@ Changer de profil annule les lectures distantes, retire leurs pages affichées e
 ## Parcours
 
 1. Dans Profils, sélectionner un contexte et ajouter éventuellement un chemin local ou une URL aux favoris. Le bouton Ouvrir d’un favori local ouvre le dépôt existant ; un favori distant ne déclenche aucun clone.
-2. Dans Intégrations, choisir GitLab, GitHub, Bitbucket Cloud ou Bitbucket Server, renseigner le nom du compte, son serveur HTTPS et son token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
-3. Connecter vérifie la première page des dépôts accessibles, puis conserve le token dans le coffre de l’OS. Sélectionner le compte charge ses dépôts. Choisir un dépôt charge les PR/MR ouvertes ; choisir une PR/MR permet de consulter ses discussions et les statuts CI du commit source.
+2. Dans Intégrations, choisir GitLab, GitHub, Bitbucket Cloud ou Bitbucket Server et renseigner le serveur HTTPS. GitLab propose une connexion dans le navigateur avec une application OAuth configurée, ou un token personnel. Les autres fournisseurs utilisent un token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
+3. Connecter vérifie la première page des dépôts accessibles, puis conserve les identifiants dans le coffre de l’OS. Sélectionner le compte charge ses dépôts. Choisir un dépôt charge les PR/MR ouvertes ; choisir une PR/MR permet de consulter ses discussions et les statuts CI du commit source.
 4. Chaque bouton de pagination charge la page suivante en remplaçant la page affichée. Les collections sont bornées et les curseurs restent liés au compte et à la ressource. Les commentaires et les statuts CI ont leur pagination propre.
 5. Déconnecter retire le token du coffre et le compte du profil. Un token expiré, révoqué ou privé de droits produit une erreur ; reconnecter avec un token valide après déconnexion. Les erreurs de réseau, de coffre, de permissions et de limite d’API sont affichées dans cette rubrique.
 
 Aucune action ne crée ou modifie une PR/MR, un commentaire, une review, une issue ou un pipeline. Les liens et textes renvoyés par la forge sont des données de lecture ; les adaptateurs REST exposent uniquement GET. Aucun avatar, log CI ni artefact n’est téléchargé automatiquement.
 
+## Connexion GitLab dans le navigateur
+
+La connexion utilise OAuth avec PKCE S256 et le droit `read_api`. Elle ne demande ni mot de passe GitLab ni secret d’application dans Mangrove. Le navigateur système affiche la page de connexion et le consentement GitLab ; le retour rejoint un listener temporaire sur `127.0.0.1`, fermé à la fin du parcours ou à son annulation.
+
+Une application OAuth doit d’abord être enregistrée sur le serveur utilisé. Pour GitLab.com, ouvrir [Applications](https://gitlab.com/-/user_settings/applications), puis **Add new application** :
+
+- **Name** : `Mangrove`.
+- **Redirect URI** : exactement `http://127.0.0.1:47321/oauth/callback`.
+- **Confidential** : décoché, pour ce client public desktop.
+- **Scopes** : uniquement `read_api`.
+
+Après **Save application**, copier **Application ID** dans le champ de Mangrove, puis choisir **Se connecter avec GitLab**. Le champ **Secret** n’est pas utilisé. L’ID désigne l’application OAuth, et non un token personnel ; les utilisateurs d’une même application enregistrée peuvent utiliser son ID. Sur une instance auto-hébergée, enregistrer l’application sur cette instance.
+
+`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. Quand l’ID est configuré, le bouton de connexion reste visible et les instructions sont repliées sous **Configurer l’application GitLab**.
+
+Le renouvellement des tokens OAuth s’effectue avant les lectures quand leur expiration approche ; l’accès et le refresh token restent dans une seule entrée du coffre du compte. Déconnecter supprime cette entrée locale. Pour retirer aussi l’autorisation côté GitLab, révoquer Mangrove dans **Authorized applications** sur GitLab. Mangrove ne génère ni n’ajoute de clés SSH ; il utilise les clés ou agents déjà disponibles.
+
+Les renouvellements concurrents d’un compte sont coordonnés dans le processus Mangrove. La comparaison avant remplacement du coffre protège une déconnexion concurrente dans cette instance ; les coffres OS ne fournissent pas cette garantie entre plusieurs processus. Une annulation réseau ou un échec de stockage après une rotation côté GitLab peut nécessiter une reconnexion.
+
+Sources : [création d’application et droits](https://docs.gitlab.com/integration/oauth_provider/), [PKCE, renouvellement et authentification Bearer](https://docs.gitlab.com/api/oauth2/).
+
 ## Stockage et secrets
 
-`profiles.json` est dans le répertoire de configuration utilisateur sous `mangrove-gpui`. Il ne contient que des métadonnées : noms et IDs des profils/comptes, fournisseurs, URLs HTTPS, nom d’utilisateur éventuel, favoris et choix SSH. Les identifiants sont validés, le fichier est borné à 1 Mio et ses écritures sont atomiques. Un fichier invalide n’est pas écrasé par une sauvegarde de profils par défaut.
+`profiles.json` est dans le répertoire de configuration utilisateur sous `mangrove-gpui`. Il ne contient que des métadonnées : noms et IDs des profils/comptes, fournisseurs, URLs HTTPS, nom d’utilisateur éventuel, méthode d’authentification et ID d’application OAuth, favoris et choix SSH. Les identifiants sont validés, le fichier est borné à 1 Mio et ses écritures sont atomiques. Un fichier invalide n’est pas écrasé par une sauvegarde de profils par défaut.
 
 Les préférences sont dans `preferences-profiles/<id>.json`, à côté du fichier historique `preferences.json`. Le profil Personnel importe les anciennes préférences lors de sa première lecture ; le fichier historique est conservé. Les autres profils démarrent avec les valeurs par défaut. Aucun changement ne réécrit `.gitconfig`, l’identité Git ou les dépôts consultés.
 
 Les tokens utilisent macOS Keychain, Windows Credential Manager ou Secret Service sous Linux, avec une identité distincte par profil et compte. Si le coffre est verrouillé ou indisponible, Mangrove signale l’erreur sans stockage de repli. Les secrets ne sont pas sérialisables, leur Debug est masqué et les réponses ne transmettent pas de token aux vues. Les diagnostics n’incluent ni corps d’erreur serveur ni URL d’authentification. Les réponses contenant un écho identifiable des credentials sont rejetées.
+
+Les POST OAuth servent exclusivement à obtenir et renouveler l’autorisation de connexion ; ils sont séparés des adaptateurs GET de consultation. Les comptes par token créés avant l’ajout d’OAuth restent compatibles.
 
 Les caches distants sont en mémoire et isolés par profil/compte. Le cache de session est borné à 64 entrées et 8 Mio ; les vues conservent seulement les pages actives. Un changement de profil, de compte, de clé SSH ou de lecture invalide les tickets concernés. Les requêtes HTTP utilisent un délai de 20 secondes, TLS avec le magasin de certificats natif, aucune redirection et un maximum de 4 Mio. L’annulation abandonne les futures réseau ; les réponses tardives ne repeuplent pas l’ancien contexte.
 

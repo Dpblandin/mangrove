@@ -95,6 +95,20 @@ pub trait CredentialVault: Send + Sync {
     fn store(&self, profile_id: &str, account_id: &str, token: &SecretToken) -> Result<()>;
     fn read(&self, profile_id: &str, account_id: &str) -> Result<Option<SecretToken>>;
     fn delete(&self, profile_id: &str, account_id: &str) -> Result<()>;
+    /// Replace a rotated OAuth credential only if its original entry still
+    /// exists and is unchanged, serialized with this process's vault operations.
+    /// A concurrent logout in this application must never be undone. Native OS
+    /// keyrings do not provide CAS against other application processes.
+    /// Custom vaults without atomic replacement fail closed for OAuth refresh.
+    fn replace_if_matches(
+        &self,
+        _profile_id: &str,
+        _account_id: &str,
+        _previous: &SecretToken,
+        _replacement: &SecretToken,
+    ) -> Result<bool> {
+        Err(RemoteError::VaultUnavailable)
+    }
 }
 
 /// Explicit native backends are enabled per platform in Cargo.toml. A missing
@@ -150,6 +164,34 @@ impl CredentialVault for OsCredentialVault {
             Err(_) => Err(RemoteError::VaultUnavailable),
         }
     }
+
+    fn replace_if_matches(
+        &self,
+        profile_id: &str,
+        account_id: &str,
+        previous: &SecretToken,
+        replacement: &SecretToken,
+    ) -> Result<bool> {
+        let _guard = VAULT_LOCK
+            .lock()
+            .map_err(|_| RemoteError::VaultUnavailable)?;
+        if replacement.expose_secret().is_empty() || replacement.expose_secret().len() > 16 * 1024 {
+            return Err(RemoteError::InvalidConfiguration);
+        }
+        let entry = vault_entry(profile_id, account_id)?;
+        let current = match entry.get_password() {
+            Ok(value) => SecretToken::from(value),
+            Err(keyring::Error::NoEntry) => return Ok(false),
+            Err(_) => return Err(RemoteError::VaultUnavailable),
+        };
+        if current.expose_secret() != previous.expose_secret() {
+            return Ok(false);
+        }
+        entry
+            .set_password(replacement.expose_secret())
+            .map_err(|_| RemoteError::VaultUnavailable)?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +206,7 @@ mod tests {
             provider: Provider::GitLab,
             server_url: server.into(),
             username: None,
+            authentication: crate::Authentication::PersonalToken,
         }
     }
 
@@ -272,7 +315,33 @@ mod tests {
         let loaded = vault.read(&profile_id, account_id).unwrap().unwrap();
         assert!(loaded.expose_secret() == fixture.expose_secret());
         assert!(!format!("{loaded:?}").contains(fixture.expose_secret()));
+        let rotated = SecretToken::from("mangrove-synthetic-qa-rotated");
+        assert!(!vault
+            .replace_if_matches(&profile_id, account_id, &rotated, &fixture)
+            .unwrap());
+        assert!(
+            vault
+                .read(&profile_id, account_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret()
+                == fixture.expose_secret()
+        );
+        assert!(vault
+            .replace_if_matches(&profile_id, account_id, &fixture, &rotated)
+            .unwrap());
+        assert!(
+            vault
+                .read(&profile_id, account_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret()
+                == rotated.expose_secret()
+        );
         vault.delete(&profile_id, account_id).unwrap();
+        assert!(!vault
+            .replace_if_matches(&profile_id, account_id, &rotated, &fixture)
+            .unwrap());
         assert!(vault.read(&profile_id, account_id).unwrap().is_none());
     }
 }

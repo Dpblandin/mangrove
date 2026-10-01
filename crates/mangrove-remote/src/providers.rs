@@ -9,8 +9,8 @@ use url::Url;
 
 use crate::{
     transport::{check_status, contains_credential, header, MAX_RESPONSE_BYTES},
-    Account, CancellationToken, ExposeSecret, HttpRequest, HttpResponse, Provider, RemoteError,
-    Result, SafeApiUrl, SecretToken, Transport,
+    Account, Authentication, CancellationToken, ExposeSecret, HttpRequest, HttpResponse, Provider,
+    RemoteError, Result, SafeApiUrl, SecretToken, Transport,
 };
 
 const PAGE_SIZE: u64 = 50;
@@ -96,6 +96,7 @@ pub struct ProviderClient<T: Transport> {
     transport: T,
     account: Account,
     token: SecretToken,
+    protected_secrets: Vec<SecretToken>,
     base: SafeApiUrl,
     cloud_workspace: Option<String>,
 }
@@ -163,9 +164,15 @@ impl<T: Transport> ProviderClient<T> {
             transport,
             account,
             token,
+            protected_secrets: Vec::new(),
             base,
             cloud_workspace,
         })
+    }
+
+    pub(crate) fn protect_secret(mut self, secret: &SecretToken) -> Self {
+        self.protected_secrets.push(secret.clone());
+        self
     }
 
     pub fn repositories(
@@ -367,7 +374,9 @@ impl<T: Transport> ProviderClient<T> {
     fn headers(&self) -> Vec<(String, SecretToken)> {
         let token = self.token.expose_secret();
         let (name, value) = match self.account.provider {
-            Provider::GitLab => ("PRIVATE-TOKEN", token.to_owned()),
+            Provider::GitLab if self.account.authentication == Authentication::PersonalToken => {
+                ("PRIVATE-TOKEN", token.to_owned())
+            }
             Provider::BitbucketCloud if self.account.username.is_some() => (
                 "Authorization",
                 format!("Basic {}", self.basic_credential().unwrap().as_str()),
@@ -597,6 +606,9 @@ impl<T: Transport> ProviderClient<T> {
         if let Some(basic) = self.basic_credential() {
             safe = safe.replace(basic.as_str(), "[redacted]");
         }
+        for secret in &self.protected_secrets {
+            safe = safe.replace(secret.expose_secret(), "[redacted]");
+        }
         if self.contains_credential(&safe) {
             safe = "[redacted]".into();
         }
@@ -646,6 +658,13 @@ impl<T: Transport> ProviderClient<T> {
     fn contains_credential(&self, value: &str) -> bool {
         let token = self.token.expose_secret();
         if contains_credential(value, token) {
+            return true;
+        }
+        if self
+            .protected_secrets
+            .iter()
+            .any(|secret| contains_credential(value, secret.expose_secret()))
+        {
             return true;
         }
         self.basic_credential()

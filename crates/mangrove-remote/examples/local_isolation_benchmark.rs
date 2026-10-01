@@ -97,6 +97,7 @@ fn main() -> Result<(), String> {
                 provider: Provider::GitLab,
                 server_url: "https://gitlab.example.invalid".into(),
                 username: None,
+                authentication: mangrove_remote::Authentication::PersonalToken,
             },
             SecretToken::from("synthetic-test-token"),
         )?;
