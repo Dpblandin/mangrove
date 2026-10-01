@@ -1,5 +1,7 @@
 # QA native de la consultation des fichiers
 
+> Rapport historique de l'interface Vue/Tauri, dont les sources ont été retirées. Les parcours, tests et mesures ci-dessous décrivent le build de l'époque. La QA de l'application GPUI actuelle est documentée dans le [README natif](../src-gpui/README.md).
+
 Validation effectuée le 30 septembre 2026 sur macOS ARM64, avec le bundle Tauri release et une fixture entièrement synthétique de **10 007 commits**, dont un commit présentant 46 changements mixtes. Le bundle de QA utilise un identifiant distinct de l’application habituelle. Le processus a été fermé puis relancé après la compilation finale.
 
 ## Parcours vérifiés

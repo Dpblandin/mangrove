@@ -1,10 +1,10 @@
 # Mangrove
 
-Application **desktop** pour explorer Git. La consultation conserve les fichiers et l’index ; l’auto-fetch met à jour les références distantes. Tauri embarque l’interface Vue et le moteur Rust dans une application native : la version distribuée ne nécessite ni serveur local, ni navigateur, ni Node.js.
+Application **desktop** pour explorer Git. La consultation conserve les fichiers et l’index ; l’auto-fetch met à jour les références distantes. GPUI dessine l’interface native et utilise le moteur Rust `mangrove-core`. L’application autonome ne nécessite ni serveur local, ni navigateur, ni Node.js.
 
 Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpblandin/mangrove/issues/1).
 
-## Prototype disponible
+## Fonctionnalités
 
 - Ouverture de dépôts locaux, bare et worktrees ; dépôts récemment ouverts.
 - Onglets de dépôts avec sélection, fermeture et bouton d’ouverture. Chaque changement recharge le dépôt actif ; les onglets conservent uniquement son nom et son chemin.
@@ -30,64 +30,75 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Auto-fetch des remotes du dépôt actif : dans **Paramètres → Général**, intervalle mémorisé de **0 à 60 minutes**, **1 minute** par défaut et **0** pour désactiver. L’historique et les références sont actualisés en conservant la recherche et la sélection. Un bouton dans la barre supérieure permet un fetch immédiat, même lorsque l’auto-fetch est désactivé. Les erreurs sont affichées sans interrompre les autres remotes ; les objets LFS ne sont pas récupérés automatiquement.
 - Fond sombre pour l’historique et les diffs ; Macchiato utilise le même fond que le panneau des détails.
 - Panneaux branches et détails redimensionnables à la souris ou au clavier ; leurs largeurs sont mémorisées et les colonnes de l’historique s’adaptent à l’espace disponible. Double clic sur un séparateur pour réinitialiser.
-- Taille des textes mémorisée : **Cmd/Ctrl + +** (ou **=**) agrandit, **Cmd/Ctrl + −** réduit, **Cmd/Ctrl + 0** rétablit la taille par défaut, augmentée d’un pixel par rapport à la première version du prototype.
+- Taille des textes mémorisée : **Cmd/Ctrl + +** (ou **=**) agrandit, **Cmd/Ctrl + −** réduit, **Cmd/Ctrl + 0** rétablit la taille par défaut.
 - Le texte des diffs démarre à **11 px**. Les boutons **− / +** dans leur en-tête règlent uniquement cette taille, mémorisée et partagée entre les vues centrale et compacte. Les raccourcis globaux ajustent les deux tailles ; **Cmd/Ctrl + 0** rétablit aussi le diff à 11 px.
 
 Les intégrations de comptes GitHub/GitLab/Bitbucket et les profils restent à implémenter. Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Le fetch utilise **Git installé sur la machine**, les gestionnaires d’identifiants et l’agent SSH existants, sans invite interactive ; aucun clone ni fonctionnalité d’IA n’est fourni.
 
 ## Lancer l’application desktop
 
-Préparer [Vite+](https://viteplus.dev/guide/), Rust avec rustup et les [prérequis Tauri de votre OS](https://v2.tauri.app/start/prerequisites/). Le toolchain Rust du dépôt est fixé dans `rust-toolchain.toml`.
+Préparer Rust avec rustup et les [prérequis GPUI Kit de votre OS](https://gpui-kit.com/docs/installation/), dont Xcode complet sur macOS (les shaders Metal sont compilés à l’exécution par cette version de GPUI Kit). Le toolchain Rust du dépôt est fixé dans `rust-toolchain.toml`.
 
 ```sh
-vp install --frozen-lockfile
-vp run desktop
+cargo run --release --locked --manifest-path src-gpui/Cargo.toml
+# Ouverture directe d’un dépôt :
+cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- /chemin/du/depot
 ```
 
-`vp run dev` lance également la fenêtre desktop. Le serveur Vite démarre uniquement pour recharger l’interface pendant le développement ; les lectures Git passent par les commandes natives Tauri.
-
-Pour produire une application macOS autonome :
+Pour compiler le binaire release sans le lancer :
 
 ```sh
-vp run tauri build --bundles app
-open target/release/bundle/macos/Mangrove.app
+cargo build --release --locked --manifest-path src-gpui/Cargo.toml
 ```
 
-`vp run tauri build` produit les formats de distribution de l’OS courant. La signature et la notarisation pour une distribution publique restent à configurer. Le prototype a été compilé et vérifié sur macOS ARM ; les vérifications des autres OS sont configurées en CI.
+Pour produire une application macOS autonome avec l’icône originale :
 
-Toutes les commandes de dépendances passent par `vp` (`vp install`, `vp add`, `vp remove`). Vite+ délègue ici à npm 11.19.0, fixé dans `devEngines.packageManager`, et utilise `package-lock.json` ; `vp` n’a pas son propre format de lockfile. Voir sa [documentation de gestion des paquets](https://viteplus.dev/guide/install).
+```sh
+sh src-gpui/scripts/package-macos.sh
+open src-gpui/target/release/bundle/Mangrove.app
+```
+
+La signature et la notarisation pour une distribution publique restent à configurer. La QA interactive porte sur macOS ARM ; la CI vérifie la compilation et les tests sur les trois OS. Les parcours visuels et le packaging Windows/Linux restent à valider sur ces plateformes. Le [README GPUI](src-gpui/README.md) précise les préférences, les limites et les commandes.
 
 ## Vérifier
 
 ```sh
-vp run check
-vp test run
-vp run test:fixture
-vp run build
+cargo fmt --manifest-path src-gpui/Cargo.toml --check
+cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path src-gpui/Cargo.toml
 cargo fmt --all --check
 cargo clippy --locked -p mangrove-core --all-targets -- -D warnings
 cargo test --locked -p mangrove-core
 ```
 
-Les tests du moteur comparent notamment les octets et dates de modification de l’ensemble du dépôt source avant et après consultation. Les tests Vue vérifient les courses entre ouvertures, recherches, indexation et sélections.
+Les tests du moteur comparent notamment les octets et dates de modification de l’ensemble du dépôt source avant et après consultation. Les tests GPUI protègent les générations de lecture, les ouvertures remplacées, la sélection, les caches bornés et la géométrie du défilement.
 
-Un dépôt Git synthétique de développement peut être créé avec `vp run fixture`. Il est isolé dans `.mangrove-dev/`, ignoré par Git, et n’est pas intégré à l’application. Voir [les mesures de performance](docs/performance.md) pour le générateur de grand historique et le benchmark reproductible.
+Le générateur de fixture nécessite seulement Node.js et Git, sans installation de dépendances JavaScript :
+
+```sh
+node --test scripts/create-fixture.test.mjs
+node scripts/create-fixture.mjs
+```
+
+Le dépôt synthétique est isolé dans `.mangrove-dev/`, ignoré par Git, et n’est pas intégré à l’application. Voir [les mesures de performance](docs/performance.md) pour le générateur de grand historique et le benchmark reproductible.
 
 Pour explorer une longue liste de fichiers et différents types de diffs :
 
 ```sh
-vp run fixture --commits 10000 --large-change
+node scripts/create-fixture.mjs --commits 10000 --large-change
 ```
 
 L’option ajoute un commit de préparation, puis `feat(fixture): showcase 46 mixed file changes` : 18 fichiers modifiés, 12 ajoutés, 8 supprimés, 6 renommés et 2 changements de type. Le commit contient aussi des fichiers binaires, un fichier vide, un changement de permission, des chemins avec espaces ou accents et un diff de 2 400 lignes pour vérifier la troncature. Il s’ajoute une seule fois à une fixture existante propre sur `main`, sans remplacer son historique.
 
 ## Organisation
 
-- `crates/mangrove-core` : lecture Git, graphe, indexation et cache ; indépendant de l’interface et du transport.
-- `src-tauri` : application desktop, commandes natives de consultation et de fetch, sélection de dossier.
-- `src` : Vue 3, TypeScript, Tailwind CSS 4, historique virtualisé et rendu Canvas.
+- `crates/mangrove-core` : lecture Git, graphe, indexation et cache ; indépendant de l’interface.
+- `src-gpui` : application native GPUI, vues virtualisées, orchestration des lectures, préférences et packaging ; workspace Cargo indépendant.
+- `src-gpui/assets/icons` : icônes originales utilisées pour le packaging.
 - `scripts/create-fixture.mjs` : génération isolée de dépôts synthétiques pour la QA et les mesures. Aucun bridge HTTP de lecture des dépôts n’est fourni.
 
 Voir [les décisions d’architecture](docs/architecture.md).
 
-Les six revues et leurs correctifs sont résumés dans [docs/review.md](docs/review.md). Le thème Macchiato utilise la [palette officielle Catppuccin](https://catppuccin.com/palette/).
+La fidélité, les limites et la comparaison historique des builds release GPUI et Vue/Tauri sont documentées dans le [rapport de performance](docs/performance-gpui.md) ([issue #9](https://github.com/Dpblandin/mangrove/issues/9)). Les sources de l’ancienne interface ont été retirées ; le rapport et les captures restent des preuves de cette comparaison datée.
+
+Les six revues initiales et leurs correctifs sont résumés dans le [rapport historique](docs/review.md). Le thème Macchiato utilise la [palette officielle Catppuccin](https://catppuccin.com/palette/).

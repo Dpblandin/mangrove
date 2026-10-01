@@ -1,5 +1,7 @@
 # QA native des worktrees, stashes et Solo
 
+> Rapport historique de l'interface Vue/Tauri, dont les sources ont été retirées. Les parcours, tests et mesures ci-dessous décrivent le build de l'époque. La QA de l'application GPUI actuelle est documentée dans le [README natif](../src-gpui/README.md).
+
 Validation du 30 septembre 2026 sur macOS ARM64, dans le bundle Tauri release avec un identifiant de QA distinct. Le processus est fermé puis relancé après les reconstructions. La fixture synthétique contient **10 007 commits** dans son historique ordinaire, un merge à trois parents et un commit avec 46 changements mixtes. Sa copie de QA ajoute des branches, trois worktrees liés et un stash ; aucun dépôt réel n’est modifié pour ces scénarios.
 
 ## Parcours vérifiés

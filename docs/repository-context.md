@@ -1,6 +1,6 @@
 # Worktrees, stashes et mode Solo
 
-Mangrove consulte ces données par des commandes natives Rust/git2. La consultation ne change ni HEAD, ni les fichiers, ni l'index, ni les références, ni la configuration des dépôts. Aucun checkout, création/suppression de worktree ou application/suppression de stash n'est exposé.
+La sidebar GPUI consulte ces données par les méthodes Rust/git2 de `Workspace`, en arrière-plan. La consultation ne change ni HEAD, ni les fichiers, ni l'index, ni les références, ni la configuration des dépôts. Aucun checkout, création/suppression de worktree ou application/suppression de stash n'est exposé.
 
 ## Worktrees
 
@@ -8,7 +8,7 @@ La section Worktrees se charge à son ouverture et présente une ligne compacte 
 
 Ouvrir une entrée disponible utilise son dossier de travail dans le parcours d'onglets existant. Une entrée déjà ouverte active cet onglet. Chaque worktree conserve son identité de session et son index Git local ; les gardes existantes interdisent un cache applicatif dans le worktree, ses dossiers Git ou le worktree principal. Un dépôt bare indique explicitement qu'il ne possède pas de répertoire de travail.
 
-La réponse contient au plus 256 entrées, principal compris, et annonce sa troncature. Les lectures de noms et inscriptions sont natives ; aucun processus Git ou shell n'est exécuté par l'application.
+La réponse contient au plus 256 entrées, principal compris, et annonce sa troncature. Les lectures de noms et inscriptions sont natives ; elles ne lancent aucun processus Git ou shell.
 
 ## Onglets et dépôts récents
 
@@ -34,7 +34,7 @@ Les commits techniques de stash restent exclus des racines de l'historique gén�
 
 ## Solo
 
-Le bouton Solo d'une branche locale ou distante apparaît au survol de sa ligne dans la sidebar ou au focus clavier ; il reste visible sur les appareils sans survol. Le menu contextuel de la sidebar et le clic droit sur un badge de branche dans le graphe proposent la même action. Le clic droit sur une ligne de commit propose toutes les branches locales ou distantes attachées à ce commit, même celles dont le badge n'est pas affiché, pour choisir explicitement la référence à isoler. Les tags et les commits sans branche attachée ne proposent pas de Solo. Maj + F10 ou la touche Menu ouvrent aussi ces actions depuis le commit sélectionné.
+Le bouton Solo d'une branche locale ou distante est accessible dans sa ligne de sidebar, à la souris et au clavier. Le menu contextuel de la sidebar et le clic droit sur un badge de branche dans le graphe proposent la même action. Le clic droit sur une ligne de commit propose toutes les branches locales ou distantes attachées à ce commit, même celles dont le badge n'est pas affiché, pour choisir explicitement la référence à isoler. Les tags et les commits sans branche attachée ne proposent pas de Solo. Maj + F10 ou la touche Menu ouvrent aussi ces actions depuis le commit sélectionné.
 
 Le menu propose « Solo », « Ajouter au Solo » ou « Retirer du Solo » selon le filtre actuel. Une branche déjà sélectionnée est retirée ; retirer la dernière restaure l'historique complet. Plusieurs branches forment l'union de leurs historiques. Le bandeau indique les branches sélectionnées et permet de quitter le mode. Échap ferme le menu et rend le focus à son origine ; le défilement du graphe ou une actualisation des références ferme les actions périmées. Ouvrir le menu n'altère pas la sélection du commit.
 
@@ -46,11 +46,13 @@ Le clic normal sur une branche conserve la navigation vers son dernier commit. S
 
 ## Actualisation et validation
 
-L'actualisation manuelle et le retour du focus relisent l'état du dépôt actif et les sections ouvertes. Les vues de stashes et de diffs ont des générations et annulations distinctes ; quitter une sélection ou un dépôt libère les caches et ignore les réponses natives arrivées plus tard.
+L'actualisation manuelle et le retour du focus relisent l'état du dépôt actif et les sections ouvertes. `RepositoryContextState` conserve une lane physique et une dernière demande par liste : une lecture native engagée termine avant que la demande suivante parte, et seule la génération courante publie son résultat. Les vues de stashes et de diffs ont des générations distinctes ; quitter une sélection ou un dépôt libère les caches concernés et ignore les réponses natives arrivées plus tard.
 
-Les tests d'intégration comparent les octets, cibles de symlinks et dates de modification de toutes les entrées des dépôts source, y compris leurs fichiers administratifs. Ils couvrent l'union Solo, les merges, la recherche, la pagination, les modifications externes de références, les worktrees liés et indisponibles, les trois zones de stash et sa suppression externe. Les tests Vue contrôlent les réponses tardives, les listes à la demande et la libération des sélections.
+Un stash sélectionné est aussi relu lors de l'actualisation si la section est repliée. Son absence dans une liste complète provoque un événement `StashUnavailable` ; l'application vérifie encore le dépôt et la sélection avant de retirer ses détails et de revenir à un commit. Une erreur de lecture ou une liste tronquée ne prouve pas sa disparition et ne retire pas la sélection.
 
-Le benchmark `context_benchmark` utilise un cache applicatif temporaire extérieur au dépôt, conserve seulement des résultats agrégés et mesure 30 lectures de listes, détails et patch de stash, puis 30 alternances entre deux filtres Solo si deux références de branches distinctes existent. Les données, chemins, SHA, branches et auteurs du dépôt source ne sont pas publiés. Les résultats sont dans [performance.md](performance.md) ; les parcours interactifs sont dans [qa-repository-context.md](qa-repository-context.md).
+Les tests d'intégration du moteur comparent les octets, cibles de symlinks et dates de modification de toutes les entrées des dépôts source, y compris leurs fichiers administratifs. Ils couvrent l'union Solo, les merges, la recherche, la pagination, les modifications externes de références, les worktrees liés et indisponibles, les trois zones de stash et sa suppression externe. Les tests GPUI protègent les demandes de listes remplacées, les réponses obsolètes, l'absence de stash dans une liste complète ou tronquée, le tri et les replis des références, ainsi que les tickets de noms récents.
+
+Le benchmark `context_benchmark` utilise un cache applicatif temporaire extérieur au dépôt, conserve seulement des résultats agrégés et mesure 30 lectures de listes, détails et patch de stash, puis 30 alternances entre deux filtres Solo si deux références de branches distinctes existent. Les données, chemins, SHA, branches et auteurs du dépôt source ne sont pas publiés. Les résultats sont dans [performance.md](performance.md). La QA GPUI est décrite dans le [README natif](../src-gpui/README.md) ; [qa-repository-context.md](qa-repository-context.md) conserve les parcours de l'ancienne interface.
 
 ```sh
 cargo build --release --locked -p mangrove-core --example context_benchmark

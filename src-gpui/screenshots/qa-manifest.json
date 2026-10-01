@@ -1,0 +1,259 @@
+{
+  "verified_at": "2026-10-01T00:02:10.732786+00:00",
+  "platform": "macOS ARM64",
+  "gpui_binary_sha256": "eb4bf4aaec84ef2aa30b80610bbc8fc9f5fcdd5924e547ee632c74f5c527d1e3",
+  "gpui_test_count": 75,
+  "gpui_benchmark_test_count": 80,
+  "core_test_count": 70,
+  "vue_test_count": 327,
+  "fixture_test_count": 8,
+  "linux_harness_test_count": 6,
+  "capture_artifacts": {
+    "gpui": {
+      "sha256": "24eb109989353cb753dbc74768ce205fed4a20a87264302ad46c8748f94e2148",
+      "configuration": "release, default features, production bundle",
+      "bundle_identifier": "dev.mangrove.gpui"
+    },
+    "tauri": {
+      "sha256": "024d8b1fb388806c11885fe6e3ac7815f44bce0a288e59ab041d0bc12c7708f7",
+      "configuration": "release, app-benchmark compiled; normal UI mode without benchmark variables",
+      "captured_on": "2026-09-30T23:45:30.480195+00:00",
+      "bundle_identifier": "dev.mangrove.desktop.benchmark",
+      "source_git_revision": "77b15d5ba5a3671ebeef8f1e8f8384429bc81e58",
+      "display": "main Built-in Retina Display, scale 2"
+    }
+  },
+  "checks": [
+    "clean actual Mangrove main: no uncommitted row",
+    "native vertical and horizontal scrollbars, final diff line 2000",
+    "diff thumb jump 1488 then wheel 1537",
+    "sidebar 10000 refs: thumb qa-05026, wheel qa-05055 and return, last qa-09999",
+    "51-reference history menu: End/Home reveal selected rows",
+    "file history and Blame: repeated reopen after commit inspection",
+    "themes classic, mangrove and macchiato",
+    "stash disappears after external drop: current successful complete context clears selection",
+    "external commit refresh: local diff disappears, new first commit bf942f3 selected",
+    "invalid repository open: old tabs retained, welcome shows error, navigation recovers",
+    "remote branch Solo enter and leave; tab switches preserve repository intent",
+    "macOS NSRunningApplication resolves running production icon",
+    "final Tauri bundle: paired history/diff/welcome at identical physical dimensions, same fixture and defaults, auto-fetch off"
+  ],
+  "captures": {
+    "full-blame": {
+      "sha256": "d2dff4115333e3a5be6fe989b7b73e4eaec7519e8fe1f9f04c1193ad5c501944",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.664263+00:00",
+      "artifact": "gpui"
+    },
+    "full-clean-refresh": {
+      "sha256": "fa6238531d939d41d971616d6633113be11a01eb38d8f09182a08533506f379e",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.723473+00:00",
+      "artifact": "gpui"
+    },
+    "full-diff": {
+      "sha256": "17886200b5c45a5c0fd0972a9091df1a4d17ed93d62716aa3f43bf09f6e3663e",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.553151+00:00",
+      "artifact": "gpui"
+    },
+    "full-history": {
+      "sha256": "9354eb1de2d34613c3d34de75130fe8aea4ae2c3f308134eafb8b5f2a0222ccd",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.527487+00:00",
+      "artifact": "gpui"
+    },
+    "full-macchiato": {
+      "sha256": "77250a52b596d4c2f9e1a9de05f2c08e49659b9a95c2c1faf086c55ee59be061",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.637765+00:00",
+      "artifact": "gpui"
+    },
+    "full-main-clean": {
+      "sha256": "a46481a043e5d168a1a2488fbaa1c78c48cc5afb00e667afc0732897a939c1d2",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.695321+00:00",
+      "artifact": "gpui"
+    },
+    "full-mangrove": {
+      "sha256": "56505788d9f05fc2906d069e4604ef22f027a4b7a1627baffa6f2b7b387cb3c8",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.606424+00:00",
+      "artifact": "gpui"
+    },
+    "full-sidebar-10000": {
+      "sha256": "fa29a67488ccca49240cf4608934529e0faa10abe0633d8a72d0d009fbdaa2d3",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.752113+00:00",
+      "artifact": "gpui"
+    },
+    "full-welcome": {
+      "sha256": "4aee5d86567fcb737e8c80337fcde901a0cef41e1033308714e58ed7f7c97d6e",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:12:57.577174+00:00",
+      "artifact": "gpui"
+    },
+    "tauri-diff": {
+      "sha256": "00b67c1423f0454de8a5849bcbb5897d6899bc8a6469c4ab0ff35647d9625de9",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:45:30.533467+00:00",
+      "artifact": "tauri"
+    },
+    "tauri-history": {
+      "sha256": "53df4f3a53a5b174a33f18af6b74eaf641f4711b2d1c7f9cc8943a1f606c342e",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:45:30.508749+00:00",
+      "artifact": "tauri"
+    },
+    "tauri-welcome": {
+      "sha256": "66e732c24b717c4416f0a0d31b0829e49ad26aa81f6fcada24639c72484cab92",
+      "dimensions": [2880, 1840],
+      "modified_at": "2026-09-30T23:45:30.557176+00:00",
+      "artifact": "tauri"
+    }
+  },
+  "running_icon": {
+    "file": "running-app-icon.png",
+    "sha256": "db026cdaeddc53e99622342c0f2f5a8302b7ee9ed5f890143fc037076ee441ba",
+    "dimensions": [64, 64],
+    "observed_bundle_identifier": "dev.mangrove.gpui"
+  },
+  "full_native_qa_verified_at": "2026-09-30T23:45:30.480195+00:00",
+  "post_series_regression_validation": {
+    "verified_at": "2026-09-30T23:59:36.294870+00:00",
+    "source_git_revision": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
+    "production_binary_sha256": "eb4bf4aaec84ef2aa30b80610bbc8fc9f5fcdd5924e547ee632c74f5c527d1e3",
+    "configuration": "release, default features, production bundle",
+    "checks": [
+      "75 production and 80 instrumented tests pass; clippy release all-targets -D warnings passes in both configurations",
+      "expired syntax deadline deterministically returns None for parser and lexical fallback; semantic tests use a separate 30-second budget",
+      "new production bundle: native TypeScript diff and file content remain colored and lossless",
+      "bundle Info.plist passes plutil and packaged icon bytes equal the original Mangrove icon"
+    ],
+    "capture": {
+      "file": "post-fix-diff.jpg",
+      "sha256": "83febbb967c0f591cd351d0dd83ab01dcdde2f2b96b37e789bc258bc30cbdb96",
+      "dimensions": [2880, 1840]
+    },
+    "benchmark_control_completed_at": "2026-10-01T00:01:06.765634+00:00",
+    "validated_benchmark_launches": 4,
+    "ci_run": "https://github.com/Dpblandin/mangrove/actions/runs/36793683102"
+  },
+  "post_comparison_ui_validation": {
+    "verified_at": "2026-10-01T05:55:24.488763+00:00",
+    "source_git_revision": "07aad7952e1476dd9706ee8612d3a3e6a2fac37d",
+    "production_binary_sha256": "573da56576202c20a3b93b0728ebcb44908bcfad1a99d0ff3fcfa037071b8f3c",
+    "configuration": "release, default features, production bundle; classic theme",
+    "bundle_identifier": "dev.mangrove.gpui",
+    "window_points": [1000, 730],
+    "display_scale": 2,
+    "checks": [
+      "welcome, toolbar, File menu and Cmd+O open the native folder picker directly; a chosen repository opens immediately",
+      "native picker cancellation retains repository and selected file; invalid Git folder shows error without deleting the previous repository tab",
+      "Settings occupies the full window without repository tabs, workspace topbar, references sidebar, footer or inspector",
+      "Settings menu, numeric input, step buttons, reset and save match the effective Vue styles; text wraps at the comparison width",
+      "numeric stepping stays at 0 and 60; 61 is rejected by save; reset restores 1; save persists 0; the original interval 1 is restored and persisted",
+      "Back returns to the selected file; Escape returns to the workspace; Cmd+K reveals the history search and typing reaches that visible input",
+      "reopening Settings resets a discarded draft 2 to persisted 1 and clears feedback; initial field does not receive autofocus",
+      "Cmd+O from Settings opens the native picker; cancellation returns to the workspace without losing its repository",
+      "docs/performance-gpui.html at cbbdd05: empty truncated diff shows its complete warning under file tabs, wrapped in the narrow viewport",
+      "release clippy all-targets -D warnings passes in normal and instrumented configurations; normal and instrumented suites retain 75 and 80 passing tests",
+      "production bundle Info.plist passes plutil; frozen benchmark data and historical capture attestations remain unchanged"
+    ],
+    "captures": [
+      {
+        "file": "post-comparison-settings.jpg",
+        "sha256": "4f1194b7850640eb895780954ca4efe45c262658efafb32f04f905ff87b2318f",
+        "dimensions": [2000, 1460]
+      },
+      {
+        "file": "post-comparison-large-file.jpg",
+        "sha256": "777495c3cf09b795237bb8fe6bb7484daa44f82b0cbff0835c088a133b1390d7",
+        "dimensions": [2000, 1460]
+      }
+    ],
+    "note": "Targeted UI regression QA after manual comparison. The 120-launch series and the four syntax control launches keep their original source revisions and binaries; these UI captures are separate."
+  },
+  "post_settings_interaction_validation": {
+    "verified_at": "2026-10-01T06:14:30.342506+00:00",
+    "source_git_revision": "c0611c5b668019a5dd8a2cb47e34ccc40c8cbac3",
+    "production_binary_sha256": "20f487e64e2d162f5341d71f533f58917ce6b46e04380ace366cc10db8e2cd05",
+    "configuration": "release, default features, production bundle; classic theme",
+    "bundle_identifier": "dev.mangrove.gpui",
+    "window_points": [1440, 920],
+    "display_scale": 2,
+    "gpui_test_count": 77,
+    "gpui_benchmark_test_count": 82,
+    "checks": [
+      "fractional draft 1.5 increments to 2 and decrements to 1 in the native numeric input; unit contracts cover integer steps and both range boundaries",
+      "Escape returns to the workspace directly from the input after stepping, after clicking Reset, and after clicking Save",
+      "Save persists 2 through closing and reopening Settings; the original interval 1 is then restored and saved",
+      "Cmd+O after Save opens the native picker and Cancel returns to the workspace",
+      "after dragging and releasing the left divider, the native Settings menu opens; Escape retains the selected file; Cmd+O and Cancel retain that file again",
+      "source review confirms the Settings button, native menu and keyboard action share the active-resize and native-picker guard",
+      "release clippy all-targets -D warnings passes in normal and instrumented configurations; all 77 normal and 82 instrumented tests pass",
+      "production bundle Info.plist passes plutil; the final GPUI bundle is left running on the previously consulted repository and file"
+    ],
+    "limitations": [
+      "the automation drag API completes the drag atomically; Settings during a held mouse drag was verified by source review, while native QA covers actions after release",
+      "the comparison screenshots retain their original source and binary provenance; this final interaction pass does not replace the frozen benchmark runs"
+    ]
+  },
+  "post_commit_file_selection_validation": {
+    "verified_at": "2026-10-01T06:34:20.055388+00:00",
+    "source_git_revision": "29a1e7d50cfc3f11ae56eb80447d3da827a8bb1c",
+    "production_binary_sha256": "b1c1fa170b8a573a0c9ced2e120a635f36a08801aeabad0c942f2fbda85e791e",
+    "configuration": "release, default features, production bundle; classic theme",
+    "bundle_identifier": "dev.mangrove.gpui",
+    "window_points": [1440, 920],
+    "display_scale": 2,
+    "gpui_test_count": 77,
+    "gpui_benchmark_test_count": 82,
+    "checks": [
+      "the merge commit from the supplied screenshot and a normal commit expose all changed-file rows as unselected until a file is chosen",
+      "the compact preview retains the first prepared patch without selecting its row; same-session refresh leaves this implicit preview unselected",
+      "clicking the second file selects it and displays its patch; Up and Down retain compact list focus and select the corresponding file; Enter preserves the current file",
+      "switching an implicit compact preview to central mode retains the preview without marking any file selected; Escape returns to history with the rows still unselected",
+      "clicking the cached first file opens its central diff and marks its row selected; Escape and same-session refresh retain that explicit selection",
+      "changing to another commit clears the previous file selection; returning to the reported merge commit leaves both file rows unselected",
+      "the Git fixture test retains initial patch and colors, restores an explicitly requested key, refuses to select a fallback after a missing key, and clears a previous choice for a new initial preview",
+      "release clippy all-targets -D warnings passes in both configurations; all 77 normal and 82 instrumented tests pass",
+      "the production bundle Info.plist passes plutil; the final GPUI bundle is left running on the reported commit"
+    ],
+    "note": "Targeted selection and focus regression QA. Historical screenshot attestations and frozen performance source revisions, binaries and measurements remain unchanged."
+  },
+  "post_tauri_removal_validation": {
+    "verified_at": "2026-10-01T06:48:57+00:00",
+    "source_commit": "820bcb0a4b605d844ab085a5d31d77897337f7c9",
+    "build_profile": "release; default production features",
+    "normal_application_identifier": "dev.mangrove.gpui",
+    "gpui_binary_sha256": "d329e43785480a5ae63de7eb0ef1c66a5824893859710645e4931de6337fa0b5",
+    "packaging_icon_sha256": "8fadd0771e86d690a66526126e23dd129a01bec81e161f25bd0b2fafd0ca22bd",
+    "gpui_test_count": 77,
+    "gpui_benchmark_test_count": 82,
+    "core_test_count": 70,
+    "fixture_test_count": 8,
+    "harness_linux_test_count": 10,
+    "checks": [
+      "Vue frontend, Tauri sources/configuration, JavaScript dependency manifests and legacy build artifacts removed; root lock pruned without changing retained versions; GPUI lock unchanged",
+      "Original ICNS/ICO/PNG assets moved byte-for-byte into native assets; normal and benchmark bundles package the original ICNS successfully",
+      "Native production bundle starts at welcome; settings replace the workspace and Escape from the numeric field returns to welcome",
+      "Opening the real clean Mangrove main checkout shows history without an uncommitted-changes row and with every commit file initially unselected",
+      "Clicking a commit file opens its central diff and marks only that explicit file; Escape restores history",
+      "Rust formatting, core and both GPUI Clippy configurations with warnings denied, 70 core tests, 77 normal GPUI tests, 82 instrumented GPUI tests and 8 fixture tests passed locally",
+      "All 10 harness tests passed in an existing Linux container with a read-only checkout and network disabled, including process timeout/descendant cleanup",
+      "CI now checks the core and GPUI on three OS plus the production macOS bundle; fixtures use Node directly without dependency installation"
+    ],
+    "gpui_only_harness_control": {
+      "purpose": "protocol validation only; no new comparative quantiles",
+      "benchmark_binary_sha256": "c260d58edcf557716e37b3d24bf8162d268ef3e2c5450359734dc0c9b0e54fc4",
+      "runner_source_sha256": "d97fe83ac9cdc4b846322fa5ad6bd9776334c66067dd5503ae9dca3ac2f29549",
+      "launches": 2,
+      "cache_conditions": ["cold_app_cache", "warm_app_cache"],
+      "selection_samples_per_launch": 30,
+      "colored_diff_samples_per_launch": 30,
+      "checks": "Both launches completed the required 46-file / 2000-row workload and 1440×888 viewport; active wholly-main windows and Mach CPU normalization validated; report artifact hash matches the final benchmark binary"
+    },
+    "note": "This validation identifies the GPUI-only source tree and new local bundles. The archived 120-launch comparison, its source provenance, all previous QA metadata and captures remain unchanged. This is not a new performance comparison."
+  }
+}

@@ -13,24 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  frontend:
-    name: Vue / Vite+
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
-        with:
-          node-version: '24'
-          cache: true
-      - run: vp install --frozen-lockfile
-      - run: vp check
-      - run: vp run check:types
-      - run: vp test run
-      - run: vp build
-
   rust:
     name: Git engine / ${{ matrix.os }}
     strategy:
@@ -43,39 +25,98 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Set up Node for fixture tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test fixture generator
+        run: node --test scripts/create-fixture.test.mjs
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --locked -p mangrove-core --all-targets -- -D warnings
       - run: cargo test --locked -p mangrove-core
+      - name: Test benchmark statistics and process cleanup
+        if: runner.os == 'Linux'
+        run: python3 -B scripts/benchmark-ui.test.py
 
-  desktop:
-    name: Native / ${{ matrix.os }}
+  gpui:
+    name: GPUI / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
-        with:
-          node-version: '24'
-          cache: true
-      - run: vp install --frozen-lockfile
-      - run: vp run test:fixture
-      - run: vp build
+      - name: Install Linux GPUI dependencies
+        if: runner.os == 'Linux'
+        # https://gpui-kit.com/docs/installation/ (Ubuntu 24.04)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang pkg-config cmake libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
+      - name: Check macOS Xcode toolchain
+        if: runner.os == 'macOS'
+        # GPUI Kit 0.7 enables runtime_shaders; no offline Metal compiler is needed.
+        run: |
+          xcode-select -p
+          xcodebuild -version
+      - name: Check Windows MSVC toolchain and CMake
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $activeToolchain = rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0 -or $activeToolchain -notmatch 'msvc') {
+            throw 'GPUI requires the MSVC Rust toolchain and Windows SDK.'
+          }
+          cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'CMake must be available on PATH.' }
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: desktop
-      - name: Install Linux WebView dependencies
-        if: runner.os == 'Linux'
+          workspaces: src-gpui -> target
+          key: gpui
+      - name: Check GPUI formatting
+        run: cargo fmt --manifest-path src-gpui/Cargo.toml --all --check
+      - name: Lint GPUI production configuration
+        run: cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D warnings
+      - name: Test GPUI production configuration
+        run: cargo test --locked --manifest-path src-gpui/Cargo.toml
+      - name: Lint GPUI benchmark configuration
+        run: cargo clippy --locked --manifest-path src-gpui/Cargo.toml --features app-benchmark --all-targets -- -D warnings
+      - name: Test GPUI benchmark configuration
+        run: cargo test --locked --manifest-path src-gpui/Cargo.toml --features app-benchmark
+
+  gpui-macos-bundle:
+    name: GPUI / macOS production bundle
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check macOS Xcode toolchain
+        # GPUI Kit 0.7 enables runtime_shaders; no offline Metal compiler is needed.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-      - name: Check native commands, permissions, and embedded frontend
-        run: cargo check --release --locked -p mangrove-desktop --features custom-protocol
+          xcode-select -p
+          xcodebuild -version
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-gpui -> target
+          key: gpui-release
+      - name: Build the production application bundle
+        run: sh src-gpui/scripts/package-macos.sh
+      - name: Check packaged executable, identity, and original Dock icon
+        run: |
+          test -x src-gpui/target/release/bundle/Mangrove.app/Contents/MacOS/mangrove-gpui
+          test "$(plutil -extract CFBundleIdentifier raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = dev.mangrove.gpui
+          test "$(plutil -extract CFBundleExecutable raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = mangrove-gpui
+          test "$(plutil -extract CFBundleIconFile raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = icon.icns
+          cmp src-gpui/assets/icons/icon.icns src-gpui/target/release/bundle/Mangrove.app/Contents/Resources/icon.icns
