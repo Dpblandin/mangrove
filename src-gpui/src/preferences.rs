@@ -1,4 +1,4 @@
-//! Optional native preferences. Values and bounds match the Vue application.
+//! Optional native preferences with validated values and bounds.
 use crate::theme::{Palette, ThemeId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!((p.font_size_offset, p.diff_font_size), (1., 11.));
     }
     #[test]
-    fn interval_requires_a_whole_number_in_the_vue_range() {
+    fn interval_requires_a_whole_number_in_the_supported_range() {
         assert_eq!(parse_auto_fetch_interval(" 0 "), Some(0));
         assert_eq!(parse_auto_fetch_interval("60"), Some(60));
         for value in ["", "-1", "61", "1.5", "NaN", "inf"] {

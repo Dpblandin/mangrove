@@ -24,7 +24,6 @@ if [ "$(uname -s)" != Darwin ]; then
   exit 1
 fi
 gpui_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-repository_root=$(CDPATH= cd -- "$gpui_root/.." && pwd)
 gpui_target="$gpui_root/target"
 gpui_app_name=Mangrove
 gpui_identifier=dev.mangrove.gpui
@@ -33,7 +32,7 @@ if [ "$benchmark" = true ]; then
   gpui_app_name='Mangrove GPUI Benchmark'
   gpui_identifier=dev.mangrove.gpui.benchmark
 fi
-gpui_icon="$repository_root/src-tauri/icons/icon.icns"
+gpui_icon="$gpui_root/assets/icons/icon.icns"
 if [ ! -s "$gpui_icon" ]; then
   printf 'Icône Mangrove introuvable : %s\n' "$gpui_icon" >&2
   exit 1

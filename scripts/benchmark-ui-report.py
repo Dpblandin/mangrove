@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Render the Markdown comparison directly from a completed benchmark report."""
+"""Render the historical 120-launch Vue/Tauri-GPUI comparison from its archive.
+
+This generator reads archived measurements, not current GPUI-only runner output.
+The comparative sources remain in Git history before the removal of Tauri.
+"""
 
 import argparse
 import json
@@ -46,12 +50,13 @@ def render(report):
                          for label, mode, key in items)
 
     sections = ["# Résultats de la comparaison Vue/Tauri et GPUI"]
+    sections.append("**Comparaison historique archivée.** Les 120 mesures restent associées à leur provenance d’origine : base `77b15d5ba5a3671ebeef8f1e8f8384429bc81e58` et hash de l’arbre source alors non committé, conservés dans le JSON. Le code comparatif complet avant retrait de Tauri est disponible à `32c80b4eb153617909a1980b82030cc6469c0bbd`, avec des correctifs ultérieurs ; cette révision n’est pas celle de l’arbre mesuré. Le runner courant mesure GPUI seul. Les chiffres ci-dessous ne sont pas des mesures du binaire courant.")
     stage = context.get("series_stage", "")
     if "before production" in stage:
         sections.append("Cette série porte sur les corrections de fidélité **avant la migration d’architecture production**. Elle est archivée séparément ; les chiffres de publication devront porter les artefacts production finaux.")
     sections.append(f"Le gain principal est la mémoire RSS : la médiane stable passe de **{number(resource(cold, 'tauri', 'resident_mib', 'idle')['p50'], 0)} à {number(resource(cold, 'gpui', 'resident_mib', 'idle')['p50'], 0)} MiB** avec un cache neuf, et de **{number(resource(warm, 'tauri', 'resident_mib', 'idle')['p50'], 0)} à {number(resource(warm, 'gpui', 'resident_mib', 'idle')['p50'], 0)} MiB** avec un cache réutilisé, soit **{number(reduction(cold, 'resident_mib', 'idle'), 0)} à {number(reduction(warm, 'resident_mib', 'idle'), 0)} % de moins**. Les tableaux décrivent séparément la réactivité et le coût des phases : le CPU {cpu_comparison('history_scroll')} dans l’historique et {cpu_comparison('diff_scroll')} dans le grand diff. Ces chiffres comparent les applications complètes et leurs choix de rendu, avec le même moteur Git.")
     if context.get("build_configuration"):
-        sections.append("Les deux artefacts sont des builds **release avec `app-benchmark` activé**, utilisant les sources de l’application GPUI production `src-gpui` et du baseline Vue/Tauri conservé. Tauri active aussi le frontend via `VITE_APP_BENCHMARK=1`. Le coût du scénario et du profiler GPUI entre dans les mesures. Les builds courants compilent ces interfaces sans les modules de mesure ; les noms et identifiants des bundles de benchmark sont distincts.")
+        sections.append("Les deux artefacts mesurés étaient des builds **release avec `app-benchmark` activé**, utilisant les sources GPUI production `src-gpui` et le baseline Vue/Tauri désormais archivé. Tauri activait aussi le frontend via `VITE_APP_BENCHMARK=1`. Le coût du scénario et du profiler GPUI entre dans ces mesures. Les builds ordinaires de cette révision compilaient les interfaces sans les modules de mesure ; les noms et identifiants des bundles de benchmark étaient distincts.")
     if context.get("shared_engine_dependencies"):
         versions = ", ".join(f"`{name} {version}`" for name, version
                              in context["shared_engine_dependencies"].items())

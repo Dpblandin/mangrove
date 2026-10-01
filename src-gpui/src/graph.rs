@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 pub const ROW_HEIGHT: f32 = 44.;
 
-/// Draw only the virtualized rows. Geometry and colors match GraphCanvas.vue.
+/// Draw graph geometry only for the virtualized rows.
 pub fn row(
     row: Arc<CommitRow>,
     selected: bool,

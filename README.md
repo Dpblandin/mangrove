@@ -1,6 +1,6 @@
 # Mangrove
 
-Application **desktop** pour explorer Git. La consultation conserve les fichiers et l’index ; l’auto-fetch met à jour les références distantes. GPUI dessine l’interface native et partage le moteur Rust avec la version Vue/Tauri conservée pour les comparaisons. L’application autonome ne nécessite ni serveur local, ni navigateur, ni Node.js.
+Application **desktop** pour explorer Git. La consultation conserve les fichiers et l’index ; l’auto-fetch met à jour les références distantes. GPUI dessine l’interface native et utilise le moteur Rust `mangrove-core`. L’application autonome ne nécessite ni serveur local, ni navigateur, ni Node.js.
 
 Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpblandin/mangrove/issues/1).
 
@@ -45,7 +45,13 @@ cargo run --release --locked --manifest-path src-gpui/Cargo.toml
 cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- /chemin/du/depot
 ```
 
-`vp run desktop` et `vp run dev` lancent aussi GPUI si Vite+ est installé. `vp run build` compile la version release native. Pour produire une application macOS autonome avec l’icône originale :
+Pour compiler le binaire release sans le lancer :
+
+```sh
+cargo build --release --locked --manifest-path src-gpui/Cargo.toml
+```
+
+Pour produire une application macOS autonome avec l’icône originale :
 
 ```sh
 sh src-gpui/scripts/package-macos.sh
@@ -54,54 +60,45 @@ open src-gpui/target/release/bundle/Mangrove.app
 
 La signature et la notarisation pour une distribution publique restent à configurer. La QA interactive porte sur macOS ARM ; la CI vérifie la compilation et les tests sur les trois OS. Les parcours visuels et le packaging Windows/Linux restent à valider sur ces plateformes. Le [README GPUI](src-gpui/README.md) précise les préférences, les limites et les commandes.
 
-### Version Vue/Tauri de comparaison
-
-Préparer [Vite+](https://viteplus.dev/guide/) et les [prérequis Tauri](https://v2.tauri.app/start/prerequisites/), puis :
-
-```sh
-vp install --frozen-lockfile
-vp run dev:tauri
-```
-
-`vp run build:ui` construit les assets Vue ; `vp run tauri build --bundles app` produit l’application Tauri. Le serveur Vite est utilisé pendant son développement. Les dépendances JavaScript passent par `vp` et npm 11.19.0, fixé dans `devEngines.packageManager`, avec `package-lock.json`.
-
 ## Vérifier
 
 ```sh
 cargo fmt --manifest-path src-gpui/Cargo.toml --check
 cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D warnings
 cargo test --locked --manifest-path src-gpui/Cargo.toml
-vp run check
-vp test run
-vp run test:fixture
-vp run build:ui
 cargo fmt --all --check
 cargo clippy --locked -p mangrove-core --all-targets -- -D warnings
 cargo test --locked -p mangrove-core
 ```
 
-Les tests du moteur comparent notamment les octets et dates de modification de l’ensemble du dépôt source avant et après consultation. Les tests Vue vérifient les courses entre ouvertures, recherches, indexation et sélections.
+Les tests du moteur comparent notamment les octets et dates de modification de l’ensemble du dépôt source avant et après consultation. Les tests GPUI protègent les générations de lecture, les ouvertures remplacées, la sélection, les caches bornés et la géométrie du défilement.
 
-Un dépôt Git synthétique de développement peut être créé avec `vp run fixture`. Il est isolé dans `.mangrove-dev/`, ignoré par Git, et n’est pas intégré à l’application. Voir [les mesures de performance](docs/performance.md) pour le générateur de grand historique et le benchmark reproductible.
+Le générateur de fixture nécessite seulement Node.js et Git, sans installation de dépendances JavaScript :
+
+```sh
+node --test scripts/create-fixture.test.mjs
+node scripts/create-fixture.mjs
+```
+
+Le dépôt synthétique est isolé dans `.mangrove-dev/`, ignoré par Git, et n’est pas intégré à l’application. Voir [les mesures de performance](docs/performance.md) pour le générateur de grand historique et le benchmark reproductible.
 
 Pour explorer une longue liste de fichiers et différents types de diffs :
 
 ```sh
-vp run fixture --commits 10000 --large-change
+node scripts/create-fixture.mjs --commits 10000 --large-change
 ```
 
 L’option ajoute un commit de préparation, puis `feat(fixture): showcase 46 mixed file changes` : 18 fichiers modifiés, 12 ajoutés, 8 supprimés, 6 renommés et 2 changements de type. Le commit contient aussi des fichiers binaires, un fichier vide, un changement de permission, des chemins avec espaces ou accents et un diff de 2 400 lignes pour vérifier la troncature. Il s’ajoute une seule fois à une fixture existante propre sur `main`, sans remplacer son historique.
 
 ## Organisation
 
-- `crates/mangrove-core` : lecture Git, graphe, indexation et cache ; indépendant de l’interface et du transport.
+- `crates/mangrove-core` : lecture Git, graphe, indexation et cache ; indépendant de l’interface.
 - `src-gpui` : application native GPUI, vues virtualisées, orchestration des lectures, préférences et packaging ; workspace Cargo indépendant.
-- `src-tauri` : application Vue/Tauri de comparaison, commandes natives de consultation et de fetch, sélection de dossier.
-- `src` : Vue 3, TypeScript, Tailwind CSS 4, historique virtualisé et rendu Canvas.
+- `src-gpui/assets/icons` : icônes originales utilisées pour le packaging.
 - `scripts/create-fixture.mjs` : génération isolée de dépôts synthétiques pour la QA et les mesures. Aucun bridge HTTP de lecture des dépôts n’est fourni.
 
 Voir [les décisions d’architecture](docs/architecture.md).
 
-L’[application GPUI](src-gpui/README.md) reprend l’interface et ses fonctionnalités avec le même moteur Rust. La fidélité, les limites et la comparaison des builds release sont documentées dans le [rapport de performance](docs/performance-gpui.md) ([issue #9](https://github.com/Dpblandin/mangrove/issues/9)).
+La fidélité, les limites et la comparaison historique des builds release GPUI et Vue/Tauri sont documentées dans le [rapport de performance](docs/performance-gpui.md) ([issue #9](https://github.com/Dpblandin/mangrove/issues/9)). Les sources de l’ancienne interface ont été retirées ; le rapport et les captures restent des preuves de cette comparaison datée.
 
-Les six revues et leurs correctifs sont résumés dans [docs/review.md](docs/review.md). Le thème Macchiato utilise la [palette officielle Catppuccin](https://catppuccin.com/palette/).
+Les six revues initiales et leurs correctifs sont résumés dans le [rapport historique](docs/review.md). Le thème Macchiato utilise la [palette officielle Catppuccin](https://catppuccin.com/palette/).

@@ -1,8 +1,8 @@
 # Mangrove — application GPUI
 
-Application native de Mangrove, construite avec GPUI et le moteur partagé `mangrove-core`. La version Vue/Tauri est conservée pour la comparaison décrite dans [l’issue #9](https://github.com/Dpblandin/mangrove/issues/9). Ce dossier possède son propre workspace Cargo, son lockfile et son répertoire `target`, afin de garder la famille de dépendances GPUI cohérente sans modifier celle de Tauri.
+Application native de Mangrove, construite avec GPUI et le moteur `mangrove-core`. Ce dossier possède son propre workspace Cargo, son lockfile et son répertoire `target` ; le workspace principal contient le moteur et ses benchmarks.
 
-Le portage couvre les vues et interactions de l’application existante. Les couleurs, espacements, tailles, icônes et tracés du graphe reprennent leurs références dans `src/style.css` et les composants Vue. Cela ne constitue pas une garantie d’identité pixel par pixel : le rendu du texte, certains contrôles natifs et la coloration syntaxique peuvent différer. Les mesures de performance doivent être interprétées avec les limites du [protocole de comparaison](../docs/performance-gpui-protocol.md).
+Les couleurs et polices sont définies dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans [l’issue #9](https://github.com/Dpblandin/mangrove/issues/9) et le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
 
 ## Lancer
 
@@ -16,19 +16,25 @@ cargo run --release --locked --manifest-path src-gpui/Cargo.toml
 cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- /chemin/du/depot
 
 # Fixture synthétique utilisée pour la QA et les benchmarks.
-vp run fixture --commits 10000 --large-change
+node scripts/create-fixture.mjs --commits 10000 --large-change
 cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- .mangrove-dev/fixture-10000
+```
+
+Le générateur de fixture utilise Node.js et Git, sans dépendance npm à installer. L’application elle-même utilise seulement son binaire natif. Pour compiler sans lancer :
+
+```sh
+cargo build --release --locked --manifest-path src-gpui/Cargo.toml
 ```
 
 La configuration actuelle de GPUI Kit active `runtime_shaders` : les shaders Metal sont compilés à l’exécution. La CI vérifie Xcode complet avec `xcode-select -p` et `xcodebuild -version` ; le composant optionnel Metal Toolchain n’est pas un prérequis de ce build.
 
 Le chemin du dépôt est le seul argument. Le bouton d’ouverture et Cmd/Ctrl + O ouvrent directement le sélecteur natif de dossier. L’accueil permet aussi de rouvrir un dépôt récent. Fermer la dernière fenêtre ou utiliser Cmd/Ctrl + Q quitte l’application.
 
-Le cache GPUI est distinct du cache Tauri, dans le répertoire de cache utilisateur de l’OS sous `dev.mangrove.gpui`. Les préférences sont enregistrées dans le répertoire de configuration utilisateur sous `mangrove-gpui/preferences.json` : thème, polices, largeurs des panneaux, intervalle d’auto-fetch et dépôts récents. `MANGROVE_GPUI_PREFERENCES=/chemin/absolu/preferences.json` permet de choisir un autre fichier, notamment pour une session de QA isolée. Les préférences Vue ne sont pas importées automatiquement.
+Le cache est placé dans le répertoire de cache utilisateur de l’OS sous `dev.mangrove.gpui`. Les préférences sont enregistrées dans le répertoire de configuration utilisateur sous `mangrove-gpui/preferences.json` : thème, polices, largeurs des panneaux, intervalle d’auto-fetch et dépôts récents. `MANGROVE_GPUI_PREFERENCES=/chemin/absolu/preferences.json` permet de choisir un autre fichier, notamment pour une session de QA isolée.
 
-Comme dans Vue, le fetch manuel récupère les références de tous les remotes du dépôt actif. L’auto-fetch utilise un intervalle de 0 à 60 minutes, avec une minute par défaut ; 0 le désactive. Les objets LFS ne sont pas téléchargés automatiquement. Le fetch peut mettre à jour les références distantes ; les vues de changements locaux ne proposent pas de staging, de commit ou de modification des fichiers.
+Le fetch manuel récupère les références de tous les remotes du dépôt actif. L’auto-fetch utilise un intervalle de 0 à 60 minutes, avec une minute par défaut ; 0 le désactive. Les objets LFS ne sont pas téléchargés automatiquement. Le fetch peut mettre à jour les références distantes ; les vues de changements locaux ne proposent pas de staging, de commit ou de modification des fichiers.
 
-## Périmètre porté
+## Fonctionnalités
 
 - Accueil, sélecteur natif de dossier, recherche/suppression des dépôts récents, onglets de dépôts, barre supérieure, erreurs et paramètres d’auto-fetch.
 - Trois thèmes Classique, Mangrove et Macchiato, zoom de l’interface, taille de police des diffs, panneaux redimensionnables à la souris et au clavier, remise à zéro par double clic et préférences persistantes.
@@ -38,7 +44,7 @@ Comme dans Vue, le fetch manuel récupère les références de tous les remotes 
 - Diff unifié central ou dans l’inspecteur, numéros de lignes, fonds d’ajout/suppression, contenu des fichiers, historique suivant les renommages et blame. Les vues de code disposent de défilement horizontal/vertical, de sélection et de copie du texte sans les gouttières.
 - Lectures Git en arrière-plan, rejet des réponses obsolètes après une nouvelle sélection, listes virtualisées et caches bornés pour l’historique, les diffs et la coloration.
 
-La coloration native utilise Tree-sitter et un fallback lexical lorsque la grammaire ou sa requête est indisponible, notamment pour CMake et Kotlin avec les dépendances actuelles. Vue utilise Shiki : la reconnaissance des tokens n’est donc pas identique, même avec les mêmes couleurs de thème. Les budgets de coloration et les limites du moteur peuvent produire un affichage en texte simple ou un patch tronqué ; le protocole contrôle cet état dans les scénarios comparés.
+La coloration native utilise Tree-sitter et un fallback lexical lorsque la grammaire ou sa requête est indisponible, notamment pour CMake et Kotlin avec les dépendances actuelles. Les budgets de coloration et les limites du moteur peuvent produire un affichage en texte simple ou un patch tronqué ; voir [l’architecture](../docs/architecture.md) et [la consultation des fichiers](../docs/file-browser.md).
 
 ## Packaging macOS
 
@@ -49,7 +55,7 @@ sh src-gpui/scripts/package-macos.sh
 open "src-gpui/target/release/bundle/Mangrove.app"
 ```
 
-Le bundle n’est pas signé ni notarisé. La distribution, la signature et la notarisation restent à préparer ; les builds et le packaging Windows/Linux restent à valider sur ces plateformes.
+Le bundle n’est pas signé ni notarisé. La distribution, la signature et la notarisation restent à préparer ; les parcours interactifs et le packaging Windows/Linux restent à valider sur ces plateformes.
 
 ## Vérification et limites de QA
 
@@ -59,9 +65,16 @@ cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D wa
 cargo test --locked --manifest-path src-gpui/Cargo.toml
 ```
 
-Les tests protègent notamment les caches bornés, la progression de l’index, les graphes, les filtres et la coloration, ainsi que les bornes et la persistance des préférences. Les tests de `mangrove-core` se lancent depuis le workspace principal.
+Les tests protègent notamment les caches bornés, la progression de l’index, les graphes, les filtres et la coloration, ainsi que les bornes et la persistance des préférences. Les tests de `mangrove-core` et du générateur se lancent depuis la racine :
 
-La QA interactive réalisée les 30 septembre et 1er octobre 2026 porte sur macOS ARM, avec les fixtures synthétiques et un binaire release. Elle couvre l’historique, les diffs, le contenu/historique/blame des fichiers, les thèmes, les menus de copie/sélection, les panneaux et leurs remises à zéro. Les captures du portage sont dans [screenshots](screenshots/), notamment `full-history.jpg`, `full-diff.jpg`, `full-welcome.jpg`, `full-mangrove.jpg`, `full-macchiato.jpg` et `full-blame.jpg`. Le manifeste des captures identifie le binaire production vérifié et les fichiers correspondants. Les captures Vue/Tauri sont réalisées sur le bundle de mesure final en mode d’interface normal et identifiées séparément. La configuration normale passe 77 tests ; la configuration instrumentée en passe 82.
+```sh
+cargo fmt --all --check
+cargo clippy --locked -p mangrove-core --all-targets -- -D warnings
+cargo test --locked -p mangrove-core
+node --test scripts/create-fixture.test.mjs
+```
+
+La QA interactive réalisée les 30 septembre et 1er octobre 2026 porte sur macOS ARM, avec les fixtures synthétiques et un binaire release. Elle couvre l’historique, les diffs, le contenu/historique/blame des fichiers, les thèmes, les menus de copie/sélection, les panneaux et leurs remises à zéro. Les captures du portage sont dans [screenshots](screenshots/), notamment `full-history.jpg`, `full-diff.jpg`, `full-welcome.jpg`, `full-mangrove.jpg`, `full-macchiato.jpg` et `full-blame.jpg`. Le manifeste des captures identifie le binaire production vérifié et les fichiers correspondants. Les captures historiques Vue/Tauri sont identifiées séparément. La configuration normale passe 77 tests ; la configuration instrumentée en passe 82.
 
 La dernière passe vérifie aussi les corrections signalées pendant la comparaison :
 
@@ -78,13 +91,13 @@ La dernière passe vérifie aussi les corrections signalées pendant la comparai
 
 Ces vérifications ne remplacent pas une comparaison visuelle exhaustive des états, une validation Windows/Linux ou un audit complet d’accessibilité. Elles ne démontrent pas à elles seules un gain de performance.
 
-## Comparer les performances
+## Mesures de performance
 
 Le build de mesure est distinct du build courant : `sh src-gpui/scripts/package-macos.sh --benchmark` produit `src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app`. La fonctionnalité `app-benchmark` doit être activée explicitement ; seules les variables de la procédure de mesure y déclenchent le scénario.
 
-Le [protocole](../docs/performance-gpui-protocol.md) décrit la compilation des deux applications, les commandes du benchmark, les répétitions, les caches isolés et les mesures de démarrage, sélection, coloration, défilement, CPU et mémoire. Les préférences du benchmark GPUI utilisent un fichier temporaire ; les deux interfaces affichent le même dépôt, la même fenêtre et les mêmes valeurs par défaut. Les résultats et leur contexte sont consignés dans [performance-gpui.md](../docs/performance-gpui.md) après la série de mesures.
+Le [protocole](../docs/performance-gpui-protocol.md) décrit les scénarios instrumentés, répétitions, caches isolés et mesures de démarrage, sélection, coloration, défilement, CPU et mémoire. Les préférences du benchmark GPUI utilisent un fichier temporaire. Le [rapport](../docs/performance-gpui.md) conserve les résultats de la comparaison avec l’ancien build Vue/Tauri ; cette référence ne fait plus partie des sources courantes.
 
-Les mesures de rendu utilisent des occasions de rendu WebView et des soumissions de frames GPUI, avec leurs limites documentées ; elles ne mesurent pas physiquement le délai clic→pixels de l’écran. Le coût de Git, de l’indexation et du réseau reste celui du moteur partagé. Les benchmarks du moteur seul dans `docs/performance.md` ne mesurent pas le gain d’une migration de l’interface.
+Les soumissions de frames GPUI ne mesurent pas physiquement le délai clic→pixels de l’écran. La comparaison historique utilise aussi des occasions de rendu WebView, avec leurs limites documentées. Le coût de Git, de l’indexation et du réseau reste celui du moteur. Les [benchmarks du moteur seul](../docs/performance.md) excluent le rendu de l’interface.
 
 ## Dépendances et API
 

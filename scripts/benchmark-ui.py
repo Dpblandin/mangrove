@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run paired release-app benchmarks; workloads execute inside each native app.
+"""Benchmark the GPUI release app with fresh and reused application caches.
 
-No browser/OS UI automation. The macOS reader attributes WebKit XPC processes by
-responsible PID, not their names, and measures cumulative CPU with libproc.
+Workloads execute inside the app, without browser/OS UI automation. The macOS
+reader attributes processes by responsible PID and measures CPU with libproc.
+Historical Tauri comparisons are read by the separate report generators.
 """
 
 from __future__ import annotations
@@ -238,7 +239,7 @@ class LinuxProcesses:
                 records[pid] = {"ppid": int(fields[1]),
                     "cpu_ns": (int(fields[11]) + int(fields[12])) * self.tick_ns,
                     "resident_bytes": int(fields[21]) * self.page,
-                    "footprint_bytes": None, "role": "app" if pid == root_pid else "webview"}
+                    "footprint_bytes": None, "role": "app" if pid == root_pid else "descendant"}
             except (OSError, ValueError, IndexError):
                 continue
         owned = {root_pid}
@@ -274,14 +275,14 @@ def phase_metrics(samples):
         for phase, data in phases.items()}
 
 
-def run_application(reader, implementation, executable, repository, cache, output, args):
+def run_application(reader, executable, repository, cache, output, args):
     env = dict(os.environ)
     env.update(MANGROVE_BENCH_OUTPUT=str(output), MANGROVE_BENCH_CACHE=str(cache),
         MANGROVE_BENCH_REPO=str(repository), MANGROVE_BENCH_SAMPLES=str(args.interaction_samples))
     # Opening a repository records a recent entry even in benchmark mode. Keep
     # those preferences in the temporary run directory, away from the user's app.
     env["MANGROVE_GPUI_PREFERENCES"] = str(output.with_suffix(".preferences.json"))
-    argv = [str(executable)] + ([str(repository)] if implementation == "gpui" else [])
+    argv = [str(executable), str(repository)]
     env["MANGROVE_BENCH_LAUNCH_UNIX_MS"] = str(time.time_ns() / 1_000_000)
     pid = reader.spawn(argv, env)
     began = time.monotonic()
@@ -310,9 +311,9 @@ def run_application(reader, implementation, executable, repository, cache, outpu
                 break
             time.sleep(args.poll_ms / 1_000)
         if exit_status is None:
-            raise RuntimeError(f"{implementation}: benchmark workload timed out")
+            raise RuntimeError("GPUI: benchmark workload timed out")
         if exit_status != 0 or not output.is_file():
-            raise RuntimeError(f"{implementation}: app exited without a complete report")
+            raise RuntimeError("GPUI: app exited without a complete report")
         report = json.loads(output.read_text())
         if isinstance(reader, MacProcesses):
             reader.poll_launch()
@@ -321,8 +322,8 @@ def run_application(reader, implementation, executable, repository, cache, outpu
             if not reader.launch_metadata.get("window", {}).get("on_main_display"):
                 raise RuntimeError(f"The benchmark window is not wholly on the main display: {reader.launch_metadata['window']}")
             report["launch"] = reader.launch_metadata
-        if report.get("status") != "ok":
-            raise RuntimeError(f"{implementation}: app reported an incomplete workload")
+        if report.get("implementation") != "gpui" or report.get("status") != "ok":
+            raise RuntimeError("GPUI: app reported an incorrect implementation or incomplete workload")
         workload = report.get("workload", {})
         expected_interactions = args.interaction_samples // 2 * 2
         if (workload.get("selection_samples") != expected_interactions
@@ -332,12 +333,10 @@ def run_application(reader, implementation, executable, repository, cache, outpu
                 or workload.get("heavy_diff_rows") != 2_000
                 or workload.get("viewport_width") != 1_440
                 or workload.get("viewport_height") != 888):
-            raise RuntimeError(f"{implementation}: workload size or viewport differs from the required protocol: {workload}")
+            raise RuntimeError(f"GPUI: workload size or viewport differs from the required protocol: {workload}")
         for phase in ("history_scroll", "diff_scroll"):
             if len(report.get("frames", {}).get(phase, {}).get("interval_ms", [])) < 20:
-                raise RuntimeError(f"{implementation}: insufficient frame observations for the required scroll workload")
-        if implementation == "tauri" and not any(role == "webview" for role in seen.values()):
-            raise RuntimeError("Tauri: no attributable WebView process observed; memory comparison rejected")
+                raise RuntimeError("GPUI: insufficient frame observations for the required scroll workload")
         report["resources"] = {"scope": "application + responsible-PID XPC processes" if platform.system() == "Darwin" else "application + descendants",
             "poll_ms": args.poll_ms, "observations": len(observations),
             "processes_observed": len(seen), "webview_processes_observed": sum(role == "webview" for role in seen.values()),
@@ -370,7 +369,7 @@ def aggregate(runs):
     result = {}
     for mode in ("cold_app_cache", "warm_app_cache"):
         result[mode] = {}
-        for implementation in ("tauri", "gpui"):
+        for implementation in ("gpui",):
             selected = [run for run in runs if run["cache_mode"] == mode and run["implementation"] == implementation]
             metrics = {}
             names = sorted({name for run in selected for name in run["timings_ms"]})
@@ -402,24 +401,22 @@ def aggregate(runs):
     return result
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tauri", type=Path, required=True, help="Packaged release executable inside .app on macOS")
     parser.add_argument("--gpui", type=Path, required=True, help="Packaged release executable inside .app on macOS")
     parser.add_argument("--repository", type=Path, required=True, help="Synthetic fixture only")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--samples", type=int, default=30, help="Independent paired launches per cache condition")
+    parser.add_argument("--samples", type=int, default=30, help="Independent GPUI launches per cache condition")
     parser.add_argument("--interaction-samples", type=int, default=30)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--poll-ms", type=int, default=100)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not (1 <= args.samples <= 100 and 2 <= args.interaction_samples <= 100 and 25 <= args.poll_ms <= 1_000):
         parser.error("Sample counts or polling interval are outside supported bounds")
-    for name in ("tauri", "gpui", "repository", "output"):
+    for name in ("gpui", "repository", "output"):
         setattr(args, name, getattr(args, name).resolve())
-    for executable in (args.tauri, args.gpui):
-        if not executable.is_file():
-            parser.error("A benchmark release executable is missing")
+    if not args.gpui.is_file():
+        parser.error("The GPUI benchmark release executable is missing")
     if not (args.repository / ".git").exists():
         parser.error("The synthetic fixture is missing")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -427,7 +424,8 @@ def main():
     runs = []
     context = {"os": platform.platform(), "architecture": platform.machine(),
         "logical_cpus": os.cpu_count(), "python_version": platform.python_version(),
-        "build_profile": "release; caller must build both release executables",
+        "implementations": ["gpui"],
+        "build_profile": "release with app-benchmark; caller must build the GPUI executable",
         "filesystem_cache": "warm/uncontrolled; cold means fresh application SQLite cache only",
         "launch_samples_per_condition": args.samples,
         "interaction_samples_per_launch": args.interaction_samples,
@@ -437,7 +435,7 @@ def main():
         "attribution": "verified app responsible PID (capability-tested undocumented macOS API)" if platform.system() == "Darwin" else "PID ancestry",
         "background_load": "existing user applications left running; background workload not neutralized",
         "artifacts": {name: {"sha256": hashlib.sha256(getattr(args, name).read_bytes()).hexdigest(),
-            "bytes": getattr(args, name).stat().st_size} for name in ("tauri", "gpui")},
+            "bytes": getattr(args, name).stat().st_size} for name in ("gpui",)},
         "runner_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     if isinstance(reader, MacProcesses):
         context["cpu_timebase_normalization"] = {**reader.cpu_timebase, "applied": True,
@@ -454,26 +452,23 @@ def main():
             context["launch_helper_binary_sha256"] = hashlib.sha256(reader.launch_helper.read_bytes()).hexdigest()
         for trial in range(args.samples):
             for mode in ("cold_app_cache", "warm_app_cache"):
-                order = ("tauri", "gpui") if trial % 2 == 0 else ("gpui", "tauri")
-                for implementation in order:
-                    output = root / f"report-{trial}-{mode}-{implementation}.json"
-                    cache = root / f"cache-{trial}-{implementation}"
-                    cache.mkdir(exist_ok=True)
-                    report = run_application(reader, implementation, getattr(args, implementation), args.repository, cache, output, args)
-                    report["cache_mode"] = mode
-                    report["trial"] = trial + 1
-                    paired = [run for run in runs if run["trial"] == trial + 1 and run["cache_mode"] == mode]
-                    if paired and report["workload"] != paired[0]["workload"]:
-                        raise RuntimeError("Applications completed different workloads; comparison rejected")
-                    runs.append(report)
-                    payload = {"schema_version": 1, "complete": len(runs) == args.samples * 4,
-                        "completed_launches": len(runs), "expected_launches": args.samples * 4,
-                        "context": context,
-                        "summary": aggregate(runs), "runs": runs}
-                    temp_output = args.output.with_suffix(".tmp")
-                    temp_output.write_text(json.dumps(payload, indent=2) + "\n")
-                    temp_output.replace(args.output)
-                    print(f"{trial + 1}/{args.samples} {mode} {implementation}: complete", flush=True)
+                output = root / f"report-{trial}-{mode}-gpui.json"
+                cache = root / f"cache-{trial}-gpui"
+                cache.mkdir(exist_ok=True)
+                report = run_application(reader, args.gpui, args.repository, cache, output, args)
+                report["cache_mode"] = mode
+                report["trial"] = trial + 1
+                if runs and report["workload"] != runs[0]["workload"]:
+                    raise RuntimeError("GPUI launches completed different workloads; series rejected")
+                runs.append(report)
+                payload = {"schema_version": 1, "complete": len(runs) == args.samples * 2,
+                    "completed_launches": len(runs), "expected_launches": args.samples * 2,
+                    "context": context,
+                    "summary": aggregate(runs), "runs": runs}
+                temp_output = args.output.with_suffix(".tmp")
+                temp_output.write_text(json.dumps(payload, indent=2) + "\n")
+                temp_output.replace(args.output)
+                print(f"{trial + 1}/{args.samples} {mode} gpui: complete", flush=True)
 
 
 if __name__ == "__main__":

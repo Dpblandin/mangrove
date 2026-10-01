@@ -1,8 +1,10 @@
 # Résultats de la comparaison Vue/Tauri et GPUI
 
+**Comparaison historique archivée.** Les 120 mesures restent associées à leur provenance d’origine : base `77b15d5ba5a3671ebeef8f1e8f8384429bc81e58` et hash de l’arbre source alors non committé, conservés dans le JSON. Le code comparatif complet avant retrait de Tauri est disponible à `32c80b4eb153617909a1980b82030cc6469c0bbd`, avec des correctifs ultérieurs ; cette révision n’est pas celle de l’arbre mesuré. Le runner courant mesure GPUI seul. Les chiffres ci-dessous ne sont pas des mesures du binaire courant.
+
 Le gain principal est la mémoire RSS : la médiane stable passe de **556 à 199 MiB** avec un cache neuf, et de **554 à 187 MiB** avec un cache réutilisé, soit **64 à 66 % de moins**. Les tableaux décrivent séparément la réactivité et le coût des phases : le CPU baisse dans l’historique et augmente dans le grand diff. Ces chiffres comparent les applications complètes et leurs choix de rendu, avec le même moteur Git.
 
-Les deux artefacts sont des builds **release avec `app-benchmark` activé**, utilisant les sources de l’application GPUI production `src-gpui` et du baseline Vue/Tauri conservé. Tauri active aussi le frontend via `VITE_APP_BENCHMARK=1`. Le coût du scénario et du profiler GPUI entre dans les mesures. Les builds courants compilent ces interfaces sans les modules de mesure ; les noms et identifiants des bundles de benchmark sont distincts.
+Les deux artefacts mesurés étaient des builds **release avec `app-benchmark` activé**, utilisant les sources GPUI production `src-gpui` et le baseline Vue/Tauri désormais archivé. Tauri activait aussi le frontend via `VITE_APP_BENCHMARK=1`. Le coût du scénario et du profiler GPUI entre dans ces mesures. Les builds ordinaires de cette révision compilaient les interfaces sans les modules de mesure ; les noms et identifiants des bundles de benchmark étaient distincts.
 
 Les deux familles de lockfiles utilisent les mêmes versions des dépendances du moteur partagé : `git2 0.21.0`, `libgit2-sys 0.18.8+1.9.7`, `rusqlite 0.38.0`, `libsqlite3-sys 0.36.0`, `serde 1.0.229`, `serde_json 1.0.151`, `regex 1.13.1`, `chrono 0.4.45`.
 

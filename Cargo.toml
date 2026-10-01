@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mangrove-core", "src-tauri"]
+members = ["crates/mangrove-core"]
 exclude = ["src-gpui"]
 default-members = ["crates/mangrove-core"]
 resolver = "2"

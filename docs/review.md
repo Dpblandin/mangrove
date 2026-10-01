@@ -1,5 +1,7 @@
 # Revue du prototype
 
+> Revue historique du prototype initial et de son interface Vue/Tauri, dont les sources ont été retirées. Les constats et validations ci-dessous sont conservés tels qu'ils ont été rapportés. L'architecture actuelle de l'application GPUI est décrite dans [architecture.md](architecture.md).
+
 Six sous-agents distincts ont appliqué les skills `refactor` et `improve-codebase-architecture` aux frontières ci-dessous. Leurs revues ont été consolidées avant les corrections. Les propositions de refonte sans défaut avéré ont été laissées de côté.
 
 ## Lecture Git et conservation du source

@@ -394,12 +394,21 @@
       <main class="main">
         <header>
           <p class="eyebrow">
-            COMPARAISON RELEASE · MACOS ARM · <span id="launch-count"></span> LANCEMENTS
+            COMPARAISON HISTORIQUE RELEASE · MACOS ARM · <span id="launch-count"></span> LANCEMENTS
           </p>
           <h1>Deux interfaces.<br />Le même moteur Git.</h1>
           <p class="lead">
             Le port GPUI reprend l’interface et ses fonctionnalités pour comparer le coût réel de
             l’application avec Vue / Tauri.
+          </p>
+          <p class="note">
+            Les 120 mesures sont archivées avec leur provenance d’origine. Les sources comparatives
+            complètes avant retrait de Tauri restent dans l’historique Git à
+            <code>32c80b4eb153617909a1980b82030cc6469c0bbd</code>, avec des correctifs ultérieurs ;
+            elles diffèrent de l’arbre mesuré, identifié par la base
+            <code>77b15d5ba5a3671ebeef8f1e8f8384429bc81e58</code> et son hash source dans le
+            contexte. Le runner courant mesure GPUI seul ; ces chiffres ne décrivent pas le binaire
+            courant.
           </p>
           <p class="muted" id="machine"></p>
           <p class="muted" id="series-stage"></p>

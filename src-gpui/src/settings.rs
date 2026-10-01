@@ -255,8 +255,6 @@ impl Render for SettingsView {
                                     .gap(px(12.))
                                     .rounded(px(6.))
                                     .bg(rgb(p.accent).opacity(0.1))
-                                    // The unlayered global button rule in Vue
-                                    // overrides text-accent/font utilities.
                                     .text_color(rgb(p.text))
                                     .text_size(px(16. + offset))
                                     .line_height(relative(1.5))

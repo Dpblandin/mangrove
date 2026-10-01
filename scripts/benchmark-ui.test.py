@@ -1,4 +1,7 @@
 import importlib.util
+import contextlib
+import io
+import json
 import os
 from pathlib import Path
 import platform
@@ -9,6 +12,7 @@ import textwrap
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import sys
 
 sys.dont_write_bytecode = True
@@ -16,6 +20,123 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("benchmark_ui", Path(__file__).with_name("benchmark-ui.py"))
 benchmark = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(benchmark)
+
+
+def application_report():
+    return {"implementation": "gpui", "status": "ok",
+            "workload": {"selection_samples": 2, "syntax_samples": 2,
+                         "history_total": 10000, "changed_files": 46,
+                         "heavy_diff_rows": 2000, "heavy_diff_colored": False,
+                         "viewport_width": 1440, "viewport_height": 888},
+            "timings_ms": {"select_details": [8, 12]},
+            "frames": {phase: {"interval_ms": [8] * 20,
+                               "draw_ms": [1] * 20, "submit_ms": [0.5] * 20}
+                       for phase in ("history_scroll", "diff_scroll")}}
+
+
+class CompletedProcess:
+    """Exercise runner validation/cache orchestration without opening a UI."""
+
+    def __init__(self, report_factory=application_report):
+        self.report_factory = report_factory
+        self.launches = []
+        self.cleanups = []
+
+    def spawn(self, argv, env):
+        cache = Path(env["MANGROVE_BENCH_CACHE"])
+        cache.mkdir(exist_ok=True)
+        marker = cache / "database"
+        self.launches.append({"argv": argv, "cache": cache,
+                              "warm": marker.exists(), "env": env})
+        marker.touch()
+        Path(env["MANGROVE_BENCH_OUTPUT"]).write_text(json.dumps(self.report_factory()))
+        return 100 + len(self.launches)
+
+    def snapshot(self, pid):
+        return {pid: {"cpu_ns": 100, "resident_bytes": 1048576,
+                      "footprint_bytes": None, "role": "app"}}
+
+    def exit_status(self, pid):
+        return 0
+
+    def cleanup(self, pid):
+        self.cleanups.append(pid)
+
+
+class GpuiRunnerTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.executable = self.root / "gpui"
+        self.executable.write_bytes(b"instrumented GPUI executable")
+        self.repository = self.root / "fixture"
+        (self.repository / ".git").mkdir(parents=True)
+        self.output = self.root / "measurements.json"
+        self.args = ["--gpui", str(self.executable), "--repository", str(self.repository),
+                     "--output", str(self.output), "--samples", "2",
+                     "--interaction-samples", "2"]
+
+    def run_main(self, reader):
+        with patch.object(benchmark.platform, "system", return_value="Linux"), \
+                patch.object(benchmark, "LinuxProcesses", return_value=reader), \
+                contextlib.redirect_stdout(io.StringIO()):
+            benchmark.main(self.args)
+
+    def test_gpui_only_series_reuses_each_trial_cache_and_preserves_metrics(self):
+        reader = CompletedProcess()
+        self.run_main(reader)
+        report = json.loads(self.output.read_text())
+        self.assertTrue(report["complete"])
+        self.assertEqual((report["completed_launches"], report["expected_launches"]), (4, 4))
+        self.assertEqual(report["context"]["implementations"], ["gpui"])
+        self.assertEqual(set(report["context"]["artifacts"]), {"gpui"})
+        self.assertEqual(len(report["context"]["runner_source_sha256"]), 64)
+        self.assertEqual([item["warm"] for item in reader.launches], [False, True, False, True])
+        self.assertEqual(reader.launches[0]["cache"], reader.launches[1]["cache"])
+        self.assertNotEqual(reader.launches[0]["cache"], reader.launches[2]["cache"])
+        self.assertEqual(len(reader.cleanups), 4)
+        for item in reader.launches:
+            self.assertEqual(item["argv"], [str(self.executable), str(self.repository)])
+            self.assertIn("MANGROVE_GPUI_PREFERENCES", item["env"])
+        for mode in ("cold_app_cache", "warm_app_cache"):
+            self.assertEqual(set(report["summary"][mode]), {"gpui"})
+            metrics = report["summary"][mode]["gpui"]
+            self.assertEqual(metrics["launches"], 2)
+            self.assertEqual(metrics["timings"]["select_details"]["per_launch_p50_ms"]["samples"], 2)
+            self.assertEqual(metrics["frames"]["diff_scroll"]["draw_ms"]["pooled_ms"]["samples"], 40)
+
+    def test_failed_later_run_keeps_completed_report_and_cleans_up(self):
+        reports = [application_report(), {"implementation": "gpui", "status": "failed"}]
+        reader = CompletedProcess(lambda: reports.pop(0))
+        with self.assertRaisesRegex(RuntimeError, "incomplete workload"):
+            self.run_main(reader)
+        report = json.loads(self.output.read_text())
+        self.assertFalse(report["complete"])
+        self.assertEqual((report["completed_launches"], report["expected_launches"]), (1, 4))
+        self.assertEqual(len(reader.cleanups), 2)
+        self.assertFalse(self.output.with_suffix(".tmp").exists())
+
+    def test_rejects_non_gpui_report_and_incomplete_workload_or_frames(self):
+        for field in ("implementation", "viewport", "frames"):
+            with self.subTest(field=field):
+                report = application_report()
+                if field == "implementation":
+                    report["implementation"] = "tauri"
+                elif field == "viewport":
+                    report["workload"]["viewport_height"] = 920
+                else:
+                    report["frames"]["diff_scroll"]["interval_ms"] = [8] * 19
+                reader = CompletedProcess(lambda: report)
+                with self.assertRaises(RuntimeError):
+                    benchmark.run_application(reader, self.executable, self.repository,
+                        self.root / field, self.output,
+                        SimpleNamespace(interaction_samples=2, timeout=1, poll_ms=25))
+                self.assertEqual(len(reader.cleanups), 1)
+
+    def test_rejects_removed_tauri_cli(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            benchmark.main(self.args + ["--tauri", str(self.executable)])
 
 
 class BenchmarkStatisticsTests(unittest.TestCase):
@@ -83,7 +204,7 @@ time.sleep(60)
             while not child_path.exists():
                 time.sleep(0.005)
             if {mode!r} == 'exit':
-                report = {{'status': 'ok', 'workload': {{'selection_samples': 2,
+                report = {{'implementation': 'gpui', 'status': 'ok', 'workload': {{'selection_samples': 2,
                     'syntax_samples': 2, 'history_total': 10000, 'changed_files': 46,
                     'heavy_diff_rows': 2000, 'viewport_width': 1440, 'viewport_height': 888}},
                     'frames': {{phase: {{'interval_ms': [16] * 20}}
@@ -114,7 +235,7 @@ time.sleep(60)
 
     def run_synthetic(self, mode):
         args = SimpleNamespace(interaction_samples=2, timeout=0.3, poll_ms=10)
-        return benchmark.run_application(self.reader, "gpui", self.executable(mode),
+        return benchmark.run_application(self.reader, self.executable(mode),
             self.root, self.root / "cache", self.root / "report.json", args)
 
     def test_timeout_stops_root_and_child_which_both_ignore_sigterm(self):

@@ -1,8 +1,39 @@
-# Comparaison des interfaces Tauri et GPUI
+# Mesures GPUI et comparaison historique
 
-Le benchmark lance les deux applications natives compilées en **release avec la fonctionnalité de mesure `app-benchmark`**, avec le même dépôt synthétique, la même fenêtre native de 1440 × 920 pixels logiques (zone de contenu de 1440 × 888), le thème Classique, les tailles de police par défaut et le même moteur `mangrove-core`. GPUI utilise les sources de l’application production dans `src-gpui` ; Vue/Tauri reste le baseline conservé. Les scénarios s’exécutent dans les applications elles-mêmes. Le script externe lance les processus et observe leurs ressources ; il ne pilote ni souris, ni clavier, ni navigateur externe.
+## Mesurer l’application GPUI courante
 
-Les builds courants n’activent pas `app-benchmark` : les modules de scénario, les commandes Tauri d’écriture et le profiler GPUI ne sont pas compilés. Le frontend Tauri de mesure exige aussi `VITE_APP_BENCHMARK=1`. La mesure porte donc sur les builds release instrumentés des mêmes interfaces ; leur coût d’instrumentation entre dans les chiffres. Les bundles de mesure portent des noms et identifiants distincts pour protéger les préférences habituelles.
+Le runner courant `scripts/benchmark-ui.py` mesure exclusivement GPUI en release avec la fonctionnalité `app-benchmark`. Les scénarios s’exécutent dans l’application ; le runner lance chaque processus et observe ses ressources. Les bundles de mesure utilisent un nom, un identifiant et des préférences temporaires distincts du profil habituel.
+
+```sh
+node scripts/create-fixture.mjs --commits 10000 --large-change
+sh src-gpui/scripts/package-macos.sh --benchmark
+python3 -B scripts/benchmark-ui.test.py
+python3 -B scripts/benchmark-ui.py \
+  --gpui 'src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app/Contents/MacOS/mangrove-gpui' \
+  --repository .mangrove-dev/fixture-10000 \
+  --samples 30 --interaction-samples 30 \
+  --output /chemin/explicite/performance-gpui-current.json
+```
+
+Chaque essai crée un cache SQLite neuf puis le réutilise pour le second lancement de GPUI. Avec les valeurs par défaut, la série comporte **60 lancements**, 30 par condition. Les caches filesystem restent chauds ou incontrôlés ; chaque lancement recrée ses caches mémoire. Un essai de protocole peut utiliser `--samples 1 --interaction-samples 2` : deux lancements, sans conclusion statistique.
+
+Le scénario conserve les exigences de dix lignes d’historique visibles, de 46 fichiers modifiés, de petits diffs effectivement colorés, du grand diff de 2000 lignes et du viewport de contenu de 1440 × 888 pixels logiques. Il réalise les sélections demandées, trois secondes de défilement à 2400 pixels/s dans chaque vue et deux secondes au repos. Chaque lancement est validé avant d’être ajouté au rapport ; une erreur interrompt la série et conserve la dernière sortie terminée. Le runner vérifie également que les lancements ont effectué le même workload, y compris le statut de coloration du grand diff.
+
+Le rapport garde `schema_version = 1`, `runs`, `context` et `summary.cold_app_cache.gpui` / `summary.warm_app_cache.gpui`. `context.implementations` vaut `["gpui"]` et `expected_launches` vaut deux fois `--samples`. Les générateurs `benchmark-ui-report.py` et `report-gpui.py` décrivent la comparaison historique à deux applications ; ils utilisent les 120 mesures archivées, pas ce nouveau rapport GPUI seul.
+
+Les mesures GPUI conservent leurs définitions : CPU prêt observé à la cadence des callbacks, puis soumission ultérieure `Present`, avec les durées `Draw`/`Present` du profiler et les intervalles des frames effectivement dessinées. Elles ne prouvent pas une latence physique clic→photons. Sur macOS, LaunchServices fournit le PID exact, le helper atteste l’activation et la fenêtre entièrement sur l’écran principal, et `proc_pid_rusage` est converti par `mach_timebase_info` avant les deltas. L’attribution et le nettoyage restent limités aux processus responsables de ce lancement. La branche Linux conserve l’isolation de session et le nettoyage des descendants ; elle doit être validée sur Linux avant publication de mesures de cette plateforme.
+
+Le contexte enregistre les SHA-256 du runner et du helper source/compilé, le SHA-256 et la taille de l’exécutable GPUI, ainsi que la conversion CPU macOS. Avant la série, figer le binaire et les sources ; enregistrer séparément leur révision et leurs hashes, les flags de build, la fixture, le matériel, l’écran, l’échelle et l’alimentation, puis vérifier leur stabilité après la série. La cadence d’échantillonnage par défaut reste de 100 ms ; le pic mémoire est un maximum observé. Les quantiles gardent le rang le plus proche et les interactions répétées restent groupées par lancement indépendant.
+
+## Comparaison historique archivée Vue/Tauri ↔ GPUI
+
+Les sections suivantes documentent exclusivement la comparaison antérieure au retrait de Tauri et son contrôle complémentaire. Le JSON figé `docs/performance-gpui.json` conserve les **120 lancements** de la série mesurée à la base `77b15d5ba5a3671ebeef8f1e8f8384429bc81e58`, avec les sources alors non committées identifiées par SHA-256 `ca137b7e0ed0391d4e9beb4f9a3b037205bb99469e5064856067fe3a6a5c8415`. Cette base seule ne représente pas tout l’arbre mesuré.
+
+La révision complète **`32c80b4eb153617909a1980b82030cc6469c0bbd`** conserve le code comparatif final Vue/Tauri et GPUI avant son retrait, ainsi que des correctifs ultérieurs. Elle permet de retrouver le runner et les anciennes commandes ; elle n’est pas le hash des sources mesurées de la série de 120. Les flags Tauri, l’option `--tauri`, les chemins `src-tauri` et les obligations de provenance à deux applications ci-dessous appartiennent uniquement à ces sources archivées. Le checkout courant utilise la commande GPUI seul présentée plus haut. Les résultats, les binaires attestés et les quantiles historiques restent associés à leur provenance d’origine.
+
+Le benchmark lance les deux applications natives compilées en **release avec la fonctionnalité de mesure `app-benchmark`**, avec le même dépôt synthétique, la même fenêtre native de 1440 × 920 pixels logiques (zone de contenu de 1440 × 888), le thème Classique, les tailles de police par défaut et le même moteur `mangrove-core`. GPUI utilise les sources de l’application production dans `src-gpui` ; Vue/Tauri constituait le baseline archivé de cette série. Les scénarios s’exécutent dans les applications elles-mêmes. Le script externe lance les processus et observe leurs ressources ; il ne pilote ni souris, ni clavier, ni navigateur externe.
+
+Les builds ordinaires de la révision comparative n’activent pas `app-benchmark` : les modules de scénario, les commandes Tauri d’écriture et le profiler GPUI ne sont pas compilés. Le frontend Tauri de mesure exige aussi `VITE_APP_BENCHMARK=1`. La mesure porte donc sur les builds release instrumentés des mêmes interfaces ; leur coût d’instrumentation entre dans les chiffres. Les bundles de mesure portent des noms et identifiants distincts pour protéger les préférences habituelles.
 
 Sur macOS, le lanceur Swift utilise l’API publique moderne `NSWorkspace.openApplication`, demande une nouvelle instance activée et transmet les arguments et variables du scénario. Il publie immédiatement le PID exact retourné par LaunchServices, puis maintient son runloop jusqu’à l’activation de l’application et à la présence d’une fenêtre entièrement sur l’écran principal. Les deux interfaces sont placées au centre de cet écran ; le rapport conserve les bornes de fenêtre, résolution logique/physique et fréquence déclarée par CoreGraphics. Le helper est compilé une seule fois avant les mesures. Aucun clic d’activation externe ne participe au scénario.
 
@@ -10,7 +41,7 @@ Le portage doit être fonctionnel avant de publier les résultats. Les chiffres 
 
 Cette comparaison porte sur les deux implémentations complètes. La Vue actuelle crée les 2000 lignes DOM du grand diff, tandis que le portage GPUI virtualise ces lignes : un gain peut venir de cette optimisation et ne constitue pas une mesure isolée du framework.
 
-## Scénario identique
+### Scénario identique
 
 Chaque lancement effectue les étapes suivantes :
 
@@ -24,7 +55,7 @@ Chaque lancement effectue les étapes suivantes :
 
 Les deux cibles de coloration et le grand fichier sont des données synthétiques connues du protocole. Les rapports n’exportent ni chemins de dépôt/fichier, ni SHA, ni références, ni auteurs, ni contenu.
 
-## Répétitions et caches
+### Répétitions et caches
 
 Par défaut, le script effectue **30 lancements par application et par condition de cache**, soit 120 lancements. Dans chaque paire, une application reçoit son propre cache SQLite neuf ; sa seconde exécution réutilise ce cache. Les caches des deux implémentations restent séparés. L’ordre Tauri/GPUI alterne entre les paires pour réduire le biais de chauffe ou de charge de la machine.
 
@@ -32,7 +63,7 @@ Par défaut, le script effectue **30 lancements par application et par condition
 
 Les quantiles utilisent la méthode du rang le plus proche : p95 = valeur au rang `ceil(0,95 × N)`. Pour les opérations répétées, le rapport conserve à la fois les échantillons regroupés et les médianes par lancement. Les 30 interactions dans un même processus sont corrélées ; elles ne représentent pas 30 démarrages indépendants.
 
-## Ce que les timings mesurent
+### Ce que les timings mesurent
 
 Le temps de démarrage inclut le lancement du processus, les bibliothèques natives, la création de fenêtre/WebView, le chargement JS ou des composants natifs, l’ouverture du dépôt et l’affichage utile défini ci-dessus. L’horloge du lancement est transmise par le script ; son rapprochement avec l’horloge monotone de l’application utilise l’horloge système au début du lancement. Un changement de l’horloge système pendant les mesures invalide la série.
 
@@ -51,7 +82,7 @@ Le scénario commande trois secondes à 2400 pixels/s dans les deux applications
 
 La fonction `profiler` de GPUI est nécessaire aux événements `Draw`/`Present`. Le tracing est activé uniquement pendant le scénario et sa mémoire entre dans le résultat ; les timings de tâches et leurs chemins source ne sont pas exportés. La mesure Tauri ne dispose pas d’un équivalent public des durées de dessin CPU ou de soumission : ces tableaux restent vides, sans chiffre inventé.
 
-## Mémoire et CPU de l’application entière
+### Mémoire et CPU de l’application entière
 
 Sur macOS, la mesure inclut le processus de l’application **et tous les processus XPC dont le PID responsable est celui de ce lancement**. Cela couvre WebContent, GPU et Networking du WebView Tauri, même lorsque leur PPID est `launchd`. La simple présence de `WebKit` dans un nom de processus ne sert jamais à lui attribuer sa mémoire.
 
@@ -65,9 +96,9 @@ L’observation commence dès que LaunchServices retourne le PID, avant la fin d
 
 Les résultats bruts restent bornés à 2000 frames par phase et 100 interactions par lancement. Ils sont écrits uniquement dans le chemin de sortie explicite, avec des caches temporaires distincts. Le benchmark Tauri sauvegarde les préférences locales, applique les valeurs par défaut puis restaure les préférences avant de quitter. Un arrêt forcé peut interrompre cette restauration ; exécuter les mesures dans un bundle dédié et ne pas lancer simultanément un autre exemplaire du même bundle.
 
-## Reproduire
+### Reproduction historique depuis les sources antérieures au retrait de Tauri
 
-Préparer la fixture avec son grand changement de 46 fichiers et compiler les deux exécutables release de mesure. Sur macOS, le packaging GPUI `--benchmark` active `app-benchmark`, utilise un répertoire `target/benchmark` distinct et produit le bundle `Mangrove GPUI Benchmark.app` (`dev.mangrove.gpui.benchmark`). L’override Tauri `src-tauri/benchmark/tauri.conf.json` conserve l’interface et crée `Mangrove Tauri Benchmark.app` (`dev.mangrove.desktop.benchmark`). Il faut activer le frontend **et** la fonctionnalité Cargo Tauri dans la même commande.
+Les commandes suivantes documentent le runner comparatif et les sources antérieurs au retrait de Tauri. Elles exigent une révision complète archivée contenant Vue/Tauri ; elles ne sont pas des commandes du checkout courant. Préparer alors la fixture avec son grand changement de 46 fichiers et compiler les deux exécutables release de mesure. Sur macOS, le packaging GPUI `--benchmark` active `app-benchmark`, utilise un répertoire `target/benchmark` distinct et produit le bundle `Mangrove GPUI Benchmark.app` (`dev.mangrove.gpui.benchmark`). L’override Tauri `src-tauri/benchmark/tauri.conf.json` conserve l’interface et crée `Mangrove Tauri Benchmark.app` (`dev.mangrove.desktop.benchmark`). Il faut activer le frontend **et** la fonctionnalité Cargo Tauri dans la même commande.
 
 ```sh
 vp run fixture --commits 10000 --large-change
@@ -100,9 +131,9 @@ vp fmt docs/performance-gpui.json docs/performance-gpui.md docs/performance-gpui
 
 Le générateur exige 120 lancements complets et le marqueur de conversion pendant sampling. Le JSON brut conserve les timings et frames ; le Markdown utilise les quantiles déjà calculés, et reporte les hashes exacts du contexte. Les anciennes séries avant migration restent archivées localement et ne sont pas fusionnées avec la série production.
 
-## Contrôle complémentaire après un correctif
+### Contrôle complémentaire historique après le correctif de coloration
 
-Une correction ultérieure ne réétiquette pas la série de 120 : celle-ci reste associée à sa révision Git et à ses hashes de sources et de binaires. Un contrôle complémentaire utilise un rapport local distinct, avec `--samples 1 --interaction-samples 30` : quatre lancements, une exécution avec cache neuf et une avec cache réutilisé pour chaque application, et le même workload complet. Il vérifie le scénario, les permissions, les diffs réellement colorés, la parité du grand diff, le viewport et les observations de frames. Ce petit échantillon n’établit pas une nouvelle distribution de performance et ne remplace pas les quantiles historiques.
+Le contrôle comparatif archivé d’une correction ultérieure ne réétiquette pas la série de 120 : celle-ci reste associée à sa révision Git et à ses hashes de sources et de binaires. Un contrôle complémentaire utilise un rapport local distinct, avec `--samples 1 --interaction-samples 30` : quatre lancements, une exécution avec cache neuf et une avec cache réutilisé pour chaque application, et le même workload complet. Il vérifie le scénario, les permissions, les diffs réellement colorés, la parité du grand diff, le viewport et les observations de frames. Ce petit échantillon n’établit pas une nouvelle distribution de performance et ne remplace pas les quantiles historiques.
 
 Les seules informations supplémentaires à publier avec ce contrôle sont sa date, la révision du correctif, les hashes et tailles de ses exécutables, les flags de build, le hash de ses sources/harness figés, le nombre de lancements et leur résultat de validation. Rappeler explicitement la révision et le binaire GPUI de la série historique, puis indiquer que ses 120 mesures restent inchangées et qu’aucun nouveau quantile n’est publié. Le baseline Tauri, la fixture, le workload et l’écran sont vérifiés identiques ; si un de ces éléments change, le contrôle doit le signaler plutôt que prétendre confirmer le même scénario. Le JSON complémentaire reste séparé et n’est jamais fusionné avec `docs/performance-gpui.json`.
 
@@ -110,6 +141,6 @@ Le contrôle du correctif de coloration CI a été réalisé du **30 septembre 2
 
 La série historique de **120 lancements reste à `77b15d5ba5a3671ebeef8f1e8f8384429bc81e58`**, avec l’ancien binaire GPUI SHA-256 `9be0a07486be73caa30a99c1565920d04f50b08e28dfc91b2b25cc69d905c15a`. Ses mesures et quantiles JSON restent inchangés ; son contexte ajoute seulement la provenance du contrôle séparé. Le rapport complémentaire est conservé séparément dans `.mangrove-dev/benchmark-post-windows-fix-validation.json` et sa provenance dans `benchmark-post-windows-fix-provenance.json`. Il n’ajoute aucun quantile aux résultats publiés et ne transforme pas ces 120 mesures historiques en mesures du nouveau binaire.
 
-Dans les builds `app-benchmark`, les variables `MANGROVE_BENCH_OUTPUT`, `MANGROVE_BENCH_CACHE`, `MANGROVE_BENCH_REPO` et `MANGROVE_BENCH_SAMPLES` activent le scénario ; le script les prépare automatiquement. Il fixe aussi `MANGROVE_GPUI_PREFERENCES` à un fichier temporaire propre au lancement pour que les entrées récentes ne modifient pas le profil habituel. Les builds courants ignorent `MANGROVE_BENCH_*`. Sans output explicite dans un build instrumenté, aucune action de benchmark ne s’exécute et les commandes natives d’écriture refusent les appels. Les chemins de cache et de sortie doivent être absolus ; le frontend ne peut ni choisir un autre fichier de sortie, ni déclencher un benchmark via une URL.
+Dans les builds comparatifs archivés `app-benchmark`, les variables `MANGROVE_BENCH_OUTPUT`, `MANGROVE_BENCH_CACHE`, `MANGROVE_BENCH_REPO` et `MANGROVE_BENCH_SAMPLES` activent le scénario ; le script les prépare automatiquement. Il fixe aussi `MANGROVE_GPUI_PREFERENCES` à un fichier temporaire propre au lancement pour que les entrées récentes ne modifient pas le profil habituel. Les builds ordinaires de cette révision ignorent `MANGROVE_BENCH_*`. Sans output explicite dans un build instrumenté, aucune action de benchmark ne s’exécute et les commandes natives d’écriture refusent les appels. Les chemins de cache et de sortie doivent être absolus ; le frontend ne peut ni choisir un autre fichier de sortie, ni déclencher un benchmark via une URL.
 
 Avant d’ouvrir la fixture, le mode Tauri place sa fenêtre sur l’écran principal, puis montre et focalise explicitement sa fenêtre et son WebView via les API natives publiques. GPUI utilise son écran primaire et fixe la taille du contenu par `Window::resize` ; sa readiness de démarrage attend le viewport réel de 1440 × 888. Le helper lance et active les deux applications de la même façon. Sa géométrie CoreGraphics est un relevé précoce qui peut encore refléter l’animation d’ouverture AppKit ; les dimensions utiles sont celles du viewport réel de chaque application. Un watchdog mural rejette une attente rAF suspendue au lieu de fabriquer des frames ou de remplacer silencieusement la cadence par un timer. Un rapport d’échec peut conserver seulement des compteurs DOM et des booléens de visibilité/focus pour diagnostiquer ce cas.

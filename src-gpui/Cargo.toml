@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 license = "UNLICENSED"
 
-# Independent dependency graph: GPUI does not enter the Tauri workspace.
+# Keep native app and benchmark build profiles independent from the Git engine.
 [workspace]
 
 [features]

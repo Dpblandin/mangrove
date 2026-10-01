@@ -1,4 +1,4 @@
-//! Read-only commit, index and stash inspection, using the same core as Tauri.
+//! Read-only commit, index and stash inspection through the Git engine.
 //! The bounded read lane keeps the native read alive until completion and retains
 //! only the latest queued foreground intent. Immutable snapshots publish together.
 use crate::{
@@ -1864,7 +1864,7 @@ impl InspectorView {
                 .max_h(px(290.))
                 // GPUI lengths have no calc(): move 3o from bottom padding to
                 // margin to add it after the clamp while keeping 16px below
-                // the content, as in the Vue summary's border-box layout.
+                // the content.
                 .mb(px(o * 3.))
                 .flex_shrink_0()
                 .flex()

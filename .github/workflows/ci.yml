@@ -13,24 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  frontend:
-    name: Vue / Vite+
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
-        with:
-          node-version: '24'
-          cache: true
-      - run: vp install --frozen-lockfile
-      - run: vp check
-      - run: vp run check:types
-      - run: vp test run
-      - run: vp build
-
   rust:
     name: Git engine / ${{ matrix.os }}
     strategy:
@@ -43,6 +25,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Set up Node for fixture tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test fixture generator
+        run: node --test scripts/create-fixture.test.mjs
       - run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
@@ -51,43 +40,6 @@ jobs:
       - name: Test benchmark statistics and process cleanup
         if: runner.os == 'Linux'
         run: python3 -B scripts/benchmark-ui.test.py
-
-  desktop:
-    name: Native / ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
-        with:
-          node-version: '24'
-          cache: true
-      - run: vp install --frozen-lockfile
-      - run: vp run test:fixture
-      - run: vp build
-      - run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: desktop
-      - name: Install Linux WebView dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-      - name: Check native commands, permissions, and embedded frontend
-        run: cargo check --release --locked -p mangrove-desktop --features custom-protocol
-      - name: Build opt-in Tauri benchmark frontend
-        env:
-          VITE_APP_BENCHMARK: '1'
-        run: vp build
-      - name: Check opt-in Tauri benchmark commands, permissions, and embedded frontend
-        run: cargo check --release --locked -p mangrove-desktop --features custom-protocol,app-benchmark
 
   gpui:
     name: GPUI / ${{ matrix.os }}
@@ -107,7 +59,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc g++ clang pkg-config cmake libfontconfig-dev libwayland-dev \
-            libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
       - name: Check macOS Xcode toolchain
         if: runner.os == 'macOS'
@@ -167,4 +119,4 @@ jobs:
           test "$(plutil -extract CFBundleIdentifier raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = dev.mangrove.gpui
           test "$(plutil -extract CFBundleExecutable raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = mangrove-gpui
           test "$(plutil -extract CFBundleIconFile raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = icon.icns
-          cmp src-tauri/icons/icon.icns src-gpui/target/release/bundle/Mangrove.app/Contents/Resources/icon.icns
+          cmp src-gpui/assets/icons/icon.icns src-gpui/target/release/bundle/Mangrove.app/Contents/Resources/icon.icns
