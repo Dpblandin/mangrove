@@ -221,5 +221,39 @@
       "the production bundle Info.plist passes plutil; the final GPUI bundle is left running on the reported commit"
     ],
     "note": "Targeted selection and focus regression QA. Historical screenshot attestations and frozen performance source revisions, binaries and measurements remain unchanged."
+  },
+  "post_tauri_removal_validation": {
+    "verified_at": "2026-10-01T06:48:57+00:00",
+    "source_commit": "820bcb0a4b605d844ab085a5d31d77897337f7c9",
+    "build_profile": "release; default production features",
+    "normal_application_identifier": "dev.mangrove.gpui",
+    "gpui_binary_sha256": "d329e43785480a5ae63de7eb0ef1c66a5824893859710645e4931de6337fa0b5",
+    "packaging_icon_sha256": "8fadd0771e86d690a66526126e23dd129a01bec81e161f25bd0b2fafd0ca22bd",
+    "gpui_test_count": 77,
+    "gpui_benchmark_test_count": 82,
+    "core_test_count": 70,
+    "fixture_test_count": 8,
+    "harness_linux_test_count": 10,
+    "checks": [
+      "Vue frontend, Tauri sources/configuration, JavaScript dependency manifests and legacy build artifacts removed; root lock pruned without changing retained versions; GPUI lock unchanged",
+      "Original ICNS/ICO/PNG assets moved byte-for-byte into native assets; normal and benchmark bundles package the original ICNS successfully",
+      "Native production bundle starts at welcome; settings replace the workspace and Escape from the numeric field returns to welcome",
+      "Opening the real clean Mangrove main checkout shows history without an uncommitted-changes row and with every commit file initially unselected",
+      "Clicking a commit file opens its central diff and marks only that explicit file; Escape restores history",
+      "Rust formatting, core and both GPUI Clippy configurations with warnings denied, 70 core tests, 77 normal GPUI tests, 82 instrumented GPUI tests and 8 fixture tests passed locally",
+      "All 10 harness tests passed in an existing Linux container with a read-only checkout and network disabled, including process timeout/descendant cleanup",
+      "CI now checks the core and GPUI on three OS plus the production macOS bundle; fixtures use Node directly without dependency installation"
+    ],
+    "gpui_only_harness_control": {
+      "purpose": "protocol validation only; no new comparative quantiles",
+      "benchmark_binary_sha256": "c260d58edcf557716e37b3d24bf8162d268ef3e2c5450359734dc0c9b0e54fc4",
+      "runner_source_sha256": "d97fe83ac9cdc4b846322fa5ad6bd9776334c66067dd5503ae9dca3ac2f29549",
+      "launches": 2,
+      "cache_conditions": ["cold_app_cache", "warm_app_cache"],
+      "selection_samples_per_launch": 30,
+      "colored_diff_samples_per_launch": 30,
+      "checks": "Both launches completed the required 46-file / 2000-row workload and 1440×888 viewport; active wholly-main windows and Mach CPU normalization validated; report artifact hash matches the final benchmark binary"
+    },
+    "note": "This validation identifies the GPUI-only source tree and new local bundles. The archived 120-launch comparison, its source provenance, all previous QA metadata and captures remain unchanged. This is not a new performance comparison."
   }
 }
