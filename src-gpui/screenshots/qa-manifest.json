@@ -198,5 +198,28 @@
       "the automation drag API completes the drag atomically; Settings during a held mouse drag was verified by source review, while native QA covers actions after release",
       "the comparison screenshots retain their original source and binary provenance; this final interaction pass does not replace the frozen benchmark runs"
     ]
+  },
+  "post_commit_file_selection_validation": {
+    "verified_at": "2026-10-01T06:34:20.055388+00:00",
+    "source_git_revision": "29a1e7d50cfc3f11ae56eb80447d3da827a8bb1c",
+    "production_binary_sha256": "b1c1fa170b8a573a0c9ced2e120a635f36a08801aeabad0c942f2fbda85e791e",
+    "configuration": "release, default features, production bundle; classic theme",
+    "bundle_identifier": "dev.mangrove.gpui",
+    "window_points": [1440, 920],
+    "display_scale": 2,
+    "gpui_test_count": 77,
+    "gpui_benchmark_test_count": 82,
+    "checks": [
+      "the merge commit from the supplied screenshot and a normal commit expose all changed-file rows as unselected until a file is chosen",
+      "the compact preview retains the first prepared patch without selecting its row; same-session refresh leaves this implicit preview unselected",
+      "clicking the second file selects it and displays its patch; Up and Down retain compact list focus and select the corresponding file; Enter preserves the current file",
+      "switching an implicit compact preview to central mode retains the preview without marking any file selected; Escape returns to history with the rows still unselected",
+      "clicking the cached first file opens its central diff and marks its row selected; Escape and same-session refresh retain that explicit selection",
+      "changing to another commit clears the previous file selection; returning to the reported merge commit leaves both file rows unselected",
+      "the Git fixture test retains initial patch and colors, restores an explicitly requested key, refuses to select a fallback after a missing key, and clears a previous choice for a new initial preview",
+      "release clippy all-targets -D warnings passes in both configurations; all 77 normal and 82 instrumented tests pass",
+      "the production bundle Info.plist passes plutil; the final GPUI bundle is left running on the reported commit"
+    ],
+    "note": "Targeted selection and focus regression QA. Historical screenshot attestations and frozen performance source revisions, binaries and measurements remain unchanged."
   }
 }
