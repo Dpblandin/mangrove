@@ -1,5 +1,6 @@
 //! Optional native preferences with validated values and bounds.
 use crate::theme::{Palette, ThemeId};
+use mangrove_remote::ProfileStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -11,6 +12,18 @@ pub const DEFAULT_FONT_SIZE_OFFSET: f32 = 1.;
 pub const DEFAULT_DIFF_FONT_SIZE: f32 = 11.;
 pub const DEFAULT_AUTO_FETCH_INTERVAL: u32 = 1;
 pub const MAX_AUTO_FETCH_INTERVAL: u32 = 60;
+
+pub(crate) fn profile_store() -> mangrove_remote::Result<ProfileStore> {
+    #[cfg(feature = "app-benchmark")]
+    if std::env::var_os("MANGROVE_PROFILES_PATH").is_none()
+        && let Some(output) = std::env::var_os("MANGROVE_BENCH_OUTPUT")
+    {
+        return Ok(ProfileStore::new(
+            PathBuf::from(output).with_extension("profiles.json"),
+        ));
+    }
+    ProfileStore::open_default()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentRepository {
@@ -96,7 +109,45 @@ impl Preferences {
             .join("preferences.json")
     }
     pub fn load() -> Self {
-        Self::load_from(&Self::path())
+        let profile = profile_store()
+            .and_then(|store| store.load())
+            .map(|profiles| profiles.active_profile_id)
+            .unwrap_or_else(|_| "personal".into());
+        Self::load_for_profile(&profile)
+    }
+    pub fn load_for_profile(profile: &str) -> Self {
+        Self::load_profile_from(&Self::path(), profile)
+    }
+    fn load_profile_from(base: &Path, profile: &str) -> Self {
+        let Ok(path) = Self::profile_path(base, profile) else {
+            return Self::default();
+        };
+        if profile == "personal" && !path.exists() {
+            // Import the previous single-profile settings without overwriting them.
+            Self::load_from(base)
+        } else {
+            Self::load_from(&path)
+        }
+    }
+    pub fn profile_path(base: &Path, profile: &str) -> io::Result<PathBuf> {
+        if profile.is_empty()
+            || profile.len() > 64
+            || !profile
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid profile identifier",
+            ));
+        }
+        let stem = base.file_stem().unwrap_or_default().to_string_lossy();
+        Ok(base
+            .with_file_name(format!("{stem}-profiles"))
+            .join(format!("{profile}.json")))
+    }
+    pub fn save_for_profile(&self, profile: &str) -> io::Result<()> {
+        self.save_to(&Self::profile_path(&Self::path(), profile)?)
     }
     pub fn load_from(path: &Path) -> Self {
         fs::read_to_string(path)
@@ -150,9 +201,6 @@ impl Preferences {
             }
         }
         result
-    }
-    pub fn save(&self) -> io::Result<()> {
-        self.save_to(&Self::path())
     }
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
@@ -232,6 +280,52 @@ impl Preferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profiles_keep_themes_and_recents_separate_and_import_legacy_only_once() {
+        let directory = std::env::temp_dir().join(format!(
+            "mangrove-profile-preferences-{}",
+            std::process::id()
+        ));
+        let base = directory.join("preferences.json");
+        let personal = Preferences {
+            theme: ThemeId::Mangrove,
+            recent: vec![RecentRepository {
+                path: "/personal".into(),
+                name: "Personal".into(),
+            }],
+            ..Preferences::default()
+        };
+        personal.save_to(&base).unwrap();
+        let legacy = fs::read(&base).unwrap();
+        assert_eq!(Preferences::load_profile_from(&base, "personal"), personal);
+        assert_eq!(
+            Preferences::load_profile_from(&base, "professional"),
+            Preferences::default()
+        );
+        let work = Preferences {
+            theme: ThemeId::Macchiato,
+            auto_fetch_interval: 0,
+            recent: vec![RecentRepository {
+                path: "/work".into(),
+                name: "Work".into(),
+            }],
+            ..Preferences::default()
+        };
+        work.save_to(&Preferences::profile_path(&base, "professional").unwrap())
+            .unwrap();
+        let changed = Preferences {
+            theme: ThemeId::Classic,
+            ..personal.clone()
+        };
+        changed
+            .save_to(&Preferences::profile_path(&base, "personal").unwrap())
+            .unwrap();
+        assert_eq!(Preferences::load_profile_from(&base, "personal"), changed);
+        assert_eq!(Preferences::load_profile_from(&base, "professional"), work);
+        assert_eq!(fs::read(&base).unwrap(), legacy);
+        assert!(Preferences::profile_path(&base, "../outside").is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn tolerant_preferences_preserve_valid_values_and_bound_untrusted_fields() {
         let p = Preferences::from_value(

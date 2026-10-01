@@ -82,11 +82,15 @@ La taille des textes est une préférence locale restaurée au démarrage. Les r
 
 `SettingsView` occupe toute la fenêtre : le rendu du workspace est évité pendant son affichage, mais les entités conservent leur état. Retour ou Escape retrouve le workspace ; Cmd/Ctrl + K ferme les paramètres et la vue centrale pour focaliser la recherche lorsqu’un dépôt existe. À la réouverture, le brouillon de l’intervalle reprend la valeur persistée et les anciens messages de validation sont retirés.
 
-## Intégrations à venir
+## Profils et intégrations
 
-GitHub, GitLab et Bitbucket auront des adaptateurs de lecture distincts, y compris leurs variantes auto-hébergées. Les profils seront des préférences de Mangrove, sans synchronisation vers `.gitconfig`. Les secrets devront rester dans le coffre de l’OS. Le SSH devra réutiliser les clés et agents existants ; l’ajout de clés chez un fournisseur est exclu du périmètre de lecture seule.
+`mangrove-remote` regroupe les profils et des adaptateurs HTTP en lecture seule, sans dépendance au moteur Git local. `IntegrationsView` lance les lectures sur l’exécuteur de fond GPUI. Les préférences, récents, comptes, favoris et choix SSH sont isolés par profil. Un changement de profil invalide les tickets de session, annule les lectures HTTP/SSH, libère les pages affichées et revient à un espace local vide. Les erreurs distantes ne bloquent pas la consultation locale.
 
-L’authentification peut nécessiter une requête POST d’échange de token. Les intégrations de fournisseurs restent orientées consultation. L’auto-fetch demandé constitue une exception explicite au contrat initial de lecture seule : il écrit les objets et les références distantes dans le dépôt choisi. Le clone n’est pas implémenté.
+Les métadonnées sont enregistrées dans le répertoire de configuration Mangrove ; les tokens utilisent le coffre natif de l’OS, sans repli vers un fichier. Les objets renvoyés aux vues ne contiennent pas les secrets. Les requêtes HTTP exposent uniquement GET, avec TLS, absence de redirection, pagination restreinte au serveur et à la ressource demandée, délai et taille bornés. Voir [les intégrations](integrations.md) et [les adaptateurs par fournisseur](integrations-providers.md).
+
+SSH consulte explicitement les branches et tags avec `git ls-remote`, en utilisant l’agent existant ou une clé déjà présente. Il ne récupère aucun objet et ne crée aucun cache Git. Il ignore les configurations Git et SSH susceptibles de lancer des commandes ; le serveur doit déjà être approuvé dans les fichiers `known_hosts`. Voir [le transport SSH](integrations-ssh.md).
+
+L’auto-fetch historique reste une fonction distincte : il utilise Git et les credentials existants de la machine et écrit les objets et références distantes dans le dépôt local choisi. Les tokens et le choix SSH des intégrations ne lui sont pas transmis. Aucun clone n’est implémenté.
 
 ## Choix différés
 

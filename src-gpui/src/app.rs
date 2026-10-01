@@ -691,6 +691,13 @@ impl Mangrove {
             }
             ChromeEvent::Fetch => self.fetch(window, cx),
             ChromeEvent::PreferencesChanged => self.apply_preferences(window, cx),
+            ChromeEvent::ProfileChanged => {
+                self.recent_task = None;
+                self.tabs = Tabs::default();
+                self.clear_workspace(cx);
+                self.refresh_recent(cx);
+                self.apply_preferences(window, cx);
+            }
             ChromeEvent::PaneResized(pane, width) => {
                 if *pane == Pane::Left {
                     self.sidebar

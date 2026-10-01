@@ -15,6 +15,7 @@ app-benchmark = ["gpui-kit/profiler"]
 [dependencies]
 gpui-kit = { version = "=0.7.0", features = ["tree-sitter-languages"] }
 mangrove-core = { path = "../crates/mangrove-core" }
+mangrove-remote = { path = "../crates/mangrove-remote" }
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde = { version = "1", features = ["derive"] }

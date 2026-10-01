@@ -32,6 +32,8 @@ Le chemin du dépôt est le seul argument. Le bouton d’ouverture et Cmd/Ctrl +
 
 Le cache est placé dans le répertoire de cache utilisateur de l’OS sous `dev.mangrove.gpui`. Les préférences sont enregistrées dans le répertoire de configuration utilisateur sous `mangrove-gpui/preferences.json` : thème, polices, largeurs des panneaux, intervalle d’auto-fetch et dépôts récents. `MANGROVE_GPUI_PREFERENCES=/chemin/absolu/preferences.json` permet de choisir un autre fichier, notamment pour une session de QA isolée.
 
+Les rubriques **Profils** et **Intégrations** isolent comptes, favoris, préférences et récents, avec des lectures GitLab/GitHub/Bitbucket en arrière-plan. Les secrets utilisent le coffre de l’OS. Le choix SSH sert à consulter explicitement les branches et tags distants sans télécharger d’objets. Voir [la configuration, les éditions et limites de validation](../docs/integrations.md). `MANGROVE_PROFILES_PATH=/chemin/absolu/profiles.json` permet d’isoler les métadonnées avec le fichier de préférences de QA.
+
 Le fetch manuel récupère les références de tous les remotes du dépôt actif. L’auto-fetch utilise un intervalle de 0 à 60 minutes, avec une minute par défaut ; 0 le désactive. Les objets LFS ne sont pas téléchargés automatiquement. Le fetch peut mettre à jour les références distantes ; les vues de changements locaux ne proposent pas de staging, de commit ou de modification des fichiers.
 
 ## Fonctionnalités

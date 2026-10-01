@@ -8,6 +8,7 @@ mod graph;
 mod history;
 mod history_view;
 mod inspector;
+mod integrations;
 #[cfg(feature = "app-benchmark")]
 mod perf;
 mod preferences;
