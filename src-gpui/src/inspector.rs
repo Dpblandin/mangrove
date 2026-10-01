@@ -106,6 +106,14 @@ impl FileIntent {
         !refreshing
     }
 
+    /// A prepared preview is not a user choice. Restore only the requested
+    /// opaque key; a missing key must not select the fallback preview.
+    fn restore_commit(&mut self, preferred_key: Option<&str>, file: Option<&FileChoice>) {
+        self.choice = file
+            .filter(|file| preferred_key == Some(file.key.as_str()))
+            .cloned();
+    }
+
     fn resolve_status(
         &mut self,
         request: Revision,
@@ -460,7 +468,8 @@ impl InspectorView {
             self.close_workspace(cx);
         } else {
             self.restore_open = Some(self.workspace_open);
-            if self.intent.choice().is_none()
+            if !matches!(self.selection, Selection::Commit(_))
+                && self.intent.choice().is_none()
                 && let Some(snapshot) = &self.snapshot
             {
                 self.intent.select(snapshot.file.clone(), false);
@@ -1111,10 +1120,14 @@ impl InspectorView {
                     Ok(ReadResult::Commit(details, snapshot)) => {
                         self.details = Some(details);
                         self.snapshot = snapshot;
-                        self.intent.clear();
-                        if let Some(snapshot) = &self.snapshot {
-                            self.intent.select(snapshot.file.clone(), false);
-                        }
+                        let preferred_key = match &request.kind {
+                            ReadKind::Commit { preferred_key, .. } => preferred_key.as_deref(),
+                            _ => None,
+                        };
+                        self.intent.restore_commit(
+                            preferred_key,
+                            self.snapshot.as_ref().map(|snapshot| &snapshot.file),
+                        );
                         self.viewer_dirty = true;
                         self.diff_loading = false;
                         if let Some(snapshot) = &self.snapshot {
@@ -1566,10 +1579,14 @@ impl InspectorView {
         range
             .filter_map(|index| files.get(index).map(|file| (index, file)))
             .map(|(index, file)| {
-                let selected = self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|s| s.file.cache_key() == file.cache_key());
+                let selected = self.snapshot.as_ref().is_some_and(|s| {
+                    s.file.cache_key() == file.cache_key()
+                        && (!matches!(self.selection, Selection::Commit(_))
+                            || self
+                                .intent
+                                .choice()
+                                .is_some_and(|intent| intent.key == s.file.key))
+                });
                 let file = file.clone();
                 let choice = file.clone();
                 let (directory, name) = split_path(&file.path);
@@ -2639,7 +2656,7 @@ mod tests {
         assert_ne!(a.cache_key(), b.cache_key());
     }
     #[test]
-    fn initial_commit_snapshot_includes_first_file_patch_and_colors_and_restores_chosen_key() {
+    fn initial_commit_preview_is_ready_without_selection_and_restores_only_chosen_key() {
         use std::{
             fs,
             process::Command,
@@ -2694,7 +2711,7 @@ mod tests {
         let super::ReadResult::Commit(details, Some(snapshot)) =
             super::read_commit_snapshot(&workspace, &repo.id, &sha, None).unwrap()
         else {
-            panic!("first file must be selected");
+            panic!("first file preview must be prepared");
         };
         assert_eq!(details.sha, sha);
         assert_eq!(snapshot.file.path, details.files[0].path);
@@ -2711,6 +2728,10 @@ mod tests {
                 .flatten()
                 .any(|token| token.kind != crate::syntax::Kind::Plain)
         );
+        let mut intent = FileIntent::default();
+        intent.restore_commit(None, Some(&snapshot.file));
+        assert!(intent.choice().is_none());
+
         let key = &details.files[1].file_key;
         let super::ReadResult::Commit(_, Some(restored)) =
             super::read_commit_snapshot(&workspace, &repo.id, &sha, Some(key)).unwrap()
@@ -2718,12 +2739,28 @@ mod tests {
             panic!("chosen file must be restored");
         };
         assert_eq!(restored.file.path, "b.rs");
+        intent.restore_commit(Some(key), Some(&restored.file));
+        assert_eq!(intent.choice().unwrap().path, "b.rs");
         assert!(
             restored.prepared.unwrap().diff.hunks[0]
                 .lines
                 .iter()
                 .any(|line| line.content.contains("second"))
         );
+
+        let missing_key = "missing-file-key";
+        let super::ReadResult::Commit(_, Some(fallback)) =
+            super::read_commit_snapshot(&workspace, &repo.id, &sha, Some(missing_key)).unwrap()
+        else {
+            panic!("a missing preferred key may fall back to the first preview");
+        };
+        assert_eq!(fallback.file.path, "a.rs");
+        intent.restore_commit(Some(missing_key), Some(&fallback.file));
+        assert!(intent.choice().is_none());
+
+        intent.select(snapshot.file.clone(), false);
+        intent.restore_commit(None, Some(&snapshot.file));
+        assert!(intent.choice().is_none());
     }
     #[test]
     fn token_cache_budget_stops_prefetch_before_retaining_unbounded_color_data() {
