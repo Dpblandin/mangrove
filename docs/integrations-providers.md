@@ -26,6 +26,8 @@ GitHub combine deux collections : check runs puis commit statuses historiques. G
 
 Une action charge une page. Les curseurs GitHub/GitLab utilisent `Link` (ou `X-Next-Page` pour GitLab), Cloud utilise `next` et Server/Data Center utilise `nextPageStart`. Un curseur est lié au compte et à la ressource; l'origine HTTPS, le chemin exact et les filtres sont vérifiés avant l'envoi du jeton. Les pages sont limitées à 50 éléments demandés, 200 éléments reçus et 200 commentaires cumulés par page, 100 pages par parcours et 4 Mio par réponse. Les curseurs ne sont pas sérialisés. Sources : [pagination GitLab](https://docs.gitlab.com/api/rest/), [pagination Cloud](https://developer.atlassian.com/cloud/bitbucket/rest/), [pagination Server](https://docs.atlassian.com/bitbucket-server/rest/7.20.0/bitbucket-build-rest.html).
 
+GitLab complète ses liens avec les paramètres par défaut et les identifiants de route. Le client accepte uniquement les valeurs attendues pour chaque endpoint ; `id` et `noteable_id` doivent correspondre aux identifiants du chemin. Les filtres demandés, notamment `membership`, `state` et `sha`, restent obligatoires et inchangés, comme les paramètres ajoutés après la première page. Source : [génération des liens GitLab](https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/pagination/offset_header_builder.rb#L54-61).
+
 Les statuts CI sont normalisés en `success`, `failure`, `running`, `pending`, `cancelled`, `skipped`, `manual` ou `unknown`. Les fils GitLab et les réponses imbriquées Bitbucket Server sont conservés. Les commentaires GitHub et Bitbucket Cloud sont présentés individuellement, sans reconstruction de fils entre pages.
 
 ## Validation effectuée

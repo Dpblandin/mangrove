@@ -577,11 +577,17 @@ impl<T: Transport> ProviderClient<T> {
                 if value.len() > 2048 {
                     return Err(RemoteError::UnsafePagination);
                 }
-            } else if !current.query_pairs().any(|(k, v)| k == key && v == value) {
-                return Err(RemoteError::UnsafePagination);
+            } else {
+                let unchanged = match current.query_pairs().find(|(k, _)| k == &key) {
+                    Some((_, expected)) => value == expected,
+                    None => self.gitlab_server_parameter(current, &key, &value),
+                };
+                if !unchanged {
+                    return Err(RemoteError::UnsafePagination);
+                }
             }
         }
-        // Pagination may adjust only its own parameters, never the state/SHA/role filter.
+        // Existing filters and server-added parameters must remain unchanged.
         for (key, value) in current.query_pairs() {
             if !matches!(
                 key.as_ref(),
@@ -592,6 +598,56 @@ impl<T: Transport> ProviderClient<T> {
             }
         }
         Ok(url)
+    }
+
+    fn gitlab_server_parameter(&self, current: &Url, key: &str, value: &str) -> bool {
+        if self.account.provider != Provider::GitLab {
+            return false;
+        }
+        let Ok(projects) = self.base.url("projects") else {
+            return false;
+        };
+        let Some(path) = current.path().strip_prefix(projects.path()) else {
+            return false;
+        };
+        let route: Vec<_> = path.split('/').collect();
+        // GitLab builds Link URLs from declared parameters, including implicit
+        // defaults and route IDs. Accept only their exact endpoint-specific values.
+        match (route.as_slice(), key, value) {
+            ([""], "order_by", "created_at")
+            | ([""], "sort", "desc")
+            | (
+                [""],
+                "imported"
+                | "include_hidden"
+                | "owned"
+                | "repository_checksum_failed"
+                | "simple"
+                | "starred"
+                | "statistics"
+                | "wiki_checksum_failed"
+                | "with_custom_attributes"
+                | "with_issues_enabled"
+                | "with_merge_requests_enabled",
+                "false",
+            )
+            | (["", _, "merge_requests"], "order_by", "created_at")
+            | (["", _, "merge_requests" | "pipelines"], "sort", "desc")
+            | (
+                ["", _, "merge_requests"],
+                "with_labels_details" | "with_merge_status_recheck",
+                "false",
+            )
+            | (["", _, "pipelines"], "order_by", "id") => true,
+            (["", project_id, "merge_requests" | "pipelines"], "id", value)
+            | (["", project_id, "merge_requests", _, "discussions"], "id", value) => {
+                value == *project_id
+            }
+            (["", _, "merge_requests", request_id, "discussions"], "noteable_id", value) => {
+                value == *request_id
+            }
+            _ => false,
+        }
     }
 
     fn text(&self, value: &Value, path: &str) -> String {

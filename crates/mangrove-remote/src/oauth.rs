@@ -59,7 +59,7 @@ pub struct GitLabOAuth {
     client_id: String,
     state: SecretToken,
     verifier: SecretToken,
-    started: Instant,
+    deadline: Instant,
 }
 
 impl GitLabOAuth {
@@ -97,7 +97,7 @@ impl GitLabOAuth {
             client_id: client_id.into(),
             state,
             verifier,
-            started: Instant::now(),
+            deadline: Instant::now() + AUTHORIZATION_TIMEOUT,
         })
     }
 
@@ -116,7 +116,7 @@ impl GitLabOAuth {
     ) -> Result<OAuthCredentials> {
         cancel.check()?;
         let runtime = runtime()?;
-        let remaining = AUTHORIZATION_TIMEOUT.saturating_sub(self.started.elapsed());
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
         let code = runtime.block_on(async {
             let listener = tokio::net::TcpListener::from_std(self.listener).map_err(|_| RemoteError::Network)?;
             tokio::select! {
@@ -902,7 +902,7 @@ mod tests {
                 client_id: "public-app-id".into(),
                 state: SecretToken::from("expected-state"),
                 verifier: SecretToken::from("a".repeat(43)),
-                started: Instant::now(),
+                deadline: Instant::now() + AUTHORIZATION_TIMEOUT,
             },
             address,
         )
@@ -1013,7 +1013,7 @@ mod tests {
         pending
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        flow.started = Instant::now() - AUTHORIZATION_TIMEOUT;
+        flow.deadline = Instant::now();
         assert!(matches!(
             flow.finish_with(
                 &MockTokens(|_: &TokenRequest<'_>, _: &CancellationToken| panic!(

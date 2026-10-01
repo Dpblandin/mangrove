@@ -58,6 +58,20 @@ QA native macOS : le bouton **Se connecter avec GitLab** est visible sans instru
 
 Cette passe n’a pas effectué le consentement utilisateur ni une connexion GitLab authentifiée réelle. Le retour navigateur, les lectures authentifiées, la persistance après relancement, le renouvellement réel et la déconnexion restent à confirmer avec l’application enregistrée. La coordination du coffre protège les opérations du processus ; elle ne garantit pas une comparaison atomique entre plusieurs processus Mangrove.
 
+## Correction de la pagination GitLab réelle
+
+Le premier essai utilisateur après cette passe affiche « Le serveur a fourni une pagination non sûre ». Ce diagnostic vient de la validation des liens pendant la lecture des projets, avant l’enregistrement de la connexion dans le coffre. Cet essai ne valide donc pas une connexion persistante réussie.
+
+Des requêtes publiques sans credentials reproduisent la forme des liens : GitLab.com ajoute ses paramètres par défaut à `/projects` et les paramètres `id` de route aux MR et pipelines. Les discussions nécessitent une authentification ; leurs paramètres `id` et `noteable_id` sont confirmés dans la [définition API GitLab](https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/api/discussions.rb#L36-57), sans essai authentifié. Le [générateur de liens](https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/pagination/offset_header_builder.rb#L54-61) fusionne ces paramètres avec ceux de pagination.
+
+La correction accepte seulement les valeurs par défaut propres à ces quatre endpoints et les identifiants strictement identiques au chemin. Elle conserve les refus des filtres modifiés ou supprimés, des paramètres inconnus ou dupliqués, des échos de secrets et des pages trop grandes. Trois tests supplémentaires couvrent trois pages successives, GitLab.com et une instance à sous-chemin, puis les variantes malveillantes. Le test reproduisant les liens réels échoue avec `UnsafePagination` avant la correction et passe après celle-ci.
+
+Formatage, Clippy distant tous targets et 57 tests backend passent : 40 tests unitaires, 16 tests des fournisseurs et un doctest. Le test opt-in du coffre reste ignoré dans cette commande habituelle ; il avait passé lors de la validation OAuth précédente. La revue `refactor` puis les trois lectures `simplify` déléguées sur ce delta n’ont trouvé aucun défaut supplémentaire.
+
+Le [job Windows de la passe OAuth](https://github.com/Dpblandin/mangrove/actions/runs/36863673846/job/110373777788) échouait dans le test de timeout avec `overflow when subtracting duration from instant`. Le calcul utilise désormais une échéance absolue et une durée restante saturée ; le test positionne l’échéance à maintenant, sans soustraire 300 secondes à l’horloge Windows. La limite totale d’attente reste de cinq minutes. Le test ciblé et les 13 tests OAuth passent localement ; la correction Windows reste à confirmer dans le prochain run CI.
+
+Clippy GPUI tous targets et le packaging macOS release passent. Le bundle reconstruit est relancé sur Intégrations, avec GitLab.com et l’ID public configurés localement. SHA-256 de l’exécutable : `7eeb1e33721d9a42320c70d39db922088139363c1c5a21b1a7d32dc2f94d6e6b`. Le nouvel essai authentifié reste à effectuer par l’utilisateur ; cette passe de diagnostic n’a utilisé aucun credential réel.
+
 ## Essais restants et statut
 
 La PR reste **draft à la demande de l’utilisateur**. Les essais suivants restent à effectuer :

@@ -4,7 +4,7 @@ use std::{
 };
 
 use mangrove_remote::{
-    providers::{ChangeRequest, ProviderClient, Repository},
+    providers::{ChangeRequest, PageCursor, ProviderClient, Repository},
     Account, CancellationToken, ExposeSecret, HttpRequest, HttpResponse, Provider, RemoteError,
     Result, SecretToken, Transport,
 };
@@ -413,6 +413,168 @@ fn each_provider_paginates_without_constructing_untrusted_origins() {
         let next = client.repositories(page.next.as_ref(), &cancel).unwrap();
         assert!(next.next.is_none());
         assert!(transport.urls()[1].contains("page=2") || transport.urls()[1].contains("start=19"));
+    }
+}
+
+#[test]
+fn gitlab_paginates_links_with_server_defaults_and_route_parameters() {
+    // Projects/MR/pipeline parameters observed from public GitLab.com responses;
+    // discussion route parameters come from GitLab's Discussions API definition.
+    for server in ["https://gitlab.com", "https://gitlab.example/git"] {
+        for (path, query) in [
+            (
+                "projects",
+                concat!(
+                    "imported=false&include_hidden=false&membership=true&order_by=created_at&",
+                    "owned=false&repository_checksum_failed=false&simple=false&sort=desc&",
+                    "starred=false&statistics=false&wiki_checksum_failed=false&",
+                    "with_custom_attributes=false&with_issues_enabled=false&with_merge_requests_enabled=false"
+                ).to_owned(),
+            ),
+            (
+                "projects/42/merge_requests",
+                "id=42&order_by=created_at&sort=desc&state=opened&with_labels_details=false&with_merge_status_recheck=false".into(),
+            ),
+            (
+                "projects/42/merge_requests/7/discussions",
+                "id=42&noteable_id=7".into(),
+            ),
+            (
+                "projects/42/pipelines",
+                format!("id=42&order_by=id&sha={SHA}&sort=desc"),
+            ),
+        ] {
+            let page_url = |page| format!("{server}/api/v4/{path}?{query}&page={page}&per_page=50");
+            let transport = MockTransport::new(vec![
+                gitlab_link_response(&page_url(2)),
+                gitlab_link_response(&page_url(3)),
+                response(json!([])),
+            ]);
+            let client = client(Provider::GitLab, server, transport.clone());
+            let cancel = CancellationToken::new();
+            let read = |cursor| gitlab_next_page(&client, path, cursor, &cancel);
+            let next = read(None).unwrap().unwrap();
+            let next = read(Some(&next)).unwrap().unwrap();
+            assert!(read(Some(&next)).unwrap().is_none());
+            assert_eq!(&transport.urls()[1..], &[page_url(2), page_url(3)]);
+        }
+    }
+}
+
+fn gitlab_link_response(next: &str) -> HttpResponse {
+    let mut first = response(json!([]));
+    first
+        .headers
+        .insert("Link".into(), format!("<{next}>; rel=\"next\""));
+    first
+}
+
+fn gitlab_next_page(
+    client: &ProviderClient<MockTransport>,
+    path: &str,
+    cursor: Option<&PageCursor>,
+    cancel: &CancellationToken,
+) -> Result<Option<PageCursor>> {
+    match path {
+        "projects" => client.repositories(cursor, cancel).map(|p| p.next),
+        "projects/42/merge_requests" => client
+            .pull_requests(&repo("org/app"), cursor, cancel)
+            .map(|p| p.next),
+        "projects/42/merge_requests/7/discussions" => client
+            .discussions(&repo("org/app"), &request(), cursor, cancel)
+            .map(|p| p.next),
+        "projects/42/pipelines" => client
+            .statuses(&repo("org/app"), SHA, cursor, cancel)
+            .map(|p| p.next),
+        _ => unreachable!("unknown GitLab fixture"),
+    }
+}
+
+#[test]
+fn gitlab_pagination_rejects_changed_filters_defaults_and_route_parameters() {
+    for (path, query) in [
+        ("projects", "membership=false&page=2".into()),
+        ("projects", "order_by=created_at&page=2".into()),
+        ("projects", "membership=true&owned=true&page=2".into()),
+        ("projects", "membership=true&sort=asc&page=2".into()),
+        ("projects", "membership=true&order_by=id&page=2".into()),
+        ("projects", "membership=true&unknown=false&page=2".into()),
+        (
+            "projects",
+            "membership=true&owned=false&owned=true&page=2".into(),
+        ),
+        ("projects", "membership=true&id=42&page=2".into()),
+        ("projects", "membership=true&per_page=100&page=2".into()),
+        ("projects", format!("membership=true&token={TOKEN}&page=2")),
+        (
+            "projects/42/merge_requests",
+            "id=43&state=opened&page=2".into(),
+        ),
+        (
+            "projects/42/merge_requests",
+            "id=42&state=all&page=2".into(),
+        ),
+        (
+            "projects/42/merge_requests",
+            "state=opened&with_merge_status_recheck=true&page=2".into(),
+        ),
+        (
+            "projects/42/merge_requests/7/discussions",
+            "id=43&noteable_id=7&page=2".into(),
+        ),
+        (
+            "projects/42/merge_requests/7/discussions",
+            "id=42&noteable_id=8&page=2".into(),
+        ),
+        (
+            "projects/42/merge_requests/7/discussions",
+            "id=42&sort=desc&page=2".into(),
+        ),
+        ("projects/42/pipelines", format!("id=43&sha={SHA}&page=2")),
+        ("projects/42/pipelines", "id=42&sha=abcdef0&page=2".into()),
+        (
+            "projects/42/pipelines",
+            format!("sha={SHA}&order_by=created_at&page=2"),
+        ),
+    ] {
+        let next = format!("https://gitlab.example/git/api/v4/{path}?{query}");
+        let transport = MockTransport::new(vec![gitlab_link_response(&next)]);
+        let client = client(
+            Provider::GitLab,
+            "https://gitlab.example/git",
+            transport.clone(),
+        );
+        assert!(
+            matches!(
+                gitlab_next_page(&client, path, None, &CancellationToken::new()),
+                Err(RemoteError::UnsafePagination)
+            ),
+            "unsafe GitLab pagination accepted: {path}?{query}"
+        );
+        assert_eq!(transport.urls().len(), 1);
+    }
+}
+
+#[test]
+fn gitlab_server_parameters_remain_unchanged_after_the_first_link() {
+    for query in [
+        "membership=true&sort=asc&page=3&per_page=50",
+        "membership=true&page=3&per_page=50",
+    ] {
+        let transport = MockTransport::new(vec![
+            gitlab_link_response(
+                "https://gitlab.com/api/v4/projects?membership=true&sort=desc&page=2&per_page=50",
+            ),
+            gitlab_link_response(&format!("https://gitlab.com/api/v4/projects?{query}")),
+        ]);
+        let client = client(Provider::GitLab, "https://gitlab.com", transport.clone());
+        let cancel = CancellationToken::new();
+        let next = client.repositories(None, &cancel).unwrap().next.unwrap();
+        assert!(matches!(
+            client.repositories(Some(&next), &cancel),
+            Err(RemoteError::UnsafePagination)
+        ));
+        assert_eq!(transport.urls().len(), 2);
     }
 }
 
