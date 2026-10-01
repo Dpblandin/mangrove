@@ -126,6 +126,14 @@ Le packaging macOS release passe. L’application reste ouverte sur GitHub.com, 
 
 L’application réelle n’étant pas encore enregistrée, le rendu de la carte avec un code réellement émis, un consentement GitHub réussi, le renouvellement réel et les essais Enterprise restent à effectuer.
 
+## Copie des URLs et feedback d’autorisation
+
+Les URLs de configuration GitHub et la redirection GitLab utilisent le texte sélectionnable fourni par le kit, avec un bouton de copie qui ne reprend pas le libellé. Le feedback **Code copié !** appartient à l’autorisation courante et est réinitialisé lors de la réception d’un nouveau code ; les gardes de génération et le retrait du code après annulation sont conservés. Ce delta local reçoit une relecture directe.
+
+QA native : sélection à la souris de la Homepage URL, ⌘C puis collage dans le champ de nom temporaire donnent exactement l’adresse attendue. Le bouton de callback colle seulement `http://127.0.0.1:47321/oauth/callback`. Le champ temporaire est ensuite vidé. Un compte GitHub OAuth existant est visible après relancement et fournit désormais son Client ID public à la configuration. Une nouvelle demande à GitHub.com émet un code réel ; cliquer **Copier le code** affiche **Code copié !**. L’attente est ensuite arrêtée et la carte du code disparaît ; le compte existant reste affiché. Aucun consentement supplémentaire ni renouvellement réel n’est réalisé par cette passe.
+
+Formatage, Clippy dans les deux configurations, 89 tests GPUI production, 94 instrumentés et packaging macOS passent. Le backend reste inchangé. L’exécutable relancé a pour SHA-256 `f5ba6eb2f49c3b5d2aeefdeded2c8825a9366b55bc16f9a8ab3888f7d227b62d`.
+
 ## Essais restants et statut
 
 La PR reste **draft à la demande de l’utilisateur**. Les essais suivants restent à effectuer :

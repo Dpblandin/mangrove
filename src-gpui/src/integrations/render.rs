@@ -2,6 +2,7 @@
 //! work remain owned by the parent view.
 use super::*;
 use crate::format::initials;
+use gpui_kit::base::SelectableText;
 
 impl IntegrationsView {
     fn clone_content(&self, repository: Option<&Repository>, cx: &mut Context<Self>) -> Div {
@@ -831,19 +832,32 @@ impl IntegrationsView {
                             .flex_wrap()
                             .gap(px(10.))
                             .child(
-                                action("github-device-copy", "Copier le code", p, offset).on_click(
-                                    cx.listener(move |this, _, _, cx| {
+                                action(
+                                    "github-device-copy",
+                                    if authorization.copied {
+                                        "Code copié !"
+                                    } else {
+                                        "Copier le code"
+                                    },
+                                    p,
+                                    offset,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         if this.generation != generation {
                                             return;
                                         }
-                                        let Some(authorization) = &this.github_authorization else {
+                                        let Some(authorization) = &mut this.github_authorization
+                                        else {
                                             return;
                                         };
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             authorization.user_code.expose_secret().to_string(),
                                         ));
-                                    }),
-                                ),
+                                        authorization.copied = true;
+                                        cx.notify();
+                                    },
+                                )),
                             )
                             .child(
                                 action("github-device-open", "Ouvrir GitHub", p, offset).on_click(
@@ -929,29 +943,79 @@ impl IntegrationsView {
                     .on_click(cx.listener(|this, _, _, cx| this.open_application_settings(cx)))));
             if github {
                 configuration = configuration
-                    .child(
-                        note("Homepage URL : https://github.com/Dpblandin/mangrove", p)
-                            .text_size(px(11. + offset)),
-                    )
+                    .child(self.copyable_oauth_url(
+                        "oauth-homepage-url",
+                        "Homepage URL",
+                        "https://github.com/Dpblandin/mangrove",
+                        cx,
+                    ))
+                    .child(self.copyable_oauth_url(
+                        "oauth-callback-url",
+                        "Authorization callback URL",
+                        oauth::REDIRECT_URI,
+                        cx,
+                    ))
                     .child(
                         note(
-                            &format!(
-                                "Authorization callback URL : {} · inutilisée par ce parcours",
-                                oauth::REDIRECT_URI
-                            ),
+                            "Cette URL de callback n’est pas utilisée par la connexion GitHub.",
                             p,
                         )
                         .text_size(px(11. + offset)),
                     );
             } else {
-                configuration = configuration.child(
-                    note(&format!("URL de redirection : {}", oauth::REDIRECT_URI), p)
-                        .text_size(px(11. + offset)),
-                );
+                configuration = configuration.child(self.copyable_oauth_url(
+                    "oauth-redirect-url",
+                    "URL de redirection",
+                    oauth::REDIRECT_URI,
+                    cx,
+                ));
             }
             content = content.child(configuration);
         }
         content
+    }
+
+    fn copyable_oauth_url(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        value: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.palette;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .text_size(px(11. + self.offset))
+                    .child(note(label, p))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .line_height(relative(1.6))
+                            .text_color(rgb(p.text))
+                            .cursor(CursorStyle::IBeam)
+                            .child(
+                                SelectableText::new(id, value)
+                                    .selection_color(rgb(p.selection).into()),
+                            ),
+                    ),
+            )
+            .child(
+                action(format!("{id}-copy"), "Copier", p, self.offset)
+                    .accessibility_label(format!("Copier {label}"))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+                    })),
+            )
     }
 
     fn accounts_rail(&self, cx: &mut Context<Self>) -> Div {

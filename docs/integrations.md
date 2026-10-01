@@ -49,7 +49,7 @@ Sources : [création d’application et droits](https://docs.gitlab.com/integrat
 
 ## Connexion GitHub dans le navigateur
 
-Mangrove utilise le **Device Flow** : GitHub s’ouvre dans le navigateur système, puis vous saisissez le code temporaire affiché dans Mangrove et autorisez l’application. Aucun mot de passe ni secret d’application n’est demandé dans Mangrove. Le code peut être copié ou la page GitHub rouverte depuis la carte d’autorisation ; annuler ou changer de contexte termine l’attente et retire ce code de l’écran.
+Mangrove utilise le **Device Flow** : GitHub s’ouvre dans le navigateur système, puis vous saisissez le code temporaire affiché dans Mangrove et autorisez l’application. Aucun mot de passe ni secret d’application n’est demandé dans Mangrove. Le code peut être copié ou la page GitHub rouverte depuis la carte d’autorisation ; le bouton confirme la copie avec **Code copié !**. Annuler ou changer de contexte termine l’attente et retire ce code de l’écran.
 
 Dans **Intégrations → GitHub.com**, ouvrir la configuration puis **Créer l’application dans GitHub**, ou [New OAuth App](https://github.com/settings/applications/new) :
 
@@ -58,6 +58,8 @@ Dans **Intégrations → GitHub.com**, ouvrir la configuration puis **Créer l�
 - **Authorization callback URL** : `http://127.0.0.1:47321/oauth/callback`. GitHub demande ce champ lors de l’inscription ; le Device Flow ne l’utilise pas et n’ouvre aucun listener local.
 - **Enable Device Flow** : activé.
 - **Expire user access tokens** : peut rester activé ; les tokens expirants et leur renouvellement sont pris en charge.
+
+Les URLs de configuration GitHub et l’URL de redirection GitLab sont sélectionnables dans Mangrove et disposent d’un bouton **Copier**, qui copie seulement l’adresse.
 
 Enregistrer l’application, puis recopier son **Client ID** public dans Mangrove. Le **Client secret** n’est pas utilisé. Choisir **Se connecter avec GitHub**, saisir le code dans GitHub, puis revenir dans Mangrove ; l’identité du compte est vérifiée avant l’enregistrement dans le coffre.
 

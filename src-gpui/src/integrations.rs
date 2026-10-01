@@ -243,6 +243,7 @@ enum ReadResponse {
 struct GitHubAuthorization {
     user_code: SecretToken,
     verification_url: String,
+    copied: bool,
 }
 
 /// Bounded remote collections are retained only for the active profile/account.
@@ -831,6 +832,7 @@ impl IntegrationsView {
                         view.github_authorization = Some(GitHubAuthorization {
                             user_code: flow.user_code().into(),
                             verification_url: flow.verification_url().to_string(),
+                            copied: false,
                         });
                         cx.open_url(flow.verification_url());
                         view.message = Some("Saisissez le code affiché ci-dessous dans GitHub, puis autorisez Mangrove.".into());
