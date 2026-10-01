@@ -15,6 +15,7 @@ use gpui_kit::{
 use mangrove_remote::{
     Account, Authentication, CancellationToken, CredentialVault, ExposeSecret, HttpTransport,
     OsCredentialVault, Profile, ProfileSession, Provider, SecretToken, SessionTicket,
+    bitbucket_oauth::{self, BitbucketCredentials, BitbucketOAuth},
     github_oauth::{self, GitHubCredentials, GitHubDeviceFlow},
     oauth::{self, GitLabOAuth, OAuthCredentials},
     providers::{
@@ -113,14 +114,6 @@ impl ProviderEdition {
         }
     }
 
-    fn glyph(self) -> &'static str {
-        match self.provider() {
-            Provider::GitHub => "GH",
-            Provider::GitLab => "GL",
-            Provider::BitbucketCloud | Provider::BitbucketServer => "BB",
-        }
-    }
-
     fn server(self) -> &'static str {
         match self {
             Self::GitHub => "https://github.com",
@@ -192,18 +185,24 @@ enum ConnectionRequest {
         client_id: String,
         private_repos: bool,
     },
+    BitbucketBrowser {
+        client_id: String,
+        consumer_secret: SecretToken,
+    },
 }
 
 enum ConnectionCredentials {
     PersonalToken(SecretToken),
     GitLabBrowser(GitLabOAuth),
     GitHubBrowser(GitHubDeviceFlow),
+    BitbucketBrowser(BitbucketOAuth),
 }
 
 enum ConnectedCredentials {
     PersonalToken(SecretToken),
     GitLabOAuth(OAuthCredentials),
     GitHubOAuth(GitHubCredentials),
+    BitbucketOAuth(BitbucketCredentials),
 }
 
 impl ConnectedCredentials {
@@ -216,6 +215,7 @@ impl ConnectedCredentials {
             Self::PersonalToken(token) => ProviderClient::new(transport, account, token.clone()),
             Self::GitLabOAuth(credentials) => credentials.provider_client(transport, account),
             Self::GitHubOAuth(credentials) => credentials.provider_client(transport, account),
+            Self::BitbucketOAuth(credentials) => credentials.provider_client(transport, account),
         }
     }
 
@@ -229,6 +229,7 @@ impl ConnectedCredentials {
             Self::PersonalToken(token) => vault.store(profile_id, account_id, token),
             Self::GitLabOAuth(credentials) => credentials.store(vault, profile_id, account_id),
             Self::GitHubOAuth(credentials) => credentials.store(vault, profile_id, account_id),
+            Self::BitbucketOAuth(credentials) => credentials.store(vault, profile_id, account_id),
         }
     }
 }
@@ -264,6 +265,7 @@ pub struct IntegrationsView {
     username: Entity<InputState>,
     token: Entity<InputState>,
     client_id: Entity<InputState>,
+    consumer_secret: Entity<InputState>,
     browser_connection: bool,
     oauth_config_open: bool,
     github_private_repos: bool,
@@ -410,6 +412,11 @@ impl IntegrationsView {
                     .placeholder("ID public de l’application Mangrove")
                     .default_value(client_id)
             }),
+            consumer_secret: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Secret du consumer Bitbucket")
+                    .masked(true)
+            }),
             browser_connection: true,
             oauth_config_open,
             github_private_repos: false,
@@ -499,8 +506,7 @@ impl IntegrationsView {
 
     pub fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel();
-        self.token
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.clear_connection_secrets(window, cx);
         self.message = None;
         cx.notify();
     }
@@ -526,8 +532,7 @@ impl IntegrationsView {
             self.cancel();
             self.clear_reads();
             self.selected_account = None;
-            self.token
-                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.clear_connection_secrets(window, cx);
             self.message = None;
             self.error = None;
         }
@@ -653,7 +658,8 @@ impl IntegrationsView {
         self.server.update(cx, |input, cx| {
             input.set_value(edition.server(), window, cx)
         });
-        for input in [&self.label, &self.username, &self.token] {
+        self.clear_connection_secrets(window, cx);
+        for input in [&self.label, &self.username] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         let client_id = configured_browser_client_id(&self.profile, edition);
@@ -665,6 +671,12 @@ impl IntegrationsView {
         cx.notify();
     }
 
+    fn clear_connection_secrets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [&self.token, &self.consumer_secret] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+    }
+
     fn set_browser_connection(
         &mut self,
         browser: bool,
@@ -672,8 +684,7 @@ impl IntegrationsView {
         cx: &mut Context<Self>,
     ) {
         self.browser_connection = browser;
-        self.token
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.clear_connection_secrets(window, cx);
         self.error = None;
         cx.notify();
     }
@@ -683,6 +694,7 @@ impl IntegrationsView {
         let result = match self.edition.provider() {
             Provider::GitHub => github_oauth::application_settings_url(&server_url),
             Provider::GitLab => oauth::application_settings_url(&server_url),
+            Provider::BitbucketCloud => bitbucket_oauth::application_settings_url(&server_url),
             _ => return,
         };
         match result {
@@ -699,8 +711,7 @@ impl IntegrationsView {
             return;
         }
         if self.profile.accounts.len() >= 32 {
-            self.token
-                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.clear_connection_secrets(window, cx);
             self.error = Some(
                 "Le profil contient déjà 32 comptes. Déconnectez un compte avant d’en ajouter un."
                     .into(),
@@ -709,8 +720,7 @@ impl IntegrationsView {
             return;
         }
         let provider = self.edition.provider();
-        let browser =
-            matches!(provider, Provider::GitLab | Provider::GitHub) && self.browser_connection;
+        let browser = supports_browser_connection(provider) && self.browser_connection;
         let (request, authentication) = if browser {
             let client_id = self.client_id.read(cx).value().trim().to_string();
             if client_id.is_empty() {
@@ -730,6 +740,25 @@ impl IntegrationsView {
                     },
                     Authentication::GitHubOAuth { client_id },
                 )
+            } else if provider == Provider::BitbucketCloud {
+                let secret = self.consumer_secret.read(cx).value();
+                let consumer_secret = SecretToken::from(secret.to_string());
+                self.clear_connection_secrets(window, cx);
+                if secret.is_empty() {
+                    self.oauth_config_open = true;
+                    self.error = Some(
+                        "Saisissez le Secret du consumer OAuth Bitbucket dans Mangrove.".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
+                (
+                    ConnectionRequest::BitbucketBrowser {
+                        client_id: client_id.clone(),
+                        consumer_secret,
+                    },
+                    Authentication::BitbucketOAuth { client_id },
+                )
             } else {
                 (
                     ConnectionRequest::GitLabBrowser {
@@ -743,8 +772,7 @@ impl IntegrationsView {
             let token: SecretToken = draft.to_string().into();
             // set_value also clears input undo history; a submitted token cannot
             // reappear through undo or be returned in an event payload.
-            self.token
-                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.clear_connection_secrets(window, cx);
             if draft.is_empty() {
                 self.error = Some("Saisissez un token personnel.".into());
                 cx.notify();
@@ -768,7 +796,7 @@ impl IntegrationsView {
             },
             provider,
             server_url,
-            username: (provider == Provider::BitbucketCloud && !username.is_empty())
+            username: (provider == Provider::BitbucketCloud && !browser && !username.is_empty())
                 .then_some(username),
             authentication,
         };
@@ -803,6 +831,10 @@ impl IntegrationsView {
                             GitLabOAuth::begin(&preparation_account.server_url, &client_id)
                                 .map(ConnectionCredentials::GitLabBrowser)
                         }
+                        ConnectionRequest::BitbucketBrowser { client_id, consumer_secret } => {
+                            BitbucketOAuth::begin(&preparation_account.server_url, &client_id, consumer_secret)
+                                .map(ConnectionCredentials::BitbucketBrowser)
+                        }
                         ConnectionRequest::GitHubBrowser { client_id, private_repos } => {
                             GitHubDeviceFlow::begin(
                                 &preparation_account.server_url,
@@ -819,10 +851,19 @@ impl IntegrationsView {
                     if !view.accepts(&ticket, generation) {
                         return false;
                     }
-                    if let Ok(ConnectionCredentials::GitLabBrowser(flow)) = &credentials {
+                    let callback_authorization = match &credentials {
+                        Ok(ConnectionCredentials::GitLabBrowser(flow)) => {
+                            Some(flow.authorization_url())
+                        }
+                        Ok(ConnectionCredentials::BitbucketBrowser(flow)) => {
+                            Some(flow.authorization_url())
+                        }
+                        _ => None,
+                    };
+                    if let Some(url) = callback_authorization {
                         // The listener is bound before opening the browser. A
                         // superseded profile cannot open a stale login page.
-                        cx.open_url(flow.authorization_url());
+                        cx.open_url(url);
                         view.message = Some(
                             "Autorisez Mangrove dans votre navigateur, puis revenez ici.".into(),
                         );
@@ -855,6 +896,9 @@ impl IntegrationsView {
                             ConnectedCredentials::GitLabOAuth(
                                 flow.finish(&worker_ticket.cancellation)?,
                             )
+                        }
+                        ConnectionCredentials::BitbucketBrowser(flow) => {
+                            ConnectedCredentials::BitbucketOAuth(flow.finish(&worker_ticket.cancellation)?)
                         }
                         ConnectionCredentials::GitHubBrowser(flow) => {
                             ConnectedCredentials::GitHubOAuth(flow.finish(&worker_ticket.cancellation)?)
@@ -1602,6 +1646,7 @@ fn configured_browser_client_id(profile: &Profile, edition: ProviderEdition) -> 
     let variable = match edition {
         ProviderEdition::GitLab => "MANGROVE_GITLAB_CLIENT_ID",
         ProviderEdition::GitHub => "MANGROVE_GITHUB_CLIENT_ID",
+        ProviderEdition::BitbucketCloud => "MANGROVE_BITBUCKET_CLIENT_ID",
         _ => return String::new(),
     };
     profile
@@ -1610,7 +1655,8 @@ fn configured_browser_client_id(profile: &Profile, edition: ProviderEdition) -> 
         .filter(|account| edition.matches(account))
         .find_map(|account| match (&account.authentication, edition) {
             (Authentication::GitLabOAuth { client_id }, ProviderEdition::GitLab)
-            | (Authentication::GitHubOAuth { client_id }, ProviderEdition::GitHub) => {
+            | (Authentication::GitHubOAuth { client_id }, ProviderEdition::GitHub)
+            | (Authentication::BitbucketOAuth { client_id }, ProviderEdition::BitbucketCloud) => {
                 Some(client_id.clone())
             }
             _ => None,
@@ -1621,6 +1667,13 @@ fn configured_browser_client_id(profile: &Profile, edition: ProviderEdition) -> 
                 .trim()
                 .to_string()
         })
+}
+
+fn supports_browser_connection(provider: Provider) -> bool {
+    matches!(
+        provider,
+        Provider::GitLab | Provider::GitHub | Provider::BitbucketCloud
+    )
 }
 
 fn provider_label(provider: Provider) -> &'static str {
@@ -1835,7 +1888,7 @@ mod tests {
     }
 
     #[test]
-    fn github_application_id_does_not_reuse_gitlab_or_enterprise_configuration() {
+    fn browser_application_id_prefill_keeps_provider_and_edition_isolation() {
         let mut profile = Profile::new("personal", "Personnel");
         for (id, provider, server, authentication) in [
             (
@@ -1862,6 +1915,14 @@ mod tests {
                     client_id: "github-id".into(),
                 },
             ),
+            (
+                "bitbucket",
+                Provider::BitbucketCloud,
+                "https://bitbucket.org/test-workspace",
+                Authentication::BitbucketOAuth {
+                    client_id: "bitbucket-key".into(),
+                },
+            ),
         ] {
             profile.accounts.push(Account {
                 id: id.into(),
@@ -1879,6 +1940,13 @@ mod tests {
         assert_eq!(
             configured_browser_client_id(&profile, ProviderEdition::GitLab),
             "gitlab-id"
+        );
+        assert_eq!(
+            configured_browser_client_id(&profile, ProviderEdition::BitbucketCloud),
+            "bitbucket-key"
+        );
+        assert!(
+            configured_browser_client_id(&profile, ProviderEdition::BitbucketDataCenter).is_empty()
         );
         assert!(
             configured_browser_client_id(&profile, ProviderEdition::GitHubEnterprise).is_empty()

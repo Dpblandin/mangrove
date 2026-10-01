@@ -1,10 +1,7 @@
 //! GitHub public-client device authorization. Blocking entry points belong on a
 //! background executor. Only the public application ID enters profile metadata;
 //! device codes and credentials intentionally have no Debug/Serialize API.
-use std::{
-    sync::TryLockError,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use secrecy::zeroize::{Zeroize, Zeroizing};
 use serde::{Deserialize, Serialize};
@@ -89,6 +86,7 @@ impl GitHubDeviceFlow {
         let bytes = transport.post_until(
             &TokenRequest {
                 endpoint: &endpoint,
+                basic_auth: None,
                 fields,
             },
             cancel,
@@ -155,6 +153,7 @@ impl GitHubDeviceFlow {
             let response = transport.post_until(
                 &TokenRequest {
                     endpoint: &self.token_endpoint,
+                    basic_auth: None,
                     fields: vec![
                         ("client_id", SecretToken::from(self.client_id.as_str())),
                         ("device_code", self.device_code.clone()),
@@ -467,14 +466,7 @@ pub(crate) fn read_credentials_with(
     crate::model::validate_id(profile_id)?;
     cancel.check()?;
     let lock = oauth::refresh_lock(profile_id, &account.id)?;
-    let _guard = loop {
-        cancel.check()?;
-        match lock.try_lock() {
-            Ok(guard) => break guard,
-            Err(TryLockError::Poisoned(_)) => return Err(RemoteError::VaultUnavailable),
-            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    };
+    let _guard = oauth::lock_refresh(&lock, cancel)?;
     let previous = vault
         .read(profile_id, &account.id)?
         .ok_or(RemoteError::CredentialsExpired)?;
@@ -500,6 +492,7 @@ pub(crate) fn read_credentials_with(
     let response = transport.post_until(
         &TokenRequest {
             endpoint: &credentials.token_endpoint,
+            basic_auth: None,
             fields: vec![
                 (
                     "client_id",

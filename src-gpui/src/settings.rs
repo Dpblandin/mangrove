@@ -119,12 +119,16 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let switched = self.section != section;
         self.section = section;
         if section == SettingsSection::General {
             self.leave(window, cx);
             self.focus(window, cx);
         } else if let Some(integrations) = &self.integrations {
             integrations.update(cx, |view, cx| {
+                if switched {
+                    view.leave_settings(window, cx);
+                }
                 view.set_section(
                     match section {
                         SettingsSection::Profiles => IntegrationsSection::Profiles,

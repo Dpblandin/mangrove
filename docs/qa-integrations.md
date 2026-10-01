@@ -134,11 +134,24 @@ QA native : sélection à la souris de la Homepage URL, ⌘C puis collage dans l
 
 Formatage, Clippy dans les deux configurations, 89 tests GPUI production, 94 instrumentés et packaging macOS passent. Le backend reste inchangé. L’exécutable relancé a pour SHA-256 `f5ba6eb2f49c3b5d2aeefdeded2c8825a9366b55bc16f9a8ab3888f7d227b62d`.
 
+## Bitbucket OAuth, icône et loader stable
+
+Bitbucket Cloud dispose du parcours navigateur Authorization Code avec un consumer propre au workspace, Key publique et Secret local masqué. L’échange et le renouvellement utilisent Basic uniquement sur l’endpoint officiel ; la consultation API reste Bearer même après réception du nom utilisateur. Le callback strict, les verrous de renouvellement et les comparaisons de coffre sont partagés avec les parcours existants. Le secret du consumer et les deux tokens restent dans une entrée opaque liée au contexte. Data Center et les comptes par token conservent leurs parcours. Le logomark officiel Bitbucket est embarqué dans les deux rails Cloud/Data Center.
+
+Le spinner des dépôts apparaît dans le contrôle Select de hauteur fixe, sans ajouter message ni bouton au-dessus du formulaire. Annuler remplace Actualiser dans la ligne du compteur. L’annulation d’une page supplémentaire conserve les résultats et propose Réessayer ; elle empêche aussi un sentinel déjà différé de relancer immédiatement la page. Le menu conserve sa recherche, sa sélection et ses indices lors des ajouts.
+
+Deux passes refactor backend/UI puis trois revues simplify en lecture seule (réutilisation, qualité, efficacité) sont terminées. Les corrections regroupent l’ouverture du navigateur GitLab/Bitbucket, le nettoyage des champs sensibles et la prise annulable du verrou refresh ; les gardes et CAS restent inchangés. Une dernière relecture du contrôle Annuler confirme l’arrêt jusqu’à une reprise explicite.
+
+101 tests remote (75 unitaires, 25 providers, un doctest), neuf tests Bitbucket ciblés et 38 tests OAuth après simplify passent ; le test opt-in du coffre OS n’est pas relancé. Les nouveaux cas couvrent état/callback, scopes, identité et Bearer, redaction des trois secrets, liaison du coffre, rotation concurrente, déconnexion gagnante, échecs de renouvellement et rejet de Basic vers un autre endpoint. La suite a détecté une course préexistante dans la fixture du clone réel : le fichier PID pouvait être créé avant la fin du printf. Le test attend maintenant deux lignes PID complètes dans son délai borné et annule/joint le worker au timeout ; aucune logique de clonage production n’est modifiée. La suite complète et Clippy remote passent ensuite.
+
+Avant intégration du main actualisé, les 89 tests GPUI production, Clippy GPUI strict et les formatages passent. La validation native du bundle final et la compilation de l’ensemble intégrant #13 sont consignées dans la passe suivante. Aucun consumer Bitbucket réel n’est disponible dans cette passe : le consentement, le callback enregistré et la rotation réelle restent à effectuer.
+
 ## Essais restants et statut
 
-La PR reste **draft à la demande de l’utilisateur**. Les essais suivants restent à effectuer :
+La PR a été conservée en draft pendant les passes précédentes. Les essais suivants restent à effectuer sur leurs environnements correspondants :
 
 - Connexion réussie, déconnexion et navigation dépôt → PR/MR → commentaires → CI avec un compte de test sur GitLab.com et chaque édition auto-hébergée annoncée, GitHub.com/Enterprise Server et Bitbucket Cloud/Server/Data Center.
+- Consumer Bitbucket Cloud réel : enregistrement du callback loopback, consentement, échange, renouvellement rotatif et révocation ; vérification des permissions du consumer.
 - Expiration/révocation et limitation d’API réelles, policies SSO et certificats/proxys d’entreprise sur ces environnements.
 - Serveur SSH réel avec identité et clé d’hôte de test déjà autorisées, en mode agent puis fichier ; refus des hôtes inconnus et des clés non autorisées.
 - Clones privés réels via les gestionnaires HTTPS de Git et via SSH, sur les éditions annoncées ; comportement sous proxy et avec certificats d’entreprise selon les limites documentées.

@@ -3,6 +3,7 @@
 use super::*;
 use crate::format::initials;
 use gpui_kit::base::SelectableText;
+use gpui_kit::component::spinner::Spinner;
 
 impl IntegrationsView {
     fn clone_content(&self, repository: Option<&Repository>, cx: &mut Context<Self>) -> Div {
@@ -66,6 +67,7 @@ impl IntegrationsView {
                 ),
             ));
         } else {
+            let loading = self.pending == Some(PendingOperation::RepositoryRead);
             let load_state = self.repository_load_state();
             let load_trigger =
                 RepositoryLoadTrigger::new(cx.entity().downgrade(), self.repository_select_scope);
@@ -78,40 +80,57 @@ impl IntegrationsView {
                     .flex_col()
                     .gap(px(6.))
                     .child(
-                        Select::new(&self.repository_select)
-                            .id("repository-select")
+                        div()
+                            .relative()
                             .w_full()
                             .h(px(36.))
-                            .px(px(12.))
-                            .py(px(6.))
-                            .border_1()
-                            .border_color(rgb(p.border))
-                            .rounded(px(4.))
-                            .bg(rgb(p.bg))
-                            .text_color(rgb(p.text))
-                            .text_size(px(12. + offset))
-                            .menu_max_h(px(300.))
-                            .cleanable(true)
-                            .placeholder(
-                                if self.pending == Some(PendingOperation::RepositoryRead)
-                                    && self.repositories.is_empty()
-                                {
-                                    "Chargement des dépôts…"
-                                } else {
-                                    "Choisir un dépôt…"
-                                },
+                            .child(
+                                Select::new(&self.repository_select)
+                                    .id("repository-select")
+                                    .w_full()
+                                    .h(px(36.))
+                                    .px(px(12.))
+                                    .py(px(6.))
+                                    .border_1()
+                                    .border_color(rgb(p.border))
+                                    .rounded(px(4.))
+                                    .bg(rgb(p.bg))
+                                    .text_color(rgb(p.text))
+                                    .text_size(px(12. + offset))
+                                    .menu_max_h(px(300.))
+                                    .cleanable(true)
+                                    .when(loading, |select| select.pr(px(36.)))
+                                    .placeholder(if loading && self.repositories.is_empty() {
+                                        "Chargement des dépôts…"
+                                    } else {
+                                        "Choisir un dépôt…"
+                                    })
+                                    .search_placeholder("Rechercher un dépôt…")
+                                    .accessibility_label(if loading {
+                                        "Dépôt à cloner · chargement des dépôts"
+                                    } else {
+                                        "Dépôt à cloner"
+                                    })
+                                    .disabled(
+                                        !self.can_select_repository()
+                                            || (self.repositories.is_empty()
+                                                && self.repositories_next.is_none()),
+                                    )
+                                    .empty(move |_, _| RepositoryEmpty {
+                                        trigger: load_trigger.clone(),
+                                        state: load_state,
+                                        palette: p,
+                                    }),
                             )
-                            .search_placeholder("Rechercher un dépôt…")
-                            .accessibility_label("Dépôt à cloner")
-                            .disabled(
-                                !self.can_select_repository()
-                                    || (self.repositories.is_empty()
-                                        && self.repositories_next.is_none()),
-                            )
-                            .empty(move |_, _| RepositoryEmpty {
-                                trigger: load_trigger.clone(),
-                                state: load_state,
-                                palette: p,
+                            .when(loading, |view| {
+                                view.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(12.))
+                                        .top(px(10.))
+                                        .size(px(16.))
+                                        .child(Spinner::new().small().color(rgb(p.accent).into())),
+                                )
                             }),
                     )
                     .child(self.repository_list_controls(cx)),
@@ -193,31 +212,45 @@ impl IntegrationsView {
     fn repository_list_controls(&self, cx: &mut Context<Self>) -> Div {
         let p = self.palette;
         let offset = self.offset;
-        let mut actions = div().flex().items_center().flex_wrap().gap(px(8.));
-        actions = actions.child(
+        let control = if self.pending == Some(PendingOperation::RepositoryRead) {
+            link_action("repositories-cancel", "Annuler", p, offset).on_click(cx.listener(
+                |this, _, _, cx| {
+                    if this.pending != Some(PendingOperation::RepositoryRead) {
+                        return;
+                    }
+                    this.cancel();
+                    // Keep the visible end-of-list sentinel from restarting the
+                    // same page until the user explicitly retries.
+                    this.repository_load_error = Some(mangrove_remote::RemoteError::Cancelled);
+                    this.message = None;
+                    cx.notify();
+                },
+            ))
+        } else {
             link_action("repositories-reload", "Actualiser", p, offset)
                 .disabled(self.pending.is_some() || self.picking_path)
                 .on_click(
                     cx.listener(|this, _, _, cx| this.read(ReadRequest::Repositories(None), cx)),
-                ),
-        );
-        let count = self.repositories.len();
-        let description = if count == 0 && self.pending.is_none() {
-            "Aucun dépôt chargé. Actualisez ou vérifiez les accès de ce compte.".to_string()
-        } else {
-            format!(
-                "{} dépôt{} chargé{}",
-                count,
-                if count > 1 { "s" } else { "" },
-                if count > 1 { "s" } else { "" }
-            )
+                )
         };
+        let count = self.repositories.len();
+        let description = format!(
+            "{} dépôt{} chargé{}",
+            count,
+            if count > 1 { "s" } else { "" },
+            if count > 1 { "s" } else { "" }
+        );
         div()
             .flex()
-            .flex_col()
-            .gap(px(5.))
-            .child(note(&description, p).text_size(px(10. + offset)))
-            .child(actions)
+            .items_center()
+            .gap(px(8.))
+            .child(
+                note(&description, p)
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(10. + offset)),
+            )
+            .child(control)
     }
 
     fn profiles_content(&self, cx: &mut Context<Self>) -> Div {
@@ -531,15 +564,18 @@ impl IntegrationsView {
             let identity = cached
                 .map(|identity| identity.username.as_str())
                 .or_else(|| {
-                    account
-                        .username
-                        .as_deref()
-                        .filter(|_| account.provider != Provider::BitbucketCloud)
+                    account.username.as_deref().filter(|_| {
+                        account.provider != Provider::BitbucketCloud
+                            || matches!(
+                                account.authentication,
+                                Authentication::BitbucketOAuth { .. }
+                            )
+                    })
                 });
             let method = match account.authentication {
-                Authentication::GitLabOAuth { .. } | Authentication::GitHubOAuth { .. } => {
-                    "Connexion par navigateur"
-                }
+                Authentication::GitLabOAuth { .. }
+                | Authentication::GitHubOAuth { .. }
+                | Authentication::BitbucketOAuth { .. } => "Connexion par navigateur",
                 Authentication::PersonalToken => "Token personnel",
             };
             content = content.child(
@@ -665,8 +701,7 @@ impl IntegrationsView {
                                 cx.listener(|this, _, window, cx| {
                                     this.cancel();
                                     this.adding_account = false;
-                                    this.token
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    this.clear_connection_secrets(window, cx);
                                     this.message = None;
                                     this.error = None;
                                     cx.notify();
@@ -699,7 +734,7 @@ impl IntegrationsView {
                 offset,
             ));
         }
-        if self.edition.provider() == Provider::BitbucketCloud {
+        if self.edition.provider() == Provider::BitbucketCloud && !self.browser_connection {
             form = form.child(field(
                 &self.username,
                 "account-username",
@@ -708,9 +743,7 @@ impl IntegrationsView {
                 offset,
             ));
         }
-        if matches!(self.edition.provider(), Provider::GitLab | Provider::GitHub)
-            && self.browser_connection
-        {
+        if supports_browser_connection(self.edition.provider()) && self.browser_connection {
             form = form.child(self.browser_connection_form(cx));
         } else {
             let permissions = match self.edition.provider() {
@@ -743,7 +776,7 @@ impl IntegrationsView {
                                 ),
                         )
                         .when(
-                            matches!(self.edition.provider(), Provider::GitLab | Provider::GitHub),
+                            supports_browser_connection(self.edition.provider()),
                             |view| {
                                 view.child(
                                     link_action(
@@ -780,6 +813,7 @@ impl IntegrationsView {
         let p = self.palette;
         let offset = self.offset;
         let github = self.edition.provider() == Provider::GitHub;
+        let bitbucket = self.edition.provider() == Provider::BitbucketCloud;
         let provider = provider_label(self.edition.provider());
         let mut content = div().flex().flex_col().gap(px(12.)).child(note(
             if github {
@@ -929,10 +963,12 @@ impl IntegrationsView {
         if self.oauth_config_open {
             let mut configuration = div().flex().flex_col().gap(px(12.)).pt(px(16.))
                 .border_t_1().border_color(rgb(p.border))
-                .child(field(&self.client_id, "oauth-client-id", if github { "Client ID public" } else { "Application ID public" }, p, offset))
+                .child(field(&self.client_id, "oauth-client-id", if github { "Client ID public" } else if bitbucket { "Consumer Key publique" } else { "Application ID public" }, p, offset))
                 .child(note(
                     if github {
                         "Créez une OAuth App Mangrove dans GitHub, puis activez « Enable Device Flow » et recopiez son Client ID. Aucun secret d’application n’est nécessaire."
+                    } else if bitbucket {
+                        "Créez un consumer OAuth Mangrove dans votre workspace Bitbucket, avec Account · Read, Repositories · Read et Pull requests · Read. Recopiez sa Key et son Secret ci-dessous."
                     } else {
                         "Créez une application Mangrove non confidentielle dans GitLab, avec l’autorisation read_api. Aucun secret d’application n’est nécessaire."
                     },
@@ -941,7 +977,17 @@ impl IntegrationsView {
                 .child(div().flex().child(action("oauth-create-application", &format!("Créer l’application dans {provider}"), p, offset)
                     .disabled(self.pending.is_some())
                     .on_click(cx.listener(|this, _, _, cx| this.open_application_settings(cx)))));
-            if github {
+            if bitbucket {
+                configuration = configuration
+                    .child(field(&self.consumer_secret, "oauth-consumer-secret", "Consumer Secret · masqué", p, offset))
+                    .child(note("Bitbucket exige le Secret pour connecter et renouveler le compte. Il est conservé uniquement dans le coffre du système ; aucun secret n’est inclus dans Mangrove.", p))
+                    .child(self.copyable_oauth_url(
+                        "oauth-bitbucket-callback-url",
+                        "Callback URL",
+                        oauth::REDIRECT_URI,
+                        cx,
+                    ));
+            } else if github {
                 configuration = configuration
                     .child(self.copyable_oauth_url(
                         "oauth-homepage-url",
@@ -1350,6 +1396,10 @@ impl Render for IntegrationsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_repository_select(window, cx);
         let p = self.palette;
+        let message = self
+            .message
+            .clone()
+            .filter(|_| self.pending != Some(PendingOperation::RepositoryRead));
         let content = match self.section {
             IntegrationsSection::Profiles => self.profiles_content(cx),
             IntegrationsSection::Ssh => self.ssh_content(cx),
@@ -1390,7 +1440,7 @@ impl Render for IntegrationsView {
                                 div()
                                     .w_full()
                                     .max_w(px(760.))
-                                    .when_some(self.message.clone(), |view, message| {
+                                    .when_some(message, |view, message| {
                                         view.child(
                                             div()
                                                 .mb(px(20.))
@@ -1423,8 +1473,7 @@ impl Render for IntegrationsView {
                                     .when(
                                         self.pending.is_some_and(|operation| {
                                             operation != PendingOperation::Disconnect
-                                                && (operation != PendingOperation::RepositoryRead
-                                                    || self.repositories_next.is_none())
+                                                && operation != PendingOperation::RepositoryRead
                                         }),
                                         |view| {
                                             view.child(
@@ -1435,9 +1484,10 @@ impl Render for IntegrationsView {
                                                         p,
                                                         self.offset,
                                                     )
-                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                    .on_click(cx.listener(|this, _, window, cx| {
                                                         let cloning = this.pending == Some(PendingOperation::Clone);
                                                         this.cancel();
+                                                        this.clear_connection_secrets(window, cx);
                                                         this.message = cloning.then(|| "Clonage annulé. Un dossier incomplet peut subsister ; choisissez un nouveau nom avant de réessayer.".into());
                                                         cx.notify();
                                                     })),
@@ -1545,7 +1595,16 @@ fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
                 });
                 img(logo.clone()).size(px(size * 0.7)).into_any_element()
             }
-            _ => div().child(edition.glyph()).into_any_element(),
+            Provider::BitbucketCloud | Provider::BitbucketServer => {
+                static LOGO: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+                let logo = LOGO.get_or_init(|| {
+                    Arc::new(Image::from_bytes(
+                        ImageFormat::Svg,
+                        include_bytes!("../../assets/brands/bitbucket.svg").to_vec(),
+                    ))
+                });
+                img(logo.clone()).size(px(size * 0.9)).into_any_element()
+            }
         })
 }
 

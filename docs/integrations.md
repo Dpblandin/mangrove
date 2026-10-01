@@ -7,8 +7,8 @@ Changer de profil annule les lectures distantes, retire leurs pages affichées e
 ## Parcours
 
 1. Dans Profils, sélectionner un contexte et ajouter éventuellement un chemin local ou une URL aux favoris. Le bouton Ouvrir d’un favori local ouvre le dépôt existant ; un favori distant ne déclenche aucun clone.
-2. Dans Intégrations, choisir une édition dans la navigation verticale : GitLab.com ou auto-hébergé, GitHub.com ou Enterprise, Bitbucket Cloud ou Data Center. La fiche affiche les comptes connectés du profil, leur identité disponible et leur serveur. Le formulaire apparaît lors d’un ajout. GitLab et GitHub proposent une connexion navigateur ou un token personnel ; Bitbucket utilise un token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
-3. Connecter vérifie l’utilisateur authentifié pour GitLab/GitHub, ou la première page de dépôts pour Bitbucket sans élargir les permissions, puis conserve les identifiants dans le coffre de l’OS. Aucun dépôt n’est affiché dans les paramètres. Dans **Nouvel onglet → Cloner**, choisir un compte et un dossier parent, puis rechercher et sélectionner un dépôt dans le menu déroulant. Le sélecteur groupe les dépôts par namespace et ajoute les résultats suivants lorsque le bas de la liste devient visible, avec un indicateur de chargement. La recherche filtre les dépôts déjà chargés et continue à chercher dans les pages suivantes quand aucun résultat ne correspond. Le menu, sa position, la recherche et la sélection sont conservés lors de l’ajout. Une erreur interrompt le chargement automatique ; **Réessayer** reprend la page concernée en conservant les résultats. La sélection remplit le nom du nouveau dossier et rend le clonage disponible ; **Consulter les PR/MR** charge leurs données séparément, puis leurs discussions et statuts CI sont consultables dans cet écran dédié.
+2. Dans Intégrations, choisir une édition dans la navigation verticale : GitLab.com ou auto-hébergé, GitHub.com ou Enterprise, Bitbucket Cloud ou Data Center. La fiche affiche les comptes connectés du profil, leur identité disponible et leur serveur. Le formulaire apparaît lors d’un ajout. GitLab, GitHub et Bitbucket Cloud proposent une connexion navigateur ou un token personnel ; Bitbucket Data Center conserve le token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
+3. Connecter vérifie l’utilisateur authentifié pour GitLab/GitHub et Bitbucket Cloud OAuth, ou la première page de dépôts pour les autres comptes Bitbucket sans élargir les permissions, puis conserve les identifiants dans le coffre de l’OS. Aucun dépôt n’est affiché dans les paramètres. Dans **Nouvel onglet → Cloner**, choisir un compte et un dossier parent, puis rechercher et sélectionner un dépôt dans le menu déroulant. Le sélecteur groupe les dépôts par namespace et ajoute les résultats suivants lorsque le bas de la liste devient visible, avec un indicateur de chargement dans le Select et dans le menu. Le formulaire conserve sa position ; Annuler remplace Actualiser dans la ligne existante pendant la lecture. La recherche filtre les dépôts déjà chargés et continue à chercher dans les pages suivantes quand aucun résultat ne correspond. Le menu, sa position, la recherche et la sélection sont conservés lors de l’ajout. Une erreur interrompt le chargement automatique ; **Réessayer** reprend la page concernée en conservant les résultats. La sélection remplit le nom du nouveau dossier et rend le clonage disponible ; **Consulter les PR/MR** charge leurs données séparément, puis leurs discussions et statuts CI sont consultables dans cet écran dédié.
 4. Les PR/MR, commentaires et statuts CI conservent leurs boutons de pagination ; chaque page remplace la précédente. Le chargement progressif des dépôts utilise les mêmes curseurs liés au compte et à la ressource. Les collections restent bornées et un changement de compte ou de profil libère les résultats accumulés.
 5. Déconnecter retire le token du coffre et le compte du profil. Un token expiré, révoqué ou privé de droits produit une erreur ; reconnecter avec un token valide après déconnexion. Les erreurs de réseau, de coffre, de permissions et de limite d’API sont affichées au niveau de l’action concernée.
 
@@ -59,7 +59,7 @@ Dans **Intégrations → GitHub.com**, ouvrir la configuration puis **Créer l�
 - **Enable Device Flow** : activé.
 - **Expire user access tokens** : peut rester activé ; les tokens expirants et leur renouvellement sont pris en charge.
 
-Les URLs de configuration GitHub et l’URL de redirection GitLab sont sélectionnables dans Mangrove et disposent d’un bouton **Copier**, qui copie seulement l’adresse.
+Les URLs de configuration GitHub et de callback GitLab/Bitbucket sont sélectionnables dans Mangrove et disposent d’un bouton **Copier**, qui copie seulement l’adresse.
 
 Enregistrer l’application, puis recopier son **Client ID** public dans Mangrove. Le **Client secret** n’est pas utilisé. Choisir **Se connecter avec GitHub**, saisir le code dans GitHub, puis revenir dans Mangrove ; l’identité du compte est vérifiée avant l’enregistrement dans le coffre.
 
@@ -70,6 +70,28 @@ La case **Inclure les dépôts privés** est décochée par défaut. Sans cette 
 L’attente respecte l’intervalle fourni par GitHub, augmente le délai sur `slow_down` et s’arrête au refus, à l’expiration ou à l’annulation. Les tokens d’accès et de renouvellement éventuels restent dans une seule entrée opaque du coffre, liée au profil, au compte, à l’instance et au Client ID. Les tokens expirants sont renouvelés avant les lectures ; une déconnexion concurrente empêche leur réenregistrement. La révocation côté GitHub se fait dans **Settings → Applications → Authorized OAuth Apps**.
 
 Sources : [création de l’application](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app), [Device Flow et renouvellement](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps), [scopes OAuth](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+
+## Connexion Bitbucket Cloud dans le navigateur
+
+Dans **Intégrations → Bitbucket Cloud**, renseigner l’URL du workspace, par exemple `https://bitbucket.org/votre-workspace`. Ouvrir **Configuration OAuth**, puis **Créer l’application dans Bitbucket Cloud** pour rejoindre **Workspace settings → OAuth consumers**. Créer un consumer :
+
+- **Name** : `Mangrove`.
+- **Callback URL** : exactement `http://127.0.0.1:47321/oauth/callback`, sélectionnable et copiable depuis Mangrove.
+- **Permissions** : **Account → Read**, **Repositories → Read** et **Pull requests → Read**. Laisser les permissions Write/Admin/Delete décochées.
+
+Recopier la **Key** publique et le **Secret** dans Mangrove. Le Secret reste masqué dans le formulaire et est effacé après soumission, changement de fournisseur/profil/mode ou sortie de la rubrique. Choisir **Se connecter avec Bitbucket Cloud**, autoriser Mangrove dans le navigateur, puis revenir dans l’application. Le retour utilise le même listener temporaire local que GitLab, avec vérification de l’état de la demande. L’identité du compte OAuth est vérifiée avant l’enregistrement.
+
+Bitbucket Cloud exige le secret du consumer pour échanger le code et renouveler les tokens. Mangrove n’en embarque aucun et ne propose ni Implicit Grant ni Device Flow pour Bitbucket. Le secret se saisit uniquement dans l’application ; il ne figure pas dans les préférences, la configuration publique ni les diagnostics. Ne partagez pas votre consumer personnel pour distribuer un secret d’application.
+
+Les permissions sont définies sur le consumer : une query scope ne peut pas les réduire. Mangrove utilise uniquement les API de consultation, mais les scopes OAuth Bitbucket `repository` et `pullrequest` permettent aussi certaines actions sur les wikis, issues, tâches et commentaires. Le repli par API token permet de choisir les portées de lecture plus fines documentées dans [les fournisseurs](integrations-providers.md).
+
+La Key peut être préremplie par `MANGROVE_BITBUCKET_CLIENT_ID` ou un compte Bitbucket Cloud OAuth du profil actif. Aucun secret n’est lu depuis l’environnement. La configuration est propre au workspace ; Mangrove ne découvre pas tous les workspaces et conserve un compte par workspace.
+
+L’accès, le refresh token et le secret du consumer restent dans une entrée opaque du coffre liée au profil, compte, workspace et Key. Les tokens expirants sont renouvelés avant les lectures ; la rotation et la déconnexion concurrentes utilisent les mêmes garanties dans le processus que GitHub. Déconnecter supprime toute l’entrée locale. Bitbucket Data Center conserve son parcours PAT dans cette passe.
+
+Les tokens Cloud expirent actuellement après une heure et le refresh token inutilisé après trois mois. Le renouvellement remplace le refresh token, et une rotation suivie d’un échec réseau/coffre peut nécessiter une reconnexion. L’enregistrement effectif du callback loopback, le consentement et le renouvellement sur un consumer réel restent à valider.
+
+Sources : [OAuth, portées et renouvellement Cloud](https://developer.atlassian.com/cloud/bitbucket/rest/intro/), [création du consumer](https://support.atlassian.com/bitbucket-cloud/docs/integrate-another-application-through-oauth/).
 
 ## Stockage et secrets
 

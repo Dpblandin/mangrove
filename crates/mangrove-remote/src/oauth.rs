@@ -4,11 +4,14 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, TcpListener},
-    sync::{Arc, LazyLock, Mutex, TryLockError, Weak},
+    sync::{Arc, LazyLock, Mutex, MutexGuard, TryLockError, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use secrecy::zeroize::{Zeroize, Zeroizing};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,7 +29,7 @@ use crate::{
 pub const REDIRECT_URI: &str = "http://127.0.0.1:47321/oauth/callback";
 const CALLBACK_PORT: u16 = 47321;
 const CALLBACK_PATH: &str = "/oauth/callback";
-const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CALLBACK_BYTES: usize = 8192;
 pub(crate) const MAX_TOKEN_BYTES: usize = 16 * 1024;
 const VAULT_PREFIX: &str = "mangrove-oauth-v1:";
@@ -80,16 +83,7 @@ impl GitLabOAuth {
             .append_pair("state", state.expose_secret())
             .append_pair("code_challenge", &challenge(verifier.expose_secret()))
             .append_pair("code_challenge_method", "S256");
-        let listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, CALLBACK_PORT)).map_err(|error| match error
-                .kind()
-            {
-                std::io::ErrorKind::AddrInUse => RemoteError::OAuthPortInUse,
-                _ => RemoteError::Network,
-            })?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|_| RemoteError::Network)?;
+        let listener = callback_listener()?;
         Ok(Self {
             listener,
             authorization_url: Zeroizing::new(authorize.into()),
@@ -114,22 +108,11 @@ impl GitLabOAuth {
         transport: &dyn TokenTransport,
         cancel: &CancellationToken,
     ) -> Result<OAuthCredentials> {
-        cancel.check()?;
-        let runtime = runtime()?;
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        let code = runtime.block_on(async {
-            let listener = tokio::net::TcpListener::from_std(self.listener).map_err(|_| RemoteError::Network)?;
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err(RemoteError::Cancelled),
-                result = tokio::time::timeout(remaining, receive_callback(listener, self.state.expose_secret())) => {
-                    result.map_err(|_| RemoteError::Timeout)?
-                }
-            }
-        })?;
+        let code = authorization_code(self.listener, &self.state, self.deadline, cancel)?;
         cancel.check()?;
         let request = TokenRequest {
             endpoint: &self.token_endpoint,
+            basic_auth: None,
             fields: vec![
                 ("client_id", SecretToken::from(self.client_id.as_str())),
                 ("grant_type", SecretToken::from("authorization_code")),
@@ -143,10 +126,43 @@ impl GitLabOAuth {
     }
 }
 
-fn random_secret() -> Result<SecretToken> {
+pub(crate) fn random_secret() -> Result<SecretToken> {
     let mut bytes = Zeroizing::new([0u8; 32]);
     getrandom::fill(bytes.as_mut()).map_err(|_| RemoteError::Network)?;
     Ok(SecretToken::from(URL_SAFE_NO_PAD.encode(bytes.as_ref())))
+}
+
+pub(crate) fn callback_listener() -> Result<TcpListener> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, CALLBACK_PORT)).map_err(|error| {
+        match error.kind() {
+            std::io::ErrorKind::AddrInUse => RemoteError::OAuthPortInUse,
+            _ => RemoteError::Network,
+        }
+    })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| RemoteError::Network)?;
+    Ok(listener)
+}
+
+pub(crate) fn authorization_code(
+    listener: TcpListener,
+    state: &SecretToken,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<SecretToken> {
+    cancel.check()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    runtime()?.block_on(async {
+        let listener = tokio::net::TcpListener::from_std(listener).map_err(|_| RemoteError::Network)?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(RemoteError::Cancelled),
+            result = tokio::time::timeout(remaining, receive_callback(listener, state.expose_secret())) => {
+                result.map_err(|_| RemoteError::Timeout)?
+            }
+        }
+    })
 }
 
 fn challenge(verifier: &str) -> String {
@@ -407,6 +423,7 @@ enum AccountCredentials {
     PersonalToken(SecretToken),
     OAuth(OAuthCredentials),
     GitHub(crate::github_oauth::GitHubCredentials),
+    Bitbucket(crate::bitbucket_oauth::BitbucketCredentials),
 }
 impl AccountCredentials {
     #[cfg(test)]
@@ -415,6 +432,7 @@ impl AccountCredentials {
             Self::PersonalToken(token) => token.clone(),
             Self::OAuth(credentials) => credentials.access_token(),
             Self::GitHub(credentials) => credentials.access_token(),
+            Self::Bitbucket(credentials) => credentials.access_token(),
         }
     }
     fn provider_client<T: Transport>(
@@ -426,6 +444,7 @@ impl AccountCredentials {
             Self::PersonalToken(token) => ProviderClient::new(transport, account, token.clone()),
             Self::OAuth(credentials) => credentials.provider_client(transport, account),
             Self::GitHub(credentials) => credentials.provider_client(transport, account),
+            Self::Bitbucket(credentials) => credentials.provider_client(transport, account),
         }
     }
 }
@@ -457,6 +476,7 @@ fn read_credentials_with(
             .ok_or(RemoteError::CredentialsExpired)?;
         if token.expose_secret().starts_with(VAULT_PREFIX)
             || crate::github_oauth::is_credential_packet(&token)
+            || crate::bitbucket_oauth::is_credential_packet(&token)
         {
             return Err(RemoteError::InvalidConfiguration);
         }
@@ -469,6 +489,15 @@ fn read_credentials_with(
         )
         .map(AccountCredentials::GitHub);
     }
+    if matches!(
+        account.authentication,
+        Authentication::BitbucketOAuth { .. }
+    ) {
+        return crate::bitbucket_oauth::read_credentials_with(
+            vault, profile_id, account, cancel, transport,
+        )
+        .map(AccountCredentials::Bitbucket);
+    }
     if account.provider != Provider::GitLab {
         return Err(RemoteError::InvalidConfiguration);
     }
@@ -477,14 +506,7 @@ fn read_credentials_with(
     };
     let endpoint = SafeApiUrl::new(&account.server_url, "oauth")?.url("token")?;
     let account_lock = refresh_lock(profile_id, &account.id)?;
-    let _guard = loop {
-        cancel.check()?;
-        match account_lock.try_lock() {
-            Ok(guard) => break guard,
-            Err(TryLockError::Poisoned(_)) => return Err(RemoteError::VaultUnavailable),
-            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    };
+    let _guard = lock_refresh(&account_lock, cancel)?;
     let previous = vault
         .read(profile_id, &account.id)?
         .ok_or(RemoteError::CredentialsExpired)?;
@@ -495,6 +517,7 @@ fn read_credentials_with(
     }
     let request = TokenRequest {
         endpoint: &endpoint,
+        basic_auth: None,
         fields: vec![
             ("client_id", SecretToken::from(client_id.as_str())),
             ("grant_type", SecretToken::from("refresh_token")),
@@ -513,6 +536,20 @@ fn read_credentials_with(
     Ok(AccountCredentials::OAuth(rotated))
 }
 
+pub(crate) fn lock_refresh<'a>(
+    lock: &'a Mutex<()>,
+    cancel: &CancellationToken,
+) -> Result<MutexGuard<'a, ()>> {
+    loop {
+        cancel.check()?;
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => return Err(RemoteError::VaultUnavailable),
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
 pub(crate) fn refresh_lock(profile_id: &str, account_id: &str) -> Result<Arc<Mutex<()>>> {
     let mut locks = REFRESH_LOCKS
         .lock()
@@ -529,6 +566,7 @@ pub(crate) fn refresh_lock(profile_id: &str, account_id: &str) -> Result<Arc<Mut
 
 pub(crate) struct TokenRequest<'a> {
     pub(crate) endpoint: &'a Url,
+    pub(crate) basic_auth: Option<(&'a str, &'a SecretToken)>,
     pub(crate) fields: Vec<(&'static str, SecretToken)>,
 }
 pub(crate) trait TokenTransport: Send + Sync {
@@ -584,7 +622,13 @@ impl TokenTransport for HttpTokenTransport {
 
 async fn post_token(request: &TokenRequest<'_>, oauth_errors: bool) -> Result<Zeroizing<Vec<u8>>> {
     // SafeApiUrl is constructed above, and the OAuth-only POST boundary never
-    // accepts redirects or resource writes. No client secret is sent or needed.
+    // accepts redirects or resource writes. Confidential-consumer authentication
+    // is allowed only at Bitbucket Cloud's exact token endpoint.
+    if request.basic_auth.is_some()
+        && request.endpoint.as_str() != crate::bitbucket_oauth::TOKEN_ENDPOINT
+    {
+        return Err(RemoteError::InvalidConfiguration);
+    }
     let client = reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -604,14 +648,21 @@ async fn post_token(request: &TokenRequest<'_>, oauth_errors: bool) -> Result<Ze
             )
             .finish(),
     );
-    let mut response = client
+    let mut builder = client
         .post(request.endpoint.clone())
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
-        .body(form.as_bytes().to_vec())
-        .send()
-        .await
-        .map_err(token_network_error)?;
+        .body(form.as_bytes().to_vec());
+    if let Some((client_id, secret)) = request.basic_auth {
+        let credentials = Zeroizing::new(format!("{client_id}:{}", secret.expose_secret()));
+        let encoded = Zeroizing::new(STANDARD.encode(credentials.as_bytes()));
+        let value = Zeroizing::new(format!("Basic {}", encoded.as_str()));
+        let mut header = reqwest::header::HeaderValue::from_str(&value)
+            .map_err(|_| RemoteError::InvalidConfiguration)?;
+        header.set_sensitive(true);
+        builder = builder.header(reqwest::header::AUTHORIZATION, header);
+    }
+    let mut response = builder.send().await.map_err(token_network_error)?;
     let status = response.status().as_u16();
     match status {
         200 => {}
@@ -1361,6 +1412,7 @@ mod tests {
             HttpTokenTransport.post_until(
                 &TokenRequest {
                     endpoint: &endpoint,
+                    basic_auth: None,
                     fields: vec![("client_id", SecretToken::from("public-id"))],
                 },
                 &CancellationToken::new(),
@@ -1398,6 +1450,7 @@ mod tests {
             HttpTokenTransport.post(
                 &TokenRequest {
                     endpoint: &endpoint,
+                    basic_auth: None,
                     fields: vec![("grant_type", SecretToken::from("authorization_code"))],
                 },
                 &worker_cancel,

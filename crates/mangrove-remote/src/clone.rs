@@ -652,11 +652,24 @@ mod tests {
             let _ = sender.send(result);
         });
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !pid_file.exists() && Instant::now() < deadline {
+        let pids = loop {
+            // Shell redirection creates the file before printf fills it. Wait
+            // for both complete PID lines before cancelling the real SSH child.
+            if let Ok(pids) = fs::read_to_string(&pid_file) {
+                if pids.ends_with('\n')
+                    && pids.lines().count() == 2
+                    && pids.lines().all(|pid| pid.parse::<u32>().is_ok())
+                {
+                    break pids;
+                }
+            }
+            if Instant::now() >= deadline {
+                cancel.cancel();
+                worker.join().unwrap();
+                panic!("real Git must have started its SSH child before cancellation");
+            }
             thread::sleep(Duration::from_millis(10));
-        }
-        let pids = fs::read_to_string(&pid_file)
-            .expect("real Git must have started its SSH child before cancellation");
+        };
         let pids: Vec<_> = pids.lines().collect();
         assert_eq!(pids.len(), 2);
         cancel.cancel();

@@ -85,6 +85,9 @@ pub enum Authentication {
     GitHubOAuth {
         client_id: String,
     },
+    BitbucketOAuth {
+        client_id: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +137,13 @@ impl Account {
                     return Err(RemoteError::InvalidConfiguration);
                 }
                 crate::oauth::validate_client_id(client_id)?;
+            }
+            Authentication::BitbucketOAuth { client_id } => {
+                if self.provider != Provider::BitbucketCloud {
+                    return Err(RemoteError::InvalidConfiguration);
+                }
+                crate::oauth::validate_client_id(client_id)?;
+                crate::bitbucket_oauth::cloud_workspace(&self.server_url)?;
             }
         }
         Ok(())

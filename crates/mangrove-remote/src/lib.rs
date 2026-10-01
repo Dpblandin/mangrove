@@ -11,6 +11,7 @@
 //! let _ = serde_json::to_string(&token);
 //! ```
 
+pub mod bitbucket_oauth;
 pub mod clone;
 pub mod github_oauth;
 mod model;

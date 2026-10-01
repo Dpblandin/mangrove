@@ -150,7 +150,11 @@ impl<T: Transport> ProviderClient<T> {
                     _ => return Err(RemoteError::InvalidConfiguration),
                 };
                 validate_segment(workspace)?;
-                if let Some(username) = &account.username {
+                if let Some(username) = account
+                    .username
+                    .as_ref()
+                    .filter(|_| account.authentication == Authentication::PersonalToken)
+                {
                     if username.is_empty()
                         || username.contains(':')
                         || username.chars().any(char::is_control)
@@ -182,15 +186,23 @@ impl<T: Transport> ProviderClient<T> {
         self
     }
 
-    /// Verify the connection and read the authenticated GitLab/GitHub user.
+    /// Verify the connection and read the authenticated user where supported.
     ///
-    /// Bitbucket's current-user APIs require additional permissions or an explicit
-    /// username. Keep its existing permissions by verifying the first repository
-    /// page instead, discarding that page and returning no claimed user identity.
+    /// Bitbucket Cloud OAuth consumers explicitly include account permission.
+    /// Keep personal-token/Server permissions unchanged by verifying the first
+    /// repository page instead of requesting additional identity permissions.
     pub fn account_identity(&self, cancel: &CancellationToken) -> Result<Option<AccountIdentity>> {
         let username_path = match self.account.provider {
             Provider::GitLab => "/username",
             Provider::GitHub => "/login",
+            Provider::BitbucketCloud
+                if matches!(
+                    self.account.authentication,
+                    Authentication::BitbucketOAuth { .. }
+                ) =>
+            {
+                "/nickname"
+            }
             Provider::BitbucketCloud | Provider::BitbucketServer => {
                 self.repositories(None, cancel)?;
                 return Ok(None);
@@ -200,6 +212,11 @@ impl<T: Transport> ProviderClient<T> {
         let raw_username = json
             .pointer(username_path)
             .and_then(Value::as_str)
+            .or_else(|| {
+                (self.account.provider == Provider::BitbucketCloud)
+                    .then(|| json.get("uuid").and_then(Value::as_str))
+                    .flatten()
+            })
             .ok_or(RemoteError::InvalidResponse)?;
         if raw_username.trim().is_empty()
             || raw_username.len() > 256
@@ -209,7 +226,13 @@ impl<T: Transport> ProviderClient<T> {
             return Err(RemoteError::InvalidResponse);
         }
         let username = raw_username.trim().to_owned();
-        let name = json.get("name").and_then(Value::as_str);
+        let name = json
+            .get(if self.account.provider == Provider::BitbucketCloud {
+                "display_name"
+            } else {
+                "name"
+            })
+            .and_then(Value::as_str);
         let display_name = name
             .filter(|name| !self.contains_credential(name))
             .map(|name| {
@@ -437,10 +460,15 @@ impl<T: Transport> ProviderClient<T> {
             Provider::GitLab if self.account.authentication == Authentication::PersonalToken => {
                 ("PRIVATE-TOKEN", token.to_owned())
             }
-            Provider::BitbucketCloud if self.account.username.is_some() => (
-                "Authorization",
-                format!("Basic {}", self.basic_credential().unwrap().as_str()),
-            ),
+            Provider::BitbucketCloud
+                if self.account.authentication == Authentication::PersonalToken
+                    && self.account.username.is_some() =>
+            {
+                (
+                    "Authorization",
+                    format!("Basic {}", self.basic_credential().unwrap().as_str()),
+                )
+            }
             _ => ("Authorization", format!("Bearer {token}")),
         };
         let accept = if self.account.provider == Provider::GitHub {
@@ -826,7 +854,9 @@ impl<T: Transport> ProviderClient<T> {
     }
 
     fn basic_credential(&self) -> Option<Zeroizing<String>> {
-        if self.account.provider != Provider::BitbucketCloud {
+        if self.account.provider != Provider::BitbucketCloud
+            || self.account.authentication != Authentication::PersonalToken
+        {
             return None;
         }
         let username = self.account.username.as_deref()?;
