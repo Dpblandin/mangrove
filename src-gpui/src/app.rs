@@ -349,7 +349,7 @@ impl Mangrove {
             self.repository = None;
             self.history.update(cx, |view, cx| view.clear(cx));
             self.sidebar
-                .update(cx, |view, cx| view.clear_repository(cx));
+                .update(cx, |view, cx| view.prepare_repository_open(&path, cx));
             self.inspector
                 .update(cx, |view, cx| view.clear_repository(cx));
         }
@@ -424,6 +424,10 @@ impl Mangrove {
                         }
                         Err(error) => {
                             view.error = Some(error);
+                            if view.repository.is_none() {
+                                view.sidebar
+                                    .update(cx, |sidebar, cx| sidebar.clear_repository(cx));
+                            }
                             if !refresh {
                                 view.tabs.reject_open(attempt);
                             }
@@ -624,6 +628,9 @@ impl Mangrove {
         self.sync_selection(cx);
     }
     fn sidebar_event(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.repository.is_none() && !matches!(event, SidebarEvent::OpenWorktree(_)) {
+            return;
+        }
         match event {
             SidebarEvent::NavigateReference(name) => self.navigate_reference(name, window, cx),
             SidebarEvent::ToggleSolo(name) => self.toggle_solo(Some(name.clone()), window, cx),
@@ -1087,7 +1094,7 @@ impl Render for Mangrove {
         let topbar = self
             .chrome
             .update(cx, |chrome, cx| chrome.render_topbar(window, cx));
-        let sidebar = if self.repository.is_some() {
+        let sidebar = if self.sidebar.read(cx).repository.is_some() {
             render_cached_view(self.sidebar.clone(), window)
         } else {
             self.chrome
