@@ -9,7 +9,7 @@ use std::{
 
 use git2::{Oid, Repository, Signature, Time};
 use mangrove_core::{
-    model::{Reference, RepositoryInfo},
+    model::{FileImageData, FileImageSource, Reference, RepositoryInfo},
     Workspace,
 };
 use rusqlite::Connection;
@@ -1227,6 +1227,162 @@ fn working_key(path: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn image_bytes(image: &FileImageData) -> &[u8] {
+    match image {
+        FileImageData::Bytes(bytes) => bytes,
+        other => panic!("Expected image bytes, got {other:?}"),
+    }
+}
+
+#[test]
+fn image_revisions_follow_renames_and_deletions_without_reading_the_worktree() {
+    let fixture = Fixture::new();
+    let first = commit(
+        &fixture.repository,
+        "image added",
+        &[],
+        &[("old.png", b"\0old image")],
+        Some("HEAD"),
+    );
+    let unrelated_large_blob = vec![0; 2 * 1024 * 1024 + 1];
+    let renamed = commit(
+        &fixture.repository,
+        "image renamed beside an unrelated large addition",
+        &[first],
+        &[
+            ("new.png", b"\0old image"),
+            ("large.bin", &unrelated_large_blob),
+        ],
+        Some("HEAD"),
+    );
+    let modified = commit(
+        &fixture.repository,
+        "image modified",
+        &[renamed],
+        &[("new.png", b"\0new image")],
+        Some("HEAD"),
+    );
+    let deleted = commit(
+        &fixture.repository,
+        "image deleted",
+        &[modified],
+        &[],
+        Some("HEAD"),
+    );
+    fs::write(
+        fixture.source.join("new.png"),
+        b"unrelated local replacement",
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let read = |sha: Oid, path: &str, comparison| {
+        workspace
+            .file_images(
+                &info.id,
+                &FileImageSource::Commit {
+                    sha: sha.to_string(),
+                    file_key: working_key(path),
+                    comparison,
+                },
+            )
+            .unwrap()
+    };
+    let added = read(first, "old.png", true);
+    assert!(matches!(added.before, Some(FileImageData::Absent)));
+    assert_eq!(image_bytes(&added.after), b"\0old image");
+    let renamed = read(renamed, "new.png", true);
+    assert_eq!(
+        image_bytes(renamed.before.as_ref().unwrap()),
+        b"\0old image"
+    );
+    assert_eq!(image_bytes(&renamed.after), b"\0old image");
+    let modified = read(modified, "new.png", true);
+    assert_eq!(
+        image_bytes(modified.before.as_ref().unwrap()),
+        b"\0old image"
+    );
+    assert_eq!(image_bytes(&modified.after), b"\0new image");
+    let deleted_diff = read(deleted, "new.png", true);
+    assert_eq!(
+        image_bytes(deleted_diff.before.as_ref().unwrap()),
+        b"\0new image"
+    );
+    assert!(matches!(deleted_diff.after, FileImageData::Absent));
+    let deleted_content = read(deleted, "new.png", false);
+    assert!(deleted_content.before.is_none());
+    assert!(matches!(deleted_content.after, FileImageData::Absent));
+    assert!(workspace
+        .file_images(
+            &info.id,
+            &FileImageSource::Commit {
+                sha: first.to_string(),
+                file_key: working_key("../outside.png"),
+                comparison: false,
+            }
+        )
+        .is_err());
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn local_image_comparisons_separate_head_index_and_worktree_with_size_limits() {
+    let fixture = Fixture::new();
+    commit(
+        &fixture.repository,
+        "base image",
+        &[],
+        &[("image.png", b"\0base image")],
+        Some("HEAD"),
+    );
+    checkout_head(&fixture);
+    fs::write(fixture.source.join("image.png"), b"\0index image").unwrap();
+    let mut index = fixture.repository.index().unwrap();
+    index.add_path(Path::new("image.png")).unwrap();
+    index.write().unwrap();
+    drop(index);
+    fs::write(fixture.source.join("image.png"), b"\0worktree image").unwrap();
+    fs::write(
+        fixture.source.join("large.png"),
+        vec![0; 2 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let read = |area: &str, path: &str| {
+        workspace
+            .file_images(
+                &info.id,
+                &FileImageSource::WorkingTree {
+                    area: area.into(),
+                    file_key: working_key(path),
+                },
+            )
+            .unwrap()
+    };
+    let staged = read("staged", "image.png");
+    assert_eq!(
+        image_bytes(staged.before.as_ref().unwrap()),
+        b"\0base image"
+    );
+    assert_eq!(image_bytes(&staged.after), b"\0index image");
+    let unstaged = read("unstaged", "image.png");
+    assert_eq!(
+        image_bytes(unstaged.before.as_ref().unwrap()),
+        b"\0index image"
+    );
+    assert_eq!(image_bytes(&unstaged.after), b"\0worktree image");
+    assert!(matches!(
+        read("unstaged", "large.png").after,
+        FileImageData::Unavailable(_)
+    ));
+    assert_eq!(before, snapshot(&fixture.source));
 }
 
 fn checkout_head(fixture: &Fixture) {
@@ -3451,6 +3607,28 @@ fn stash_zones_use_distinct_saved_trees_and_do_not_touch_the_source() {
         let diff = workspace
             .stash_diff(&info.id, &sha.to_string(), area, &group.files[0].file_key)
             .unwrap();
+        let images = workspace
+            .file_images(
+                &info.id,
+                &FileImageSource::Stash {
+                    sha: sha.to_string(),
+                    area: area.into(),
+                    file_key: group.files[0].file_key.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            image_bytes(&images.after),
+            format!("{expected_new}\n").as_bytes()
+        );
+        if let Some(expected_old) = expected_old {
+            assert_eq!(
+                image_bytes(images.before.as_ref().unwrap()),
+                format!("{expected_old}\n").as_bytes()
+            );
+        } else {
+            assert!(matches!(images.before, Some(FileImageData::Absent)));
+        }
         let lines: Vec<_> = diff.hunks.iter().flat_map(|hunk| &hunk.lines).collect();
         assert!(lines
             .iter()

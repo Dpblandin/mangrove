@@ -11,6 +11,7 @@ use gpui_kit::{
         scroll::Scrollbar,
         searchable_list::SearchableVec,
         select::{Select, SelectEvent, SelectState},
+        switch::Switch,
     },
     prelude::*,
     *,
@@ -21,10 +22,12 @@ pub enum SettingsEvent {
     Back,
     ThemeChanged(ThemeId),
     IntervalChanged(u32),
+    ImagePreviewsChanged(bool),
 }
 
 pub struct SettingsView {
     interval: u32,
+    show_image_previews: bool,
     input: Entity<InputState>,
     theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     scroll: ScrollHandle,
@@ -41,6 +44,7 @@ impl SettingsView {
     pub fn new(
         interval: u32,
         theme: ThemeId,
+        show_image_previews: bool,
         palette: Palette,
         font_size_offset: f32,
         window: &mut Window,
@@ -81,6 +85,7 @@ impl SettingsView {
         });
         Self {
             interval,
+            show_image_previews,
             input,
             theme_select,
             scroll: ScrollHandle::default(),
@@ -313,7 +318,7 @@ impl Render for SettingsView {
                                             .flex()
                                             .flex_col()
                                             .child(div().text_size(px(24.)).line_height(px(32.)).font_weight(FontWeight::SEMIBOLD).child("Général"))
-                                            .child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Personnalisez l’apparence et la fréquence de récupération des références distantes."))
+                                            .child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Personnalisez l’apparence, les aperçus des fichiers et la fréquence de récupération des références distantes."))
                                             .child(
                                                 div()
                                                     .mt(px(32.))
@@ -360,6 +365,32 @@ impl Render for SettingsView {
                                             .child(
                                                 div()
                                                     .mt(px(24.))
+                                                    .w_full()
+                                                    .min_w_0()
+                                                    .p(px(24.))
+                                                    .rounded(px(12.))
+                                                    .border_1()
+                                                    .border_color(rgb(p.border))
+                                                    .bg(rgb(p.panel))
+                                                    .child(div().mb(px(24.)).text_size(px(14. + offset)).line_height(px(20. + 2. * offset)).font_weight(FontWeight::MEDIUM).child("Aperçus des fichiers"))
+                                                    .child(
+                                                        div().flex().items_start().gap(px(20.))
+                                                            .child(div().flex_1().min_w_0().flex().flex_col()
+                                                                .child(div().text_size(px(12. + offset)).child("Afficher les aperçus des images"))
+                                                                .child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Affiche les images dans les vues Diff et Fichier, avec une comparaison avant/après lorsqu’elles sont modifiées. Ce réglage est enregistré immédiatement.")))
+                                                            .child(Switch::new("show-image-previews")
+                                                                .checked(self.show_image_previews)
+                                                                .accessibility_label("Afficher les aperçus des images")
+                                                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                                                    this.show_image_previews = *checked;
+                                                                    cx.emit(SettingsEvent::ImagePreviewsChanged(*checked));
+                                                                    cx.notify();
+                                                                }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt(px(20.))
                                                     .w_full()
                                                     .min_w_0()
                                                     .p(px(24.))

@@ -308,6 +308,60 @@ pub(crate) fn revision_diff(repository: &Repository, sha: &str, key: &str) -> Re
     }
 }
 
+pub(crate) fn images(
+    repository: &Repository,
+    sha: &str,
+    key: &str,
+    comparison: bool,
+) -> Result<FileImages> {
+    let path = path_bytes(key)?;
+    let revision = commit(repository, sha)?;
+    let tree = revision.tree().map_err(object_error)?;
+    if !comparison {
+        let after = match entry(repository, &tree, &path)? {
+            Some((id, mode)) => crate::images::blob(repository, id, mode)?,
+            None => FileImageData::Absent,
+        };
+        return Ok(FileImages {
+            before: None,
+            after,
+        });
+    }
+    let parent = revision
+        .parent_ids()
+        .next()
+        .map(|id| repository.find_commit(id).and_then(|commit| commit.tree()))
+        .transpose()
+        .map_err(object_error)?;
+    // Match the comparison already shown in commit details. The historical
+    // blame budget includes unrelated rename candidates and must not prevent
+    // reading the two bounded image blobs selected by this diff.
+    let diff = crate::tree_diff(repository, parent.as_ref(), &tree)?;
+    if let Some(delta) = diff.deltas().find(|delta| {
+        delta.new_file().path_bytes() == Some(path.as_slice())
+            || delta.old_file().path_bytes() == Some(path.as_slice())
+    }) {
+        return crate::images::delta(repository, &delta);
+    }
+    let before = match parent
+        .as_ref()
+        .map(|tree| entry(repository, tree, &path))
+        .transpose()?
+        .flatten()
+    {
+        Some((id, mode)) => crate::images::blob(repository, id, mode)?,
+        None => FileImageData::Absent,
+    };
+    let after = match entry(repository, &tree, &path)? {
+        Some((id, mode)) => crate::images::blob(repository, id, mode)?,
+        None => FileImageData::Absent,
+    };
+    Ok(FileImages {
+        before: Some(before),
+        after,
+    })
+}
+
 struct HistoryStep {
     entry: Option<FileHistoryEntry>,
     next: Option<Oid>,
