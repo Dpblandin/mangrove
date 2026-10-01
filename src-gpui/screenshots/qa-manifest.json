@@ -138,5 +138,40 @@
     "benchmark_control_completed_at": "2026-10-01T00:01:06.765634+00:00",
     "validated_benchmark_launches": 4,
     "ci_run": "https://github.com/Dpblandin/mangrove/actions/runs/36793683102"
+  },
+  "post_comparison_ui_validation": {
+    "verified_at": "2026-10-01T05:55:24.488763+00:00",
+    "source_git_revision": "07aad7952e1476dd9706ee8612d3a3e6a2fac37d",
+    "production_binary_sha256": "573da56576202c20a3b93b0728ebcb44908bcfad1a99d0ff3fcfa037071b8f3c",
+    "configuration": "release, default features, production bundle; classic theme",
+    "bundle_identifier": "dev.mangrove.gpui",
+    "window_points": [1000, 730],
+    "display_scale": 2,
+    "checks": [
+      "welcome, toolbar, File menu and Cmd+O open the native folder picker directly; a chosen repository opens immediately",
+      "native picker cancellation retains repository and selected file; invalid Git folder shows error without deleting the previous repository tab",
+      "Settings occupies the full window without repository tabs, workspace topbar, references sidebar, footer or inspector",
+      "Settings menu, numeric input, step buttons, reset and save match the effective Vue styles; text wraps at the comparison width",
+      "numeric stepping stays at 0 and 60; 61 is rejected by save; reset restores 1; save persists 0; the original interval 1 is restored and persisted",
+      "Back returns to the selected file; Escape returns to the workspace; Cmd+K reveals the history search and typing reaches that visible input",
+      "reopening Settings resets a discarded draft 2 to persisted 1 and clears feedback; initial field does not receive autofocus",
+      "Cmd+O from Settings opens the native picker; cancellation returns to the workspace without losing its repository",
+      "docs/performance-gpui.html at cbbdd05: empty truncated diff shows its complete warning under file tabs, wrapped in the narrow viewport",
+      "release clippy all-targets -D warnings passes in normal and instrumented configurations; normal and instrumented suites retain 75 and 80 passing tests",
+      "production bundle Info.plist passes plutil; frozen benchmark data and historical capture attestations remain unchanged"
+    ],
+    "captures": [
+      {
+        "file": "post-comparison-settings.jpg",
+        "sha256": "4f1194b7850640eb895780954ca4efe45c262658efafb32f04f905ff87b2318f",
+        "dimensions": [2000, 1460]
+      },
+      {
+        "file": "post-comparison-large-file.jpg",
+        "sha256": "777495c3cf09b795237bb8fe6bb7484daa44f82b0cbff0835c088a133b1390d7",
+        "dimensions": [2000, 1460]
+      }
+    ],
+    "note": "Targeted UI regression QA after manual comparison. The 120-launch series and the four syntax control launches keep their original source revisions and binaries; these UI captures are separate."
   }
 }
