@@ -4,7 +4,7 @@ use crate::{
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    base::{Button, NumberInput, input::MaskPattern, step_value},
+    base::{Button, NumberInput, StepAction, input::MaskPattern, step_value},
     component::{
         Sizable,
         input::{Input, InputEvent, InputState},
@@ -162,13 +162,7 @@ impl Render for SettingsView {
             .on_step(move |action, window, cx| {
                 step_input.update(cx, |input, cx| {
                     input.focus(window, cx);
-                    if let Some(value) = step_value(
-                        input.value().as_ref(),
-                        action,
-                        1.,
-                        Some(0.),
-                        Some(MAX_AUTO_FETCH_INTERVAL as f64),
-                    ) {
+                    if let Some(value) = step_interval(input.value().as_ref(), action) {
                         input.replace_all(value, window, cx);
                     }
                 });
@@ -412,4 +406,61 @@ fn brightened(color: u32) -> Rgba {
     color.g = (color.g * 1.1).min(1.);
     color.b = (color.b * 1.1).min(1.);
     color
+}
+
+fn step_interval(value: &str, action: StepAction) -> Option<String> {
+    // Kit preserves fractional precision; the HTML step=1 reference instead
+    // reaches the next integer. Start one step behind that integer so Kit can
+    // still enforce its bounds and directional no-op behavior.
+    let aligned = value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| {
+            let base = if value.fract() == 0. {
+                value
+            } else {
+                match action {
+                    StepAction::Increment => value.ceil() - 1.,
+                    StepAction::Decrement => value.floor() + 1.,
+                }
+            };
+            base.to_string()
+        });
+    step_value(
+        aligned.as_deref().unwrap_or(value),
+        action,
+        1.,
+        Some(0.),
+        Some(MAX_AUTO_FETCH_INTERVAL as f64),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_interval;
+    use gpui_kit::base::StepAction::{Decrement, Increment};
+
+    #[test]
+    fn stepping_fractional_drafts_recovers_a_whole_minute_in_the_requested_direction() {
+        assert_eq!(step_interval("1.5", Increment).as_deref(), Some("2"));
+        assert_eq!(step_interval("1.5", Decrement).as_deref(), Some("1"));
+        assert_eq!(step_interval("0.1", Increment).as_deref(), Some("1"));
+        assert_eq!(step_interval("0.1", Decrement).as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn integer_steps_and_range_boundaries_preserve_direction() {
+        assert_eq!(step_interval("1", Increment).as_deref(), Some("2"));
+        assert_eq!(step_interval("1", Decrement).as_deref(), Some("0"));
+        assert_eq!(step_interval("1.0", Increment).as_deref(), Some("2"));
+        assert_eq!(step_interval("59.5", Increment).as_deref(), Some("60"));
+        assert_eq!(step_interval("60.5", Decrement).as_deref(), Some("60"));
+        assert_eq!(step_interval("-0.5", Increment).as_deref(), Some("0"));
+        assert!(step_interval("60", Increment).is_none());
+        assert!(step_interval("0", Decrement).is_none());
+        assert!(step_interval("60.5", Increment).is_none());
+        assert!(step_interval("-0.5", Decrement).is_none());
+    }
 }

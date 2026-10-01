@@ -672,7 +672,7 @@ impl Mangrove {
             ChromeEvent::CloseTab(id) => self.close_tab(*id, window, cx),
             ChromeEvent::NewTab => self.new_tab(cx),
             ChromeEvent::ShowSettings => {
-                if self.settings {
+                if self.settings || !self.chrome.read(cx).can_show_settings() {
                     return;
                 }
                 let chrome = self.chrome.read(cx);

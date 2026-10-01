@@ -264,6 +264,9 @@ impl Chrome {
     pub fn choosing_repository(&self) -> bool {
         self.choosing
     }
+    pub fn can_show_settings(&self) -> bool {
+        !self.choosing && self.resize.is_none()
+    }
     pub fn finish_repository_picker(&mut self, cx: &mut Context<Self>) {
         self.choosing = false;
         cx.notify();
@@ -531,7 +534,7 @@ impl Chrome {
                             .accessibility_label("Paramètres")
                             .tooltip("Paramètres · ⌘ ,")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.choosing && this.resize.is_none() {
+                                if this.can_show_settings() {
                                     cx.emit(ChromeEvent::ShowSettings)
                                 }
                             })),
