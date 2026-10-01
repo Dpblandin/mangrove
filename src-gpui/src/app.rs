@@ -10,6 +10,7 @@ use crate::{
     sidebar::{SidebarEvent, SidebarView},
     tabs::Tabs,
     theme::SANS,
+    view_cache::render_cached_view,
 };
 use gpui_kit::{prelude::*, *};
 use mangrove_core::{Workspace, model::RepositoryInfo};
@@ -780,6 +781,8 @@ impl Mangrove {
         let (diff_ready, syntax_ready, diff_rows) = inspector.benchmark_readiness(cx);
         let file = inspector.selected_file_path();
         let syntax_target = file.and_then(|path| self.perf.as_ref()?.syntax_target(path));
+        let (working_ready, working_files, working_displayed, file_scroll_offset) =
+            inspector.benchmark_working_files();
         PerfSnapshot {
             history_ready: !inspector.central_active() && history.visible_loaded_rows() >= 10,
             index_complete: history.index_complete(),
@@ -799,6 +802,10 @@ impl Mangrove {
             file_count: inspector.details().map_or(0, |details| details.files.len()),
             history_total: history.total(),
             diff_rows,
+            working_ready,
+            working_files,
+            working_displayed,
+            file_scroll_offset,
         }
     }
     fn schedule_perf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -828,6 +835,7 @@ impl Mangrove {
             f32::from(viewport.height) as usize,
         );
         perf.set_accessibility_active(window.is_a11y_active());
+        perf.set_scroll_window_state(window.is_window_active(), window.is_visible());
         let action = perf.tick(snapshot);
         match action {
             Some(PerfAction::SelectCommit(index)) => self
@@ -850,6 +858,19 @@ impl Mangrove {
             Some(PerfAction::ScrollDiff(offset)) => self
                 .inspector
                 .update(cx, |view, cx| view.benchmark_scroll_to(offset, cx)),
+            Some(PerfAction::SelectWorking) => self.select_working(cx),
+            Some(PerfAction::OpenWorkingFile) => {
+                let path = self.perf.as_ref().unwrap().heavy_file().to_owned();
+                let found = self
+                    .inspector
+                    .update(cx, |view, cx| view.benchmark_open_working_file(&path, cx));
+                if !found && let Some(perf) = self.perf.as_mut() {
+                    perf.fail("Benchmark working file is missing".into());
+                }
+            }
+            Some(PerfAction::ScrollFiles(offset)) => self
+                .inspector
+                .update(cx, |view, cx| view.benchmark_scroll_files_to(offset, cx)),
             Some(PerfAction::Finish) => {
                 self.perf = None;
                 cx.quit();
@@ -881,18 +902,6 @@ impl Mangrove {
         } else if let Some(perf) = self.perf.as_mut() {
             perf.fail("Benchmark file is missing".into());
         }
-    }
-}
-
-fn render_pane<T: Render + 'static>(view: Entity<T>, window: &Window) -> AnyElement {
-    // gpui-pre 0.3.7 replays cached paint/input records, but not accessibility
-    // nodes. Build the full subtree while assistive technology is connected.
-    // GPUI forces a redraw when accessibility becomes active.
-    if window.is_a11y_active() {
-        view.into_any_element()
-    } else {
-        view.cached(StyleRefinement::default().size_full())
-            .into_any_element()
     }
 }
 
@@ -984,7 +993,7 @@ impl Render for Mangrove {
             .chrome
             .update(cx, |chrome, cx| chrome.render_topbar(window, cx));
         let sidebar = if self.repository.is_some() {
-            render_pane(self.sidebar.clone(), window)
+            render_cached_view(self.sidebar.clone(), window)
         } else {
             self.chrome
                 .read(cx)
@@ -999,7 +1008,7 @@ impl Render for Mangrove {
             self.inspector
                 .update(cx, |view, cx| view.render_workspace(window, cx))
         } else if self.repository.is_some() {
-            render_pane(self.history.clone(), window)
+            render_cached_view(self.history.clone(), window)
         } else if self.opening {
             div().flex_1().into_any_element()
         } else {

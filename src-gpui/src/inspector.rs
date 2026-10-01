@@ -11,6 +11,7 @@ use crate::{
     preferences::Preferences,
     syntax,
     theme::{MONO, Palette, icon, scrollbar_theme},
+    view_cache::render_cached_view,
 };
 use accesskit::Role;
 use gpui_kit::{assets::IconName, component::scroll::Scrollbar, prelude::*, *};
@@ -604,6 +605,42 @@ impl InspectorView {
             self.viewer
                 .update(cx, |view, cx| view.scroll_by_pixels(delta, cx));
         }
+        cx.notify();
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_working_files(&self) -> (bool, usize, usize, f32) {
+        let ready = self.is_working_tree()
+            && !self.status_loading
+            && self.status_error.is_none()
+            && self.status.as_ref().is_some_and(|status| status.available);
+        (
+            ready,
+            self.status
+                .as_ref()
+                .map_or(0, |status| status.unstaged_count),
+            self.rows("unstaged").len(),
+            -f32::from(self.scroll[0].0.borrow().base_handle.offset().y),
+        )
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_open_working_file(&mut self, path: &str, cx: &mut Context<Self>) -> bool {
+        let file = self
+            .rows("unstaged")
+            .iter()
+            .find(|file| file.path == path)
+            .cloned();
+        if let Some(file) = file {
+            self.active_file[0] = file.index;
+            self.choose(file, cx);
+            true
+        } else {
+            false
+        }
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_scroll_files_to(&mut self, offset: f32, cx: &mut Context<Self>) {
+        let scroll = self.scroll[0].0.borrow().base_handle.clone();
+        scroll.set_offset(point(scroll.offset().x, px(-offset)));
         cx.notify();
     }
     pub fn refresh_status(&mut self, cx: &mut Context<Self>) {
@@ -1356,7 +1393,7 @@ impl InspectorView {
             return div()
                 .size_full()
                 .min_w_0()
-                .child(self.browser.clone())
+                .child(render_cached_view(self.browser.clone(), window))
                 .into_any_element();
         }
         self.sync_viewer(window, cx);
@@ -1444,7 +1481,12 @@ impl InspectorView {
                     .child(div().flex_1())
                     .children(self.diff().map(|diff| diff_counts(diff, p, o))),
             )
-            .child(div().flex_1().min_h_0().child(self.viewer.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(render_cached_view(self.viewer.clone(), window)),
+            )
             .into_any_element()
     }
     fn panel_heading(&self, text: &str, name: IconName) -> Stateful<Div> {
@@ -1809,7 +1851,12 @@ impl InspectorView {
                     )
                     .child(controls),
             )
-            .child(div().flex_1().min_h_0().child(self.viewer.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(render_cached_view(self.viewer.clone(), window)),
+            )
             .into_any_element()
     }
     fn render_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
