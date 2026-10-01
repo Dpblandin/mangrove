@@ -1,4 +1,5 @@
 mod cache;
+mod commit_diff;
 mod fetch;
 mod file_browser;
 mod graph;
@@ -85,6 +86,7 @@ struct Session {
     complete: AtomicBool,
     cancel: AtomicBool,
     error: Mutex<Option<String>>,
+    commit_diffs: Mutex<commit_diff::CommitDiffCache>,
     opened: Instant,
 }
 
@@ -464,6 +466,7 @@ impl Workspace {
             complete: AtomicBool::new(complete),
             cancel: AtomicBool::new(false),
             error: Mutex::new(None),
+            commit_diffs: Mutex::default(),
             opened: Instant::now(),
         });
         if !sessions.contains_key(&key) && sessions.len() >= MAX_OPEN_REPOSITORIES {
@@ -603,6 +606,11 @@ impl Workspace {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
         let (commit, diff) = commit_diff(&repository, sha)?;
+        session
+            .commit_diffs
+            .lock()
+            .unwrap()
+            .remember(commit.id(), &diff);
         let author = commit.author();
         let files = diff
             .deltas()
@@ -625,7 +633,17 @@ impl Workspace {
     pub fn file_diff(&self, id: &str, sha: &str, file_index: usize) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        let (_, diff) = commit_diff(&repository, sha)?;
+        let oid = Oid::from_str(sha).map_err(|_| "Identifiant de commit invalide.")?;
+        let files = session.commit_diffs.lock().unwrap().get(oid);
+        if let Some(files) = files {
+            return files.file_diff(&repository, oid, file_index);
+        }
+        let (commit, diff) = commit_diff(&repository, sha)?;
+        session
+            .commit_diffs
+            .lock()
+            .unwrap()
+            .remember(commit.id(), &diff);
         if file_index >= diff.deltas().len() {
             return Err("Fichier introuvable dans ce commit.".into());
         }

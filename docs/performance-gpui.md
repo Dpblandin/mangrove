@@ -4,6 +4,8 @@
 
 Le gain principal est la mémoire RSS : la médiane stable passe de **556 à 199 MiB** avec un cache neuf, et de **554 à 187 MiB** avec un cache réutilisé, soit **64 à 66 % de moins**. Les tableaux décrivent séparément la réactivité et le coût des phases : le CPU baisse dans l’historique et augmente dans le grand diff. Ces chiffres comparent les applications complètes et leurs choix de rendu, avec le même moteur Git.
 
+Ces résultats ne permettent pas de conclure que GPUI est plus fluide dans tous les parcours. La fixture inspectée comporte 46 fichiers et son grand diff revient au texte simple. Les commits réels avec beaucoup de fichiers, la navigation entre des diffs non préchargés et le défilement de grands diffs colorés demandent des contrôles distincts.
+
 Les deux artefacts mesurés étaient des builds **release avec `app-benchmark` activé**, utilisant les sources GPUI production `src-gpui` et le baseline Vue/Tauri désormais archivé. Tauri activait aussi le frontend via `VITE_APP_BENCHMARK=1`. Le coût du scénario et du profiler GPUI entre dans ces mesures. Les builds ordinaires de cette révision compilaient les interfaces sans les modules de mesure ; les noms et identifiants des bundles de benchmark étaient distincts.
 
 Les deux familles de lockfiles utilisent les mêmes versions des dépendances du moteur partagé : `git2 0.21.0`, `libgit2-sys 0.18.8+1.9.7`, `rusqlite 0.38.0`, `libsqlite3-sys 0.36.0`, `serde 1.0.229`, `serde_json 1.0.151`, `regex 1.13.1`, `chrono 0.4.45`.
@@ -132,3 +134,71 @@ La géométrie CoreGraphics enregistrée au lancement est un relevé précoce su
 ## Contrôle après la série
 
 La série de 120 lancements reste associée à la révision 77b15d5 (binaire GPUI 9be0a07486be…). Après cette série, le correctif bb1c900 refuse les résultats de coloration dont le budget de 500 ms est épuisé ; cette limite reste inchangée. Les nouveaux bundles ont passé un contrôle séparé de quatre lancements complets, avec 30 sélections de commit et 30 diffs réellement colorés par lancement, le même baseline Tauri, la même fixture et le même viewport. Leurs sources et binaires sont inchangés pendant ce contrôle. Les mesures et quantiles des 120 lancements restent inchangés ; aucun nouveau quantile de performance n’est publié. Le manifeste QA distingue les captures initiales et le contrôle natif du nouveau bundle de production.
+
+## Contrôle de lecture sur un commit réel
+
+Le 1er octobre 2026, le commit `941b0ed433a990a81418508280955425ce788dde` (145 fichiers) a été examiné sur la même machine, en release, à partir de la base `3c53e09`. La sonde `inspect-latency` utilise les lectures Git et la coloration de production, mais exclut le rendu, les files d’attente de l’interface et le défilement. Cinq nouveaux processus ont été lancés avant et cinq après le correctif du cache des identités de fichiers ; le cache filesystem n’était pas contrôlé et les autres applications sont restées ouvertes. Les résultats bruts locaux sont conservés dans `.mangrove-dev/performance/before-*.json` et `after-*.json` du worktree du correctif.
+
+Avant le correctif, la médiane de lecture de chacun des six fichiers sondés était comprise entre **82,7 et 83,5 ms** : chaque patch recalculait la détection des renommages de l’ensemble du commit. Après le correctif, qui réutilise les identités résolues puis compare seulement les chemins sélectionnés, ces médianes sont comprises entre **0,6 et 1,1 ms**. La lecture initiale de la liste reste autour de **84 ms** ; la coloration reste autour de **9 à 31 ms**. Les fichiers sondés sont `.github/workflows/ci.yml`, `src-gpui/src/code_view.rs`, `file_browser.rs`, `history.rs`, `inspector.rs` et `syntax.rs`.
+
+Ce correctif porte sur le moteur partagé : il profite à GPUI et à tout consommateur du moteur mis à jour. Le build Tauri historique reste inchangé. Ces mesures établissent un gain de lecture des patches après chargement de la liste ; elles ne mesurent pas la latence clic→affichage et ne prouvent pas une amélioration du scroll, ni une supériorité globale sur Tauri. Une inspection native du diff coloré de `code_view.rs` (1 619 lignes) a été réalisée en release ; le profil d’échantillonnage ne fournit pas les intervalles de frame nécessaires pour quantifier les saccades.
+
+```sh
+cargo run --release --locked --manifest-path src-gpui/Cargo.toml \
+  --example inspect-latency -- /chemin/du/depot \
+  941b0ed433a990a81418508280955425ce788dde \
+  .github/workflows/ci.yml src-gpui/src/code_view.rs \
+  src-gpui/src/file_browser.rs src-gpui/src/history.rs \
+  src-gpui/src/inspector.rs src-gpui/src/syntax.rs
+```
+
+## Scroll du grand diff coloré
+
+Un second contrôle porte sur `src-gpui/src/code_view.rs` au même commit : **1 619 lignes avec coloration**, fenêtre de contenu 1440 × 888, cinq paires de nouveaux processus release avec `app-benchmark`, cache SQLite réutilisé et ordre avant/après alterné. Les deux binaires utilisent le moteur corrigé ; seuls les caches de vue autour de la sidebar et de l’historique changent dans le renderer. LaunchServices atteste l’activation sur l’écran principal pour chaque lancement retenu. Trois lancements dont l’activation n’a pas été attestée sont exclus. Les essais exploratoires précédents sont distincts de cette série. Les [relevés par lancement, hashes et critères](performance-scroll-gpui.json) permettent de vérifier les agrégats ; les rapports de frames bruts restent locaux dans `.mangrove-dev/performance/scroll-panels-verified-*.json`.
+
+La **médiane des médianes de dessin CPU par frame passe de 2,709 à 2,498 ms**, soit **7,8 % de moins**. La médiane des p95 passe de 3,409 à 3,248 ms. Les intervalles de soumission médians restent autour de **8,32 ms** ; la médiane de leurs p95 passe de 8,96 à 9,18 ms. Un pic de 49,5 ms existe après le changement. Cette petite série établit un coût de dessin réduit dans ce scénario, mais ne démontre ni une cadence écran améliorée, ni l’absence de saccades, ni un avantage sur Tauri. La charge de fond n’est pas neutralisée et les trois secondes à 2400 pixels/s sont une commande de scroll, pas un relevé de distance parcourue.
+
+L’optimisation réutilise les panneaux inchangés via `Entity::cached`, avec une boîte de layout de taille définie, lorsque l’accessibilité n’est pas active. GPUI 0.3.7 ne rejoue pas les nœuds AccessKit de ces sous-arbres : une consultation native a fait disparaître l’historique de l’arbre d’accessibilité après filtrage de la sidebar. Le rendu complet est donc conservé quand `window.is_a11y_active()` est vrai ; GPUI force un redraw à l’activation de l’accessibilité. Les mesures ci-dessus décrivent la branche sans accessibilité active et précèdent cet ajout du garde. Les changements de données et de thème notifient déjà ces vues ; le cache GPUI tient aussi compte des bounds, du clipping et du style hérité. Ce choix suit le [guide officiel des caches de vue GPUI Kit](https://gpui-kit.com/docs/view-cache/). Le cache expérimental des styles de lignes a été retiré : ses cinq paires exploratoires n’ont pas montré de gain net.
+
+Le harness accepte désormais des cibles explicites, uniquement quand `MANGROVE_BENCH_OUTPUT` active le benchmark. Pour reproduire le scénario, utiliser une copie bare du dépôt dont la seule branche pointe sur `941b0ed433a990a81418508280955425ce788dde`, puis :
+
+```sh
+sh src-gpui/scripts/package-macos.sh --benchmark
+MANGROVE_BENCH_REPO=/chemin/absolu/fixture.git \
+MANGROVE_BENCH_CACHE=/chemin/absolu/cache \
+MANGROVE_BENCH_OUTPUT=/chemin/absolu/report.json \
+MANGROVE_BENCH_SAMPLES=2 \
+MANGROVE_BENCH_SYNTAX_0=src-gpui/src/history.rs \
+MANGROVE_BENCH_SYNTAX_1=src-gpui/src/inspector.rs \
+MANGROVE_BENCH_HEAVY=src-gpui/src/code_view.rs \
+'src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app/Contents/MacOS/mangrove-gpui'
+```
+
+La commande directe reproduit la charge dans l’application ; pour la série contrôlée, les bundles figés avant/après sont lancés avec `scripts/benchmark-launch.swift` afin d’attester l’activation et l’écran. Le baseline reprend `1b7d8d0` avec les mêmes cibles de benchmark, sans les deux frontières `cached` ; leurs binaires sont identifiés dans le relevé JSON. Les cibles historiques restent les valeurs par défaut.
+
+Le build final a passé les 77 tests de production et les 82 tests avec `app-benchmark`, Clippy sur toutes les cibles avec `-D warnings`, le formatage et le packaging release. Un lancement fonctionnel après ajout du garde valide à nouveau les 145 fichiers, les 1 619 lignes colorées et `accessibility_active=false` ; ce lancement est hors série quantitative. Le contrôle natif avec accessibilité active conserve l’historique après filtrage, restaure les références et permet de changer de commit.
+
+## Scroll de la liste des modifications locales
+
+La liste « Non indexés » utilise déjà `uniform_list` : seules les lignes visibles, plus une ligne de mesure, sont construites. Les lignes et le statut sont partagés par `Arc` ; un redraw ne clone pas les 5 000 fichiers. Le cache sidebar/historique introduit dans `de3050f` protège également ces panneaux pendant ce scroll. En revanche, un diff ouvert à côté était encore reconstruit sans changement. Les vues du diff central local/stash, du diff compact et de la consultation centrale d’un fichier de commit utilisent maintenant la même frontière de cache, extraite dans `view_cache.rs`, avec le même garde d’accessibilité. Les changements de fichier, de thème, de taille de texte et le scroll propre au diff notifient leurs vues ; les bounds et le clipping participent à l’invalidation.
+
+Le contrôle du 1er octobre utilise une fixture isolée de 12 commits, **10 179 fichiers non indexés**, dont les **5 000 premiers affichés**, et un diff Rust coloré de **1 619 lignes** immobile dans le panneau central. Cinq paires de processus release avec `app-benchmark` font défiler la liste pendant trois secondes à 2400 pixels/s, dans un contenu de 1440 × 888. L’ordre est alterné, le cache SQLite réutilisé, la charge de fond non neutralisée ; aucun build ni entrée native n’intervient pendant la série. La distance réellement relevée reste entre 7100 et 7250 pixels. Le baseline reprend `de3050f` avec le même harness et le helper de cache extrait, mais conserve les trois enfants de diff sans cache. Les [résultats par lancement et hashes](performance-scroll-files-gpui.json) distinguent les deux binaires mesurés du binaire final utilisé pour le diagnostic.
+
+La médiane des médianes de dessin CPU passe de **2,107 à 1,566 ms**, soit environ **26 % de moins** ; la médiane des p95 passe de 2,610 à 1,923 ms. **La série ne permet pas de conclure à un gain de fluidité** : les médianes des intervalles de soumission de deux lancements après sont autour de 34–41 ms, contre environ 8,3 ms pour les trois autres. La médiane des p95 d’intervalle passe de 10,49 à 33,23 ms. Tous ces lancements lents sont conservés. LaunchServices attestait l’activation au départ, pas pendant toute la phase. Trois contrôles ultérieurs avec les nouveaux compteurs relèvent respectivement 9, 55 et 10 callbacks de scroll avec une fenêtre inactive, sans fenêtre masquée ; ils montrent des interruptions de focus, sans en établir la cause ni expliquer rétroactivement chaque intervalle de la série. Le coût CPU observé baisse, mais une comparaison de cadence fiable demande un contrôle continu du focus.
+
+Un lancement dont l’activation n’a pas pu être attestée est exclu. Une première tentative de série s’était arrêtée sur un seuil inapproprié de 100 frames ; les rapports exploratoires restent locaux. La série complète conserve aussi les lancements avec peu de frames et n’exige que deux échantillons pour calculer les statistiques. Les données brutes restent dans `.mangrove-dev/performance/local-files-complete-*.json`. Les compteurs d’activité et une réécriture équivalente du `match` demandée par Clippy sont postérieurs aux binaires comparés ; ils ne changent pas le cache de production.
+
+Le scénario optionnel se lance sur un dépôt de test contenant au moins dix commits et des changements non indexés, avec `MANGROVE_BENCH_SCROLL_TARGET=unstaged-files` et `MANGROVE_BENCH_HEAVY` égal au chemin exact d’un fichier non indexé présent parmi les 5 000 premiers. Le fichier choisi reste ouvert pendant le scroll de la liste. Les variables ne sont lues que lorsque `MANGROVE_BENCH_OUTPUT` active le benchmark ; le parcours historique reste la valeur par défaut. Le rapport inclut les nombres total/affiché, la distance de la liste et les callbacks avec fenêtre inactive ou masquée.
+
+```sh
+MANGROVE_BENCH_REPO=/chemin/absolu/depot-test \
+MANGROVE_BENCH_CACHE=/chemin/absolu/cache-test \
+MANGROVE_BENCH_OUTPUT=/chemin/absolu/file-scroll.json \
+MANGROVE_BENCH_SCROLL_TARGET=unstaged-files \
+MANGROVE_BENCH_HEAVY=00-large.rs \
+'src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app/Contents/MacOS/mangrove-gpui'
+```
+
+Le contrôle natif avec accessibilité active vérifie le défilement de cette liste, le changement de fichier avec les flèches, le passage central/compact, Home pour revenir au premier fichier et le scroll du grand diff compact. L’historique et le diff restent présents dans l’arbre accessible. Le cache est désactivé pendant ce contrôle, comme prévu par le garde. Un contrôle fonctionnel distinct du scénario historique vérifie le cache de la consultation de commit et son propre scroll ; ses timings ne sont pas ajoutés à la comparaison.
+
+Validation du complément : 77 tests release de production, 82 avec `app-benchmark`, Clippy toutes cibles avec `-D warnings`, formatage et packaging macOS release. Les bundles de test isolés sont signés ad hoc et leur signature est vérifiée.

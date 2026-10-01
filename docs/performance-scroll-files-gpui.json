@@ -1,0 +1,766 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-01T11:00:38.727113+00:00",
+  "scope": "Working-tree unstaged file list scroll with an unchanged colored diff open in the central pane; CPU draw timing is not a physical smoothness measurement.",
+  "renderer_base": "de3050f9839ae773a3e0c9612158400f137c46e0",
+  "measured_binary_sha256": {
+    "before": "c54fc364db678c4dfe66897a762f02ac98a7f4bee0ac5008ea470b4c2486bb48",
+    "after": "5a14d0139fa7bac3c370202afbc4a91290ec199979c2925241435b4fcf685322"
+  },
+  "final_diagnostic_binary_sha256": "87b7c1cf1161d513c188f184f4f295f7aaac895200806c10f75a9d8e8a313571",
+  "fixture": {
+    "history_commits": 12,
+    "unstaged_files": 10179,
+    "displayed_files": 5000,
+    "adjacent_colored_diff_rows": 1619,
+    "selected_path": "00-large.rs",
+    "source_blob": "941b0ed433a990a81418508280955425ce788dde:src-gpui/src/code_view.rs",
+    "remaining_files": "10 178 generated one-line JavaScript files under node_modules/@lucide/vue/dist/esm/icons"
+  },
+  "protocol": {
+    "release_app_benchmark": true,
+    "fresh_processes_per_variant": 5,
+    "alternating_order": true,
+    "scroll_duration_ms": 3000,
+    "commanded_scroll_speed_px_s": 2400,
+    "viewport_logical": [
+      1440,
+      888
+    ],
+    "cpu_metric": "median of per-launch median Draw durations",
+    "p95_method": "nearest rank",
+    "foreground_attestation": "LaunchServices verifies active main-display window at launch only; focus during the paired workload was not recorded.",
+    "background_load_controlled": false,
+    "builds_or_native_input_during_pairs": false,
+    "sqlite_cache": "reused; filesystem cache uncontrolled",
+    "minimum_frame_samples": 2
+  },
+  "summary": {
+    "before": {
+      "draw_ms": {
+        "median_of_launch_medians": 2.1065,
+        "median_of_launch_p95": 2.610417
+      },
+      "interval_ms": {
+        "median_of_launch_medians": 8.327833500000281,
+        "median_of_launch_p95": 10.492958999999928
+      }
+    },
+    "after": {
+      "draw_ms": {
+        "median_of_launch_medians": 1.565666,
+        "median_of_launch_p95": 1.9231669999999998
+      },
+      "interval_ms": {
+        "median_of_launch_medians": 8.340250500000025,
+        "median_of_launch_p95": 33.229750999999396
+      }
+    }
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "variant": "before",
+      "attempt": 1,
+      "report": "local-files-complete-before-1-1.json",
+      "launch": {
+        "window": {
+          "main_display_height": 982,
+          "main_display_width": 1512,
+          "main_display_refresh_hz": 120,
+          "height": 903,
+          "main_display_pixel_height": 1964,
+          "width": 1414,
+          "x": 49,
+          "main_display_pixel_width": 3024,
+          "y": 73,
+          "on_main_display": true
+        },
+        "pid": 41410,
+        "status": "active"
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7199.8315
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.327750000000151,
+          "p95": 9.876290999999583,
+          "max": 12.521542000000409
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 2.148916,
+          "p95": 2.7411250000000003,
+          "max": 3.006042
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 6.087709,
+          "p95": 7.547375000000001,
+          "max": 10.561958
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "variant": "after",
+      "attempt": 1,
+      "report": "local-files-complete-after-1-1.json",
+      "launch": {
+        "window": {
+          "x": 49,
+          "y": 72,
+          "width": 1414,
+          "main_display_pixel_height": 1964,
+          "main_display_height": 982,
+          "main_display_refresh_hz": 120,
+          "on_main_display": true,
+          "main_display_width": 1512,
+          "height": 905,
+          "main_display_pixel_width": 3024
+        },
+        "pid": 41511,
+        "status": "active"
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7119.407
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 93,
+          "median": 34.237834000000475,
+          "p95": 41.985499000000345,
+          "max": 42.36862700000029
+        },
+        "draw_ms": {
+          "count": 94,
+          "median": 1.7008545,
+          "p95": 2.372875,
+          "max": 3.000666
+        },
+        "submit_ms": {
+          "count": 94,
+          "median": 0.11412499999999999,
+          "p95": 2.603084,
+          "max": 5.6795420000000005
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "variant": "after",
+      "attempt": 2,
+      "report": "local-files-complete-after-2-2.json",
+      "launch": {
+        "pid": 43407,
+        "status": "active",
+        "window": {
+          "y": 72,
+          "height": 905,
+          "main_display_height": 982,
+          "main_display_pixel_width": 3024,
+          "main_display_width": 1512,
+          "main_display_pixel_height": 1964,
+          "width": 1414,
+          "main_display_refresh_hz": 120,
+          "on_main_display": true,
+          "x": 49
+        }
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7119.8
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 78,
+          "median": 40.93447900000001,
+          "p95": 42.01483300000018,
+          "max": 42.385625999999775
+        },
+        "draw_ms": {
+          "count": 79,
+          "median": 1.812292,
+          "p95": 2.580459,
+          "max": 2.875458
+        },
+        "submit_ms": {
+          "count": 79,
+          "median": 0.107042,
+          "p95": 0.144541,
+          "max": 0.17908400000000002
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "variant": "before",
+      "attempt": 1,
+      "report": "local-files-complete-before-2-1.json",
+      "launch": {
+        "status": "active",
+        "window": {
+          "main_display_height": 982,
+          "x": 50,
+          "main_display_width": 1512,
+          "on_main_display": true,
+          "width": 1412,
+          "main_display_refresh_hz": 120,
+          "y": 73,
+          "main_display_pixel_width": 3024,
+          "main_display_pixel_height": 1964,
+          "height": 903
+        },
+        "pid": 45139
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7159.9673
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 273,
+          "median": 8.33954199999971,
+          "p95": 34.09800000000041,
+          "max": 43.243790999999874
+        },
+        "draw_ms": {
+          "count": 274,
+          "median": 2.133833,
+          "p95": 2.610417,
+          "max": 4.126582999999999
+        },
+        "submit_ms": {
+          "count": 274,
+          "median": 2.1222915,
+          "p95": 4.0638749999999995,
+          "max": 7.179625000000001
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "variant": "before",
+      "attempt": 1,
+      "report": "local-files-complete-before-3-1.json",
+      "launch": {
+        "pid": 45535,
+        "status": "active",
+        "window": {
+          "main_display_height": 982,
+          "x": 49,
+          "height": 905,
+          "on_main_display": true,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120,
+          "width": 1414,
+          "main_display_width": 1512,
+          "main_display_pixel_width": 3024,
+          "y": 72
+        }
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7199.988
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.31174950000036,
+          "p95": 8.89949900000056,
+          "max": 9.658791999999949
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 2.081416,
+          "p95": 2.525042,
+          "max": 2.834334
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 0.080041,
+          "p95": 0.114417,
+          "max": 0.139792
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "variant": "after",
+      "attempt": 1,
+      "report": "local-files-complete-after-3-1.json",
+      "launch": {
+        "status": "active",
+        "pid": 45650,
+        "window": {
+          "y": 73,
+          "main_display_pixel_width": 3024,
+          "on_main_display": true,
+          "main_display_width": 1512,
+          "width": 1414,
+          "height": 903,
+          "x": 49,
+          "main_display_height": 982,
+          "main_display_refresh_hz": 120,
+          "main_display_pixel_height": 1964
+        }
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7160.193
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 302,
+          "median": 8.340250500000025,
+          "p95": 33.229750999999396,
+          "max": 42.0490420000001
+        },
+        "draw_ms": {
+          "count": 303,
+          "median": 1.565666,
+          "p95": 1.829041,
+          "max": 2.845083
+        },
+        "submit_ms": {
+          "count": 303,
+          "median": 2.8307919999999998,
+          "p95": 5.101417,
+          "max": 8.723834
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "variant": "after",
+      "attempt": 1,
+      "report": "local-files-complete-after-4-1.json",
+      "launch": {
+        "window": {
+          "main_display_pixel_width": 3024,
+          "height": 905,
+          "y": 72,
+          "width": 1414,
+          "main_display_width": 1512,
+          "main_display_height": 982,
+          "main_display_refresh_hz": 120,
+          "on_main_display": true,
+          "main_display_pixel_height": 1964,
+          "x": 49
+        },
+        "status": "active",
+        "pid": 47039
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7178.6567
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 359,
+          "median": 8.322582999999668,
+          "p95": 8.981999000000087,
+          "max": 9.788209000000734
+        },
+        "draw_ms": {
+          "count": 360,
+          "median": 1.5020419999999999,
+          "p95": 1.9231669999999998,
+          "max": 2.140917
+        },
+        "submit_ms": {
+          "count": 360,
+          "median": 0.0742915,
+          "p95": 0.111834,
+          "max": 0.33766599999999997
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "variant": "before",
+      "attempt": 1,
+      "report": "local-files-complete-before-4-1.json",
+      "launch": {
+        "status": "active",
+        "window": {
+          "y": 73,
+          "height": 903,
+          "on_main_display": true,
+          "main_display_pixel_width": 3024,
+          "main_display_width": 1512,
+          "main_display_height": 982,
+          "main_display_refresh_hz": 120,
+          "main_display_pixel_height": 1964,
+          "width": 1412,
+          "x": 50
+        },
+        "pid": 47224
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7199.979
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 328,
+          "median": 8.336000000000126,
+          "p95": 10.492958999999928,
+          "max": 41.76262600000018
+        },
+        "draw_ms": {
+          "count": 329,
+          "median": 2.0978749999999997,
+          "p95": 2.548042,
+          "max": 2.928833
+        },
+        "submit_ms": {
+          "count": 329,
+          "median": 2.1961250000000003,
+          "p95": 3.834834,
+          "max": 6.067833
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "variant": "before",
+      "attempt": 1,
+      "report": "local-files-complete-before-5-1.json",
+      "launch": {
+        "status": "active",
+        "window": {
+          "y": 72,
+          "main_display_refresh_hz": 120,
+          "main_display_pixel_width": 3024,
+          "x": 49,
+          "main_display_height": 982,
+          "width": 1414,
+          "height": 905,
+          "main_display_width": 1512,
+          "on_main_display": true,
+          "main_display_pixel_height": 1964
+        },
+        "pid": 48709
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7198.742
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.327833500000281,
+          "p95": 10.592499999999745,
+          "max": 12.69487499999991
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 2.1065,
+          "p95": 2.630917,
+          "max": 2.96275
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 2.398,
+          "p95": 4.873125,
+          "max": 6.715875
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "variant": "after",
+      "attempt": 1,
+      "report": "local-files-complete-after-5-1.json",
+      "launch": {
+        "window": {
+          "main_display_pixel_width": 3024,
+          "width": 1412,
+          "main_display_height": 982,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120,
+          "height": 903,
+          "x": 50,
+          "main_display_width": 1512,
+          "y": 73,
+          "on_main_display": true
+        },
+        "pid": 49244,
+        "status": "active"
+      },
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7199.7573
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.322520999999597,
+          "p95": 9.166416000000027,
+          "max": 9.807624000000033
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 1.506791,
+          "p95": 1.90825,
+          "max": 2.1562080000000003
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 0.07341600000000001,
+          "p95": 0.108333,
+          "max": 0.13425
+        }
+      }
+    }
+  ],
+  "rejected_launches": [
+    {
+      "pair": 2,
+      "variant": "after",
+      "attempt": 1,
+      "helper_exit": 5
+    }
+  ],
+  "limits": [
+    "Two after launches have median submission intervals around 34\u201341 ms, versus about 8.3 ms for the other after launches. All remain in the paired summary.",
+    "The paired series cannot establish improved frame cadence or absence of a regression: activation was only attested at startup.",
+    "Three later diagnostic launches record 9, 55 and 10 inactive scroll ticks and no hidden ticks. They reveal focus interruptions, but do not establish their cause or retroactively classify the paired frames.",
+    "An initial attempt stopped on an inappropriate >100 frame-samples assertion; its three completed launches and slow fourth report remain local. The complete five-pair series uses >=2 samples and retains slow launches.",
+    "The measured binaries precede additive benchmark-only window activity counters and a later Clippy-only equivalent match guard rewrite. Production cache behavior is unchanged.",
+    "The accessibility-active branch renders the full subtree and receives no benefit from the view cache.",
+    "Only the first 5 000 files are exposed by the existing engine cap; the cap is unchanged."
+  ],
+  "diagnostic_launches": [
+    {
+      "report": "local-files-final-diagnostic-1.json",
+      "status": "ok",
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7182.011,
+        "inactive_scroll_ticks": 9,
+        "hidden_scroll_ticks": 0
+      },
+      "draw_frames": 332,
+      "interval_median_ms": 8.333499999999958
+    },
+    {
+      "report": "local-files-final-diagnostic-2.json",
+      "status": "ok",
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7138.674,
+        "inactive_scroll_ticks": 55,
+        "hidden_scroll_ticks": 0
+      },
+      "draw_frames": 169,
+      "interval_median_ms": 8.447479499999872
+    },
+    {
+      "report": "local-files-final-diagnostic-3.json",
+      "status": "ok",
+      "workload": {
+        "accessibility_active": false,
+        "history_total": 12,
+        "changed_files": 0,
+        "heavy_diff_rows": 1619,
+        "heavy_diff_colored": 1,
+        "selection_samples": 0,
+        "syntax_samples": 0,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "viewport_width": 1440,
+        "viewport_height": 888,
+        "working_files": 10179,
+        "working_displayed": 5000,
+        "file_scroll_distance_px": 7120.0786,
+        "inactive_scroll_ticks": 10,
+        "hidden_scroll_ticks": 0
+      },
+      "draw_frames": 325,
+      "interval_median_ms": 8.318916999999601
+    }
+  ],
+  "native_qa": {
+    "isolated_fixture_and_preferences": true,
+    "accessibility_active": true,
+    "working_file_list_scroll": true,
+    "selection_and_arrow_navigation": true,
+    "central_and_compact_layouts": true,
+    "home_selects_first_file_and_updates_diff": true,
+    "compact_diff_scroll": true
+  },
+  "functional_commit_scenario": {
+    "report": "local-files-original-scenario-smoke.json",
+    "status": "ok",
+    "accessibility_active": false,
+    "changed_files": 145,
+    "heavy_diff_rows": 1619,
+    "heavy_diff_colored": 1,
+    "syntax_samples": 2,
+    "selection_samples": 2,
+    "frames_phases": [
+      "diff_scroll",
+      "history_scroll"
+    ],
+    "included_in_quantitative_pairs": false
+  },
+  "validation": {
+    "production_release_tests": 77,
+    "benchmark_release_tests": 82,
+    "clippy_all_targets_app_benchmark": "passed with -D warnings",
+    "format": "passed",
+    "production_macos_package": "passed",
+    "benchmark_macos_package": "passed before the equivalent Clippy match rewrite",
+    "qa_bundle_signature": "ad-hoc deep/strict verification passed"
+  }
+}

@@ -1,0 +1,519 @@
+{
+  "renderer_base": "1b7d8d0",
+  "launch_method": "NSWorkspace new instance, foreground activation on main display",
+  "sha256": {
+    "before": "8e03310f0db9691564a76d8dd960f7622fb865fdc2cb34eb766a32c6f7cc7441",
+    "after": "9e4757cc7d4be97ab4934da294504e35d32caf6a260566939cc316d72db31140"
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "variant": "before",
+      "launch": {
+        "status": "active",
+        "window": {
+          "width": 1416,
+          "height": 905,
+          "on_main_display": true,
+          "main_display_width": 1512,
+          "main_display_height": 982,
+          "main_display_pixel_width": 3024,
+          "y": 72,
+          "x": 48,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120
+        },
+        "pid": 1261
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 358,
+          "median": 8.33022949999986,
+          "p95": 8.878500000000258,
+          "max": 15.851040999999896
+        },
+        "draw_ms": {
+          "count": 359,
+          "median": 2.9147079999999996,
+          "p95": 3.409167,
+          "max": 3.862833
+        },
+        "submit_ms": {
+          "count": 359,
+          "median": 5.336333000000001,
+          "p95": 6.007208,
+          "max": 12.776958
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "variant": "after",
+      "launch": {
+        "window": {
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120,
+          "y": 72,
+          "main_display_pixel_width": 3024,
+          "height": 905,
+          "x": 49,
+          "width": 1414,
+          "main_display_width": 1512,
+          "main_display_height": 982,
+          "on_main_display": true
+        },
+        "pid": 1463,
+        "status": "active"
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.30083299999933,
+          "p95": 9.152376000000004,
+          "max": 9.879374999999982
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 2.558834,
+          "p95": 3.2821249999999997,
+          "max": 3.859875
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 0.06933399999999999,
+          "p95": 0.111667,
+          "max": 0.177417
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "variant": "after",
+      "launch": {
+        "window": {
+          "height": 903,
+          "main_display_width": 1512,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120,
+          "on_main_display": true,
+          "main_display_height": 982,
+          "y": 73,
+          "width": 1414,
+          "x": 49,
+          "main_display_pixel_width": 3024
+        },
+        "pid": 2309,
+        "status": "active"
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 359,
+          "median": 8.328125000000455,
+          "p95": 8.779708000000028,
+          "max": 13.08345799999961
+        },
+        "draw_ms": {
+          "count": 360,
+          "median": 2.6201665000000003,
+          "p95": 3.459459,
+          "max": 3.8536669999999997
+        },
+        "submit_ms": {
+          "count": 360,
+          "median": 5.6556880000000005,
+          "p95": 6.35175,
+          "max": 10.578541
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "variant": "before",
+      "launch": {
+        "pid": 17143,
+        "status": "active",
+        "window": {
+          "height": 905,
+          "on_main_display": true,
+          "x": 48,
+          "y": 72,
+          "main_display_width": 1512,
+          "width": 1416,
+          "main_display_height": 982,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120,
+          "main_display_pixel_width": 3024
+        }
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.322958999999628,
+          "p95": 8.963582000000315,
+          "max": 10.5984169999997
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 2.70925,
+          "p95": 3.4697080000000002,
+          "max": 3.831083
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 1.526,
+          "p95": 2.2445,
+          "max": 3.664167
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "variant": "before",
+      "launch": {
+        "pid": 18105,
+        "status": "active",
+        "window": {
+          "x": 49,
+          "y": 72,
+          "main_display_pixel_height": 1964,
+          "width": 1414,
+          "on_main_display": true,
+          "main_display_refresh_hz": 120,
+          "main_display_width": 1512,
+          "main_display_height": 982,
+          "main_display_pixel_width": 3024,
+          "height": 905
+        }
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 359,
+          "median": 8.328956999999946,
+          "p95": 8.933999999999742,
+          "max": 9.492706999999882
+        },
+        "draw_ms": {
+          "count": 360,
+          "median": 2.7178545,
+          "p95": 3.4532920000000003,
+          "max": 4.021541
+        },
+        "submit_ms": {
+          "count": 360,
+          "median": 1.5845205,
+          "p95": 2.541667,
+          "max": 3.217416
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "variant": "after",
+      "launch": {
+        "status": "active",
+        "window": {
+          "y": 73,
+          "height": 903,
+          "width": 1412,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120,
+          "main_display_width": 1512,
+          "x": 50,
+          "main_display_pixel_width": 3024,
+          "main_display_height": 982,
+          "on_main_display": true
+        },
+        "pid": 19242
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 359,
+          "median": 8.28525099999979,
+          "p95": 9.285792000000129,
+          "max": 12.37712399999964
+        },
+        "draw_ms": {
+          "count": 360,
+          "median": 2.400729,
+          "p95": 3.025584,
+          "max": 6.209957999999999
+        },
+        "submit_ms": {
+          "count": 360,
+          "median": 0.0805625,
+          "p95": 0.118791,
+          "max": 0.192125
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "variant": "after",
+      "launch": {
+        "status": "active",
+        "window": {
+          "main_display_pixel_width": 3024,
+          "height": 903,
+          "main_display_refresh_hz": 120,
+          "width": 1414,
+          "x": 49,
+          "on_main_display": true,
+          "y": 73,
+          "main_display_width": 1512,
+          "main_display_height": 982,
+          "main_display_pixel_height": 1964
+        },
+        "pid": 21431
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 316,
+          "median": 8.320437499999912,
+          "p95": 9.317707999999811,
+          "max": 49.531249999999545
+        },
+        "draw_ms": {
+          "count": 317,
+          "median": 2.461166,
+          "p95": 3.116875,
+          "max": 10.791458
+        },
+        "submit_ms": {
+          "count": 317,
+          "median": 0.067667,
+          "p95": 0.107041,
+          "max": 0.24704099999999998
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "variant": "before",
+      "launch": {
+        "status": "active",
+        "pid": 22469,
+        "window": {
+          "y": 72,
+          "width": 1414,
+          "x": 49,
+          "main_display_height": 982,
+          "main_display_pixel_width": 3024,
+          "main_display_width": 1512,
+          "on_main_display": true,
+          "height": 905,
+          "main_display_pixel_height": 1964,
+          "main_display_refresh_hz": 120
+        }
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 359,
+          "median": 8.311666999999943,
+          "p95": 9.143125000000282,
+          "max": 10.384833999999955
+        },
+        "draw_ms": {
+          "count": 360,
+          "median": 2.628959,
+          "p95": 3.2522089999999997,
+          "max": 4.143375000000001
+        },
+        "submit_ms": {
+          "count": 360,
+          "median": 0.074667,
+          "p95": 0.108875,
+          "max": 0.138791
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "variant": "before",
+      "launch": {
+        "pid": 27408,
+        "status": "active",
+        "window": {
+          "main_display_height": 982,
+          "main_display_pixel_width": 3024,
+          "main_display_refresh_hz": 120,
+          "height": 905,
+          "main_display_pixel_height": 1964,
+          "width": 1414,
+          "on_main_display": true,
+          "x": 49,
+          "y": 72,
+          "main_display_width": 1512
+        }
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 359,
+          "median": 8.30749999999989,
+          "p95": 9.211750000000166,
+          "max": 10.168457999999646
+        },
+        "draw_ms": {
+          "count": 360,
+          "median": 2.606833,
+          "p95": 3.235458,
+          "max": 4.134583
+        },
+        "submit_ms": {
+          "count": 360,
+          "median": 0.0608335,
+          "p95": 0.10195800000000001,
+          "max": 0.133833
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "variant": "after",
+      "launch": {
+        "window": {
+          "main_display_height": 982,
+          "x": 50,
+          "height": 903,
+          "on_main_display": true,
+          "main_display_pixel_height": 1964,
+          "width": 1412,
+          "main_display_refresh_hz": 120,
+          "main_display_pixel_width": 3024,
+          "y": 73,
+          "main_display_width": 1512
+        },
+        "status": "active",
+        "pid": 28421
+      },
+      "metrics": {
+        "interval_ms": {
+          "count": 360,
+          "median": 8.319353999999748,
+          "p95": 9.178707000000259,
+          "max": 10.208165999999892
+        },
+        "draw_ms": {
+          "count": 361,
+          "median": 2.497833,
+          "p95": 3.247584,
+          "max": 3.861958
+        },
+        "submit_ms": {
+          "count": 361,
+          "median": 0.055875,
+          "p95": 0.100667,
+          "max": 0.154792
+        }
+      }
+    }
+  ],
+  "excluded_launches": [
+    {
+      "pair": 2,
+      "variant": "before",
+      "reason": "foreground/main-display launch validation failed before restarting the runner",
+      "helper_exit": 5
+    },
+    {
+      "pair": 5,
+      "variant": "before",
+      "reason": "foreground/main-display launch validation failed",
+      "helper_exit": 5,
+      "metadata": [
+        {
+          "status": "launched",
+          "pid": 24930
+        }
+      ]
+    },
+    {
+      "pair": 5,
+      "variant": "before",
+      "reason": "foreground/main-display launch validation failed",
+      "helper_exit": 5,
+      "metadata": [
+        {
+          "status": "launched",
+          "pid": 26332
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "date": "2026-10-01",
+  "workload": {
+    "commit": "941b0ed433a990a81418508280955425ce788dde",
+    "changed_files": 145,
+    "heavy_file": "src-gpui/src/code_view.rs",
+    "heavy_diff_rows": 1619,
+    "heavy_diff_colored": true,
+    "selection_samples": 2,
+    "syntax_samples": 2,
+    "scroll_duration_ms": 3000,
+    "scroll_speed_px_s": 2400,
+    "viewport_width": 1440,
+    "viewport_height": 888,
+    "cache": "reused SQLite; new processes and in-memory caches; filesystem cache uncontrolled"
+  },
+  "method": {
+    "statistics": "median of the five per-launch medians; median of the five per-launch p95 values",
+    "p95_rank": "floor(0.95 * (sample_count - 1)) on sorted frame samples, zero-based",
+    "frame_proxy": "GPUI platform submission intervals, not display scanout",
+    "draw_proxy": "GPUI CPU draw duration; excludes platform submission duration",
+    "controls": "same shared engine and target-file harness; sidebar/history cached view boundaries are the only renderer change; order alternates; no build or UI automation during measured runs",
+    "raw_reports": "local .mangrove-dev/performance/scroll-panels-verified-{before,after}-{1..5}.json",
+    "helper_source_sha256": "1f5e1a7fc2df6dbb0160a6fdc9ea813b95a97ed4655eceb3ccc31249230f5585"
+  },
+  "summary_ms": {
+    "before": {
+      "draw_ms": {
+        "median": 2.70925,
+        "p95": 3.409167
+      },
+      "interval_ms": {
+        "median": 8.322958999999628,
+        "p95": 8.963582000000315
+      }
+    },
+    "after": {
+      "draw_ms": {
+        "median": 2.497833,
+        "p95": 3.247584
+      },
+      "interval_ms": {
+        "median": 8.319353999999748,
+        "p95": 9.178707000000259
+      }
+    }
+  },
+  "limitations": [
+    "Only five valid launches per variant on this colored diff; background load was not neutralized.",
+    "Three launches were rejected by foreground/main-display validation; completed frame samples from these launches are not in the summary.",
+    "Earlier exploratory direct-launch style-cache and panel-cache trials are separate from this series.",
+    "A lower CPU draw cost does not establish smoother physical display frames or a GPUI/Tauri advantage.",
+    "The measured cached-pane prototype preceded the accessibility guard. Final code uses full rendering when window.is_a11y_active() is true; this connected-assistive-technology path has no claimed cache gain."
+  ],
+  "environment": {
+    "cpu": "Apple M4 Pro",
+    "memory_bytes": 51539607552,
+    "macos": "26.6.2",
+    "display": "main display; geometry and declared refresh rate in each launch record"
+  },
+  "final_validation": {
+    "production_tests_passed": 77,
+    "benchmark_tests_passed": 82,
+    "clippy": "all targets, app-benchmark, -D warnings",
+    "package": "macOS production release; task QA bundle ad hoc signature verified",
+    "functional_benchmark_smoke": {
+      "status": "ok",
+      "accessibility_active": false,
+      "changed_files": 145,
+      "heavy_diff_rows": 1619,
+      "heavy_diff_colored": true,
+      "included_in_quantitative_series": false
+    },
+    "native_accessibility_check": "history remains after filtering the sidebar; references return after clearing; another commit can be selected",
+    "production_binary_sha256": "51ddf7a7416ef23e01f9c85e25e7c11093ca5ace3eb1824e08cd1f697c222378",
+    "benchmark_binary_sha256": "07ba592fb7a2c3224b818821132a2ac7f37151eba847819bc66d9256b413e9e2"
+  }
+}

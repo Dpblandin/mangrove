@@ -11,6 +11,7 @@ use crate::{
     preferences::Preferences,
     syntax,
     theme::{MONO, Palette, icon, scrollbar_theme},
+    view_cache::render_cached_view,
 };
 use accesskit::Role;
 use gpui_kit::{assets::IconName, component::scroll::Scrollbar, prelude::*, *};
@@ -73,6 +74,9 @@ impl FileChoice {
     }
     fn cache_key(&self) -> String {
         format!("{}:{}:{}", self.area, self.index, self.key)
+    }
+    fn same_identity(&self, other: &Self) -> bool {
+        self.area == other.area && self.index == other.index && self.key == other.key
     }
 }
 
@@ -606,6 +610,41 @@ impl InspectorView {
         }
         cx.notify();
     }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_working_files(&self) -> (bool, usize, usize, f32) {
+        let ready = self.is_working_tree()
+            && !self.status_loading
+            && self.status_error.is_none()
+            && self.status.as_ref().is_some_and(|status| status.available);
+        (
+            ready,
+            self.status
+                .as_ref()
+                .map_or(0, |status| status.unstaged_count),
+            self.file_rows.get("unstaged").map_or(0, |rows| rows.len()),
+            -f32::from(self.scroll[0].0.borrow().base_handle.offset().y),
+        )
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_open_working_file(&mut self, path: &str, cx: &mut Context<Self>) -> bool {
+        let file = self
+            .file_rows
+            .get("unstaged")
+            .and_then(|rows| rows.iter().find(|file| file.path == path))
+            .cloned();
+        if let Some(file) = file {
+            self.choose(file, cx);
+            true
+        } else {
+            false
+        }
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_scroll_files_to(&mut self, offset: f32, cx: &mut Context<Self>) {
+        let scroll = self.scroll[0].0.borrow().base_handle.clone();
+        scroll.set_offset(point(scroll.offset().x, px(-offset)));
+        cx.notify();
+    }
     pub fn refresh_status(&mut self, cx: &mut Context<Self>) {
         if self.repository.is_none() {
             return;
@@ -849,7 +888,7 @@ impl InspectorView {
         if let Some(position) = self
             .rows(&file.area)
             .iter()
-            .position(|row| row.cache_key() == file.cache_key())
+            .position(|row| row.same_identity(&file))
         {
             self.active_file[list] = position;
             self.scroll[list].scroll_to_item(position, ScrollStrategy::Nearest);
@@ -1237,7 +1276,7 @@ impl InspectorView {
                             && self
                                 .intent
                                 .choice()
-                                .is_some_and(|intent| intent.cache_key() == file.cache_key());
+                                .is_some_and(|intent| intent.same_identity(&file));
                         self.cache.remember(
                             file.cache_key(),
                             diff.clone(),
@@ -1356,7 +1395,7 @@ impl InspectorView {
             return div()
                 .size_full()
                 .min_w_0()
-                .child(self.browser.clone())
+                .child(render_cached_view(self.browser.clone(), window))
                 .into_any_element();
         }
         self.sync_viewer(window, cx);
@@ -1444,7 +1483,12 @@ impl InspectorView {
                     .child(div().flex_1())
                     .children(self.diff().map(|diff| diff_counts(diff, p, o))),
             )
-            .child(div().flex_1().min_h_0().child(self.viewer.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(render_cached_view(self.viewer.clone(), window)),
+            )
             .into_any_element()
     }
     fn panel_heading(&self, text: &str, name: IconName) -> Stateful<Div> {
@@ -1582,7 +1626,7 @@ impl InspectorView {
             .filter_map(|index| files.get(index).map(|file| (index, file)))
             .map(|(index, file)| {
                 let selected = self.snapshot.as_ref().is_some_and(|s| {
-                    s.file.cache_key() == file.cache_key()
+                    s.file.same_identity(file)
                         && (!matches!(self.selection, Selection::Commit(_))
                             || self
                                 .intent
@@ -1809,7 +1853,12 @@ impl InspectorView {
                     )
                     .child(controls),
             )
-            .child(div().flex_1().min_h_0().child(self.viewer.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(render_cached_view(self.viewer.clone(), window)),
+            )
             .into_any_element()
     }
     fn render_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2656,6 +2705,19 @@ mod tests {
             ..a.clone()
         };
         assert_ne!(a.cache_key(), b.cache_key());
+        assert!(!a.same_identity(&b));
+        assert!(a.same_identity(&super::FileChoice {
+            path: "another display path".into(),
+            ..a.clone()
+        }));
+        assert!(!a.same_identity(&super::FileChoice {
+            area: "staged".into(),
+            ..a.clone()
+        }));
+        assert!(!a.same_identity(&super::FileChoice {
+            index: 1,
+            ..a.clone()
+        }));
     }
     #[test]
     fn initial_commit_preview_is_ready_without_selection_and_restores_only_chosen_key() {

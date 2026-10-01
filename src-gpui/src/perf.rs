@@ -21,19 +21,43 @@ pub struct Configuration {
     pub output: PathBuf,
     pub repository: String,
     pub cache: PathBuf,
+    pub syntax_files: [String; 2],
+    pub heavy_file: String,
+    pub scroll_files: bool,
 }
 
 impl Configuration {
     pub fn from_env() -> Result<Option<Self>, String> {
         let output = std::env::var_os("MANGROVE_BENCH_OUTPUT").map(PathBuf::from);
-        if output.is_none() {
-            return Ok(None);
-        }
-        Self::from_paths(
+        let Some(mut configuration) = Self::from_paths(
             output,
             std::env::var_os("MANGROVE_BENCH_REPO").map(PathBuf::from),
             std::env::var_os("MANGROVE_BENCH_CACHE").map(PathBuf::from),
-        )
+        )?
+        else {
+            return Ok(None);
+        };
+        for (slot, path) in configuration.syntax_files.iter_mut().enumerate() {
+            let name = format!("MANGROVE_BENCH_SYNTAX_{slot}");
+            Self::file_override(&name, path)?;
+        }
+        Self::file_override("MANGROVE_BENCH_HEAVY", &mut configuration.heavy_file)?;
+        configuration.scroll_files = match std::env::var("MANGROVE_BENCH_SCROLL_TARGET") {
+            Ok(value) if value == "unstaged-files" => true,
+            Ok(value) if value == "diff" => false,
+            Err(std::env::VarError::NotPresent) => false,
+            _ => return Err("MANGROVE_BENCH_SCROLL_TARGET must be diff or unstaged-files".into()),
+        };
+        Ok(Some(configuration))
+    }
+
+    fn file_override(name: &str, path: &mut String) -> Result<(), String> {
+        match std::env::var(name) {
+            Ok(value) if !value.is_empty() => *path = value,
+            Err(std::env::VarError::NotPresent) => {}
+            _ => return Err(format!("{name} must be a nonempty UTF-8 file path")),
+        }
+        Ok(())
     }
 
     fn from_paths(
@@ -56,6 +80,12 @@ impl Configuration {
             output,
             repository,
             cache,
+            syntax_files: [
+                "composables/useDiff.ts".into(),
+                "stores/repositories.ts".into(),
+            ],
+            heavy_file: "generated/catalog.ts".into(),
+            scroll_files: false,
         }))
     }
 
@@ -82,6 +112,10 @@ pub struct PerfSnapshot {
     pub file_count: usize,
     pub history_total: usize,
     pub diff_rows: usize,
+    pub working_ready: bool,
+    pub working_files: usize,
+    pub working_displayed: usize,
+    pub file_scroll_offset: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +126,9 @@ pub enum PerfAction {
     CloseDiff,
     ScrollHistory(f32),
     ScrollDiff(f32),
+    SelectWorking,
+    OpenWorkingFile,
+    ScrollFiles(f32),
     Finish,
 }
 
@@ -119,6 +156,7 @@ struct Report {
 
 #[derive(Serialize, Default)]
 struct Workload {
+    accessibility_active: bool,
     history_total: usize,
     changed_files: usize,
     heavy_diff_rows: usize,
@@ -129,6 +167,11 @@ struct Workload {
     scroll_speed_px_s: usize,
     viewport_width: usize,
     viewport_height: usize,
+    working_files: usize,
+    working_displayed: usize,
+    file_scroll_distance_px: f32,
+    inactive_scroll_ticks: usize,
+    hidden_scroll_ticks: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -139,6 +182,9 @@ enum Stage {
     Syntax,
     Heavy,
     DiffScroll,
+    Working,
+    WorkingDiff,
+    FileScroll,
     Close,
     HistoryScroll,
     Idle,
@@ -146,6 +192,9 @@ enum Stage {
 }
 
 pub struct PerfSession {
+    scroll_files: bool,
+    syntax_files: [String; 2],
+    heavy_file: String,
     output: PathBuf,
     phase_path: PathBuf,
     started: Instant,
@@ -189,6 +238,9 @@ impl PerfSession {
         profiler::set_trace_enabled(true);
         let phase_path = output.with_extension("phase");
         let mut session = Self {
+            scroll_files: configuration.scroll_files,
+            syntax_files: configuration.syntax_files,
+            heavy_file: configuration.heavy_file,
             output,
             phase_path,
             started,
@@ -258,6 +310,7 @@ impl PerfSession {
         let phase = match self.stage {
             Stage::DiffScroll => Some("diff_scroll"),
             Stage::HistoryScroll => Some("history_scroll"),
+            Stage::FileScroll => Some("file_list_scroll"),
             _ => None,
         };
         for event in self.collector.collect_unseen() {
@@ -331,6 +384,31 @@ impl PerfSession {
         self.report.workload.viewport_height = height;
     }
 
+    pub fn set_accessibility_active(&mut self, active: bool) {
+        self.report.workload.accessibility_active |= active;
+    }
+
+    pub fn set_scroll_window_state(&mut self, active: bool, visible: bool) {
+        if self.stage == Stage::FileScroll {
+            self.report.workload.inactive_scroll_ticks += usize::from(!active);
+            self.report.workload.hidden_scroll_ticks += usize::from(!visible);
+        }
+    }
+
+    pub fn syntax_target(&self, path: &str) -> Option<usize> {
+        self.syntax_files
+            .iter()
+            .position(|file| path.ends_with(file))
+    }
+
+    pub fn syntax_file(&self, slot: usize) -> &str {
+        &self.syntax_files[slot]
+    }
+
+    pub fn heavy_file(&self) -> &str {
+        &self.heavy_file
+    }
+
     pub fn tick(&mut self, snapshot: PerfSnapshot) -> Option<PerfAction> {
         self.collect_frames();
         if self.started.elapsed() > Duration::from_secs(120) && self.stage != Stage::Done {
@@ -357,7 +435,43 @@ impl PerfSession {
             }
             Stage::Index if snapshot.index_complete => {
                 self.report.workload.history_total = snapshot.history_total;
-                self.transition(Stage::Select, "selection");
+                if self.scroll_files {
+                    self.transition(Stage::Working, "working_files");
+                } else {
+                    self.transition(Stage::Select, "selection");
+                }
+            }
+            Stage::Working => {
+                if !self.action_sent {
+                    self.action_sent = true;
+                    return Some(PerfAction::SelectWorking);
+                }
+                if snapshot.working_ready && snapshot.working_displayed > 0 {
+                    self.report.workload.working_files = snapshot.working_files;
+                    self.report.workload.working_displayed = snapshot.working_displayed;
+                    self.transition(Stage::WorkingDiff, "working_diff");
+                    return Some(PerfAction::OpenWorkingFile);
+                }
+            }
+            Stage::WorkingDiff
+                if self.submitted_ready(
+                    snapshot.working_ready && snapshot.diff_ready && snapshot.heavy_diff,
+                    "open_working_diff",
+                ) =>
+            {
+                self.report.workload.heavy_diff_rows = snapshot.diff_rows;
+                self.report.workload.heavy_diff_colored = usize::from(snapshot.syntax_ready);
+                self.transition(Stage::FileScroll, "file_list_scroll");
+                return Some(PerfAction::ScrollFiles(0.));
+            }
+            Stage::FileScroll => {
+                self.report.workload.file_scroll_distance_px = snapshot.file_scroll_offset;
+                let seconds = self.stage_started.elapsed().as_secs_f32();
+                if seconds >= SCROLL_SECONDS {
+                    self.transition(Stage::Idle, "idle");
+                } else {
+                    return Some(PerfAction::ScrollFiles(seconds * SCROLL_SPEED));
+                }
             }
             Stage::Select => {
                 let target = if self.sample.is_multiple_of(2) { 1 } else { 0 };

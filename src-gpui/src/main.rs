@@ -19,6 +19,7 @@ mod sidebar;
 mod syntax;
 mod tabs;
 mod theme;
+mod view_cache;
 mod virtual_scroll;
 
 use gpui_kit::{prelude::*, *};
