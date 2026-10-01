@@ -2,6 +2,8 @@
 
 Ce document conserve les mesures datées du moteur `mangrove-core`, indépendant de l'interface. Les commandes ci-dessous utilisent Cargo ; le générateur de fixture nécessite Node.js et Git, sans installation npm. La comparaison historique des interfaces est conservée séparément dans [performance-gpui.md](performance-gpui.md), avec ses limites de protocole.
 
+Les corrections de l’audit #17, leurs mesures avant/après et la vérification de l’application courante sont décrites dans [performance-17.md](performance-17.md).
+
 ## Ouverture, indexation et recherche
 
 Mesure du 30 septembre 2026, Apple M4 Pro / macOS ARM, compilation Rust release avec ThinLTO. Dépôt synthétique de 10 005 commits, fichiers textuels petits, branches, tag et merge à trois parents.

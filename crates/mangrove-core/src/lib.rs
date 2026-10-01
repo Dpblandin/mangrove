@@ -6,6 +6,7 @@ mod graph;
 mod images;
 pub mod model;
 mod repository_context;
+mod similarity;
 mod working_tree;
 mod worktree_filter;
 
@@ -14,14 +15,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, Weak,
     },
     thread,
     time::Instant,
 };
 
-use git2::{DiffFindOptions, DiffOptions, Oid, Repository, Sort};
+use git2::{DiffOptions, Oid, Repository, Sort};
 use model::*;
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -33,6 +34,8 @@ const MAX_DIFF_LINES: usize = 2_000;
 const MAX_CHANGED_FILES: usize = 5_000;
 const MAX_OPEN_REPOSITORIES: usize = 8;
 const MAX_REPOSITORY_NAMES: usize = 6;
+const MAX_SEARCH_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SEARCH_SNAPSHOTS: usize = 4;
 
 pub fn repository_names(paths: &[String]) -> Result<Vec<RepositoryName>> {
     if paths.len() > MAX_REPOSITORY_NAMES {
@@ -82,12 +85,15 @@ struct Session {
     index_run: String,
     source: PathBuf,
     database: PathBuf,
+    reads: cache::ReadPool,
     write_lock: Arc<Mutex<()>>,
-    indexed: AtomicUsize,
-    complete: AtomicBool,
+    buffered: bool,
+    progress: Mutex<IndexProgress>,
+    searches: Mutex<SearchCache>,
     cancel: AtomicBool,
     error: Mutex<Option<String>>,
     commit_diffs: Mutex<commit_diff::CommitDiffCache>,
+    working_tree: Mutex<working_tree::WorkingTreeCache>,
     opened: Instant,
 }
 
@@ -108,11 +114,50 @@ struct IndexedCommit {
 
 impl Session {
     fn progress(&self) -> IndexProgress {
-        IndexProgress {
-            indexed: self.indexed.load(Ordering::Acquire),
-            complete: self.complete.load(Ordering::Acquire),
-            error: self.error.lock().unwrap().clone(),
+        let mut progress = self.progress.lock().unwrap().clone();
+        progress.error = self.error.lock().unwrap().clone();
+        progress
+    }
+}
+
+#[derive(Default)]
+struct SearchCache {
+    version: Option<(String, usize)>,
+    snapshots: VecDeque<(String, Arc<Vec<usize>>)>,
+    bytes: usize,
+}
+
+impl SearchCache {
+    fn get(&mut self, query: &str, run: &str, indexed: usize) -> Option<Arc<Vec<usize>>> {
+        if self
+            .version
+            .as_ref()
+            .is_none_or(|version| version.0 != run || version.1 != indexed)
+        {
+            self.snapshots.clear();
+            self.bytes = 0;
+            self.version = Some((run.to_owned(), indexed));
         }
+        let position = self.snapshots.iter().position(|(key, _)| key == query)?;
+        let entry = self.snapshots.remove(position).unwrap();
+        let snapshot = entry.1.clone();
+        self.snapshots.push_back(entry);
+        Some(snapshot)
+    }
+
+    fn insert(&mut self, query: String, positions: Vec<usize>) -> Arc<Vec<usize>> {
+        let positions = Arc::new(positions);
+        let bytes = positions.capacity() * std::mem::size_of::<usize>();
+        while !self.snapshots.is_empty()
+            && (self.snapshots.len() >= MAX_SEARCH_SNAPSHOTS
+                || self.bytes.saturating_add(bytes) > MAX_SEARCH_SNAPSHOT_BYTES)
+        {
+            let (_, previous) = self.snapshots.pop_front().unwrap();
+            self.bytes -= previous.capacity() * std::mem::size_of::<usize>();
+        }
+        self.bytes += bytes;
+        self.snapshots.push_back((query, positions.clone()));
+        positions
     }
 }
 
@@ -167,7 +212,7 @@ impl IndexPool {
             if let Err(error) = index_repository(&session) {
                 if !session.cancel.load(Ordering::Acquire) {
                     *session.error.lock().unwrap() = Some(error);
-                    session.complete.store(true, Ordering::Release);
+                    session.progress.lock().unwrap().complete = true;
                 }
             }
         }
@@ -185,6 +230,7 @@ pub struct Workspace {
     cache_dir: PathBuf,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     write_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    open_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     generation: AtomicU64,
     workers: Arc<IndexPool>,
     fetch_lock: Mutex<()>,
@@ -197,6 +243,7 @@ impl Workspace {
             cache_dir,
             sessions: Mutex::new(HashMap::new()),
             write_locks: Mutex::new(HashMap::new()),
+            open_locks: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(1),
             workers: IndexPool::start(),
             fetch_lock: Mutex::new(()),
@@ -222,9 +269,6 @@ impl Workspace {
                 "Solo accepte au plus 64 branches, avec des noms de 1 024 octets maximum.".into(),
             );
         }
-        // Read repository state in the same critical section that publishes its
-        // session; a delayed open must not replace a newer fingerprint.
-        let mut sessions = self.sessions.lock().unwrap();
         let repository = open_source_repository(path)?;
         let git_dir = repository
             .path()
@@ -261,6 +305,10 @@ impl Workspace {
         fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("Impossible de créer le cache : {e}"))?;
         let key = format!("{:x}", Sha256::digest(git_dir.to_string_lossy().as_bytes()));
+        // Serialize refreshes for this repository, while page/diff reads and
+        // refreshes of other repositories can still acquire their sessions.
+        let open_lock = repository_lock(&self.open_locks, &key);
+        let _open_guard = open_lock.lock().unwrap();
         let head = repository
             .head()
             .ok()
@@ -374,15 +422,16 @@ impl Workspace {
                 .map_err(|e| e.to_string())?,
             )
         );
-        if let Some(session) = sessions.get(&key) {
+        let existing = self.sessions.lock().unwrap().get(&key).cloned();
+        if let Some(session) = existing {
             if session.fingerprint == fingerprint
                 && !session.cancel.load(Ordering::Acquire)
                 && session.error.lock().unwrap().is_none()
             {
                 let reusable = (|| {
-                    let mut connection = cache::connect(&session.database, true)?;
+                    let mut connection = session.reads.acquire()?;
                     let snapshot = connection.transaction().map_err(|e| e.to_string())?;
-                    is_current(&snapshot, session)
+                    is_current(&snapshot, &session)
                 })();
                 if reusable == Ok(true) {
                     let mut info = session.info.clone();
@@ -392,50 +441,59 @@ impl Workspace {
             }
             session.cancel.store(true, Ordering::Release);
         }
-        let write_lock = {
-            let mut locks = self.write_locks.lock().unwrap();
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            let lock = locks.get(&key).and_then(Weak::upgrade).unwrap_or_default();
-            locks.insert(key.clone(), Arc::downgrade(&lock));
-            lock
-        };
+        let write_lock = repository_lock(&self.write_locks, &key);
         let database = cache_dir.join(format!("{key}.sqlite"));
-        let (indexed, complete, index_run) = {
+        let (indexed, complete, index_run, published_run, buffered) = {
             let _guard = write_lock.lock().unwrap();
             let mut connection = cache::connect(&database, false)?;
             cache::initialize(&connection)?;
             let complete = cache::meta(&connection, "fingerprint")?.as_deref()
                 == Some(&fingerprint)
                 && cache::meta(&connection, "complete")?.as_deref() == Some("1");
+            let previous_run = cache::meta(&connection, "index_run")?.unwrap_or_default();
+            let buffered = !complete && !previous_run.is_empty();
             let index_run = if complete {
-                cache::meta(&connection, "index_run")?.unwrap_or_default()
+                previous_run.clone()
             } else {
                 new_index_run()
+            };
+            let published_run = if buffered {
+                previous_run
+            } else {
+                index_run.clone()
             };
             if !complete {
                 let transaction = connection.transaction().map_err(|e| e.to_string())?;
                 transaction
-                    .execute_batch("DELETE FROM walk; DELETE FROM refs;")
+                    .execute_batch("DELETE FROM walk_build; DELETE FROM refs_build;")
                     .map_err(|e| e.to_string())?;
-                cache::set_meta(&transaction, "fingerprint", &fingerprint)?;
+                cache::set_meta(&transaction, "lease_fingerprint", &fingerprint)?;
+                cache::set_meta(&transaction, "lease_run", &index_run)?;
                 cache::set_meta(&transaction, "complete", "0")?;
-                cache::set_meta(&transaction, "index_run", &index_run)?;
-                for reference in &references {
+                if !buffered {
+                    cache::set_meta(&transaction, "fingerprint", &fingerprint)?;
+                    cache::set_meta(&transaction, "index_run", &index_run)?;
+                    cache::set_meta(&transaction, "indexed", "0")?;
                     transaction
-                        .execute(
-                            "INSERT INTO refs(name, label, sha) VALUES(?1, ?2, ?3)",
-                            params![reference.name, reference.label, reference.sha],
-                        )
+                        .execute_batch("DELETE FROM walk; DELETE FROM refs;")
                         .map_err(|e| e.to_string())?;
                 }
+                let table = if buffered { "refs_build" } else { "refs" };
+                let mut insert = transaction
+                    .prepare_cached(&format!(
+                        "INSERT INTO {table}(name, label, sha) VALUES(?1, ?2, ?3)"
+                    ))
+                    .map_err(|e| e.to_string())?;
+                for reference in &references {
+                    insert
+                        .execute(params![reference.name, reference.label, reference.sha])
+                        .map_err(|e| e.to_string())?;
+                }
+                drop(insert);
                 transaction.commit().map_err(|e| e.to_string())?;
             }
-            let count = connection
-                .query_row("SELECT COUNT(*) FROM walk", [], |row| {
-                    cache::row_usize(row, 0)
-                })
-                .map_err(|e| e.to_string())?;
-            (count, complete, index_run)
+            let indexed = published_count(&connection)?;
+            (indexed, complete, index_run, published_run, buffered)
         };
         let info = RepositoryInfo {
             id: format!(
@@ -453,6 +511,7 @@ impl Workspace {
             index: IndexProgress {
                 indexed,
                 complete,
+                index_run: published_run,
                 error: None,
             },
         };
@@ -461,27 +520,38 @@ impl Workspace {
             fingerprint,
             index_run,
             source,
+            reads: cache::ReadPool::new(database.clone()),
             database,
             write_lock,
-            indexed: AtomicUsize::new(indexed),
-            complete: AtomicBool::new(complete),
+            buffered,
+            progress: Mutex::new(info.index.clone()),
+            searches: Mutex::default(),
             cancel: AtomicBool::new(false),
             error: Mutex::new(None),
             commit_diffs: Mutex::default(),
+            working_tree: Mutex::default(),
             opened: Instant::now(),
         });
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut retired = None;
         if !sessions.contains_key(&key) && sessions.len() >= MAX_OPEN_REPOSITORIES {
             if let Some(oldest) = sessions
                 .iter()
                 .min_by_key(|(_, value)| value.opened)
                 .map(|(key, _)| key.clone())
             {
-                if let Some(old) = sessions.remove(&oldest) {
+                retired = sessions.remove(&oldest);
+                if let Some(old) = &retired {
                     old.cancel.store(true, Ordering::Release);
                 }
             }
         }
-        sessions.insert(key, session.clone());
+        let replaced = sessions.insert(key, session.clone());
+        drop(sessions);
+        // Pools and cached result vectors can be large. Retire them outside
+        // the registry lock so unrelated session reads are never held up.
+        drop(retired);
+        drop(replaced);
         if !complete {
             self.workers.submit(session);
         }
@@ -510,103 +580,150 @@ impl Workspace {
         query: &str,
     ) -> Result<CommitPage> {
         let session = self.session(id)?;
-        let mut connection = cache::connect(&session.database, true)?;
+        let mut connection = session.reads.acquire()?;
         let connection = connection.transaction().map_err(|e| e.to_string())?;
         ensure_current(&connection, &session)?;
-        let limit = limit.clamp(1, 256) as i64;
-        let offset = i64::try_from(offset).map_err(|_| "Position invalide.")?;
+        let limit = limit.clamp(1, 256);
+        i64::try_from(offset).map_err(|_| "Position invalide.")?;
         let query: String = query.trim().chars().take(256).collect();
+        let index = published_progress(&connection, &session)?;
+        let indexed = index.indexed;
+        let index_run = &index.index_run;
         let (commits, total) = if query.is_empty() {
             let sql = format!(
                 "SELECT {} FROM walk w JOIN commits c ON c.sha = w.sha
-                 WHERE w.position >= ?1 ORDER BY w.position LIMIT ?2",
+                 WHERE w.position >= ?1 AND w.position < ?3 ORDER BY w.position LIMIT ?2",
                 cache::COLUMNS,
             );
-            let mut statement = connection.prepare(&sql).map_err(|e| e.to_string())?;
-            let commits = statement
-                .query_map(params![offset, limit], cache::row_commit)
-                .map_err(|e| e.to_string())?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| e.to_string())?;
-            let total = connection
-                .query_row("SELECT COUNT(*) FROM walk", [], |row| {
-                    cache::row_usize(row, 0)
-                })
-                .map_err(|e| e.to_string())?;
-            (commits, total)
-        } else {
-            let fts = cache::search_terms(&query);
-            let sha = query
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-                .then(|| format!("{}*", query.to_ascii_lowercase()));
-            let search_cte = search_cte(sha.is_some());
-            let reference = cache::like_prefix(&query);
-            let sql = format!(
-                "{search_cte} SELECT {} FROM matched m
-                 JOIN commits c ON c.id = m.id JOIN walk w ON w.sha = c.sha
-                 ORDER BY w.position LIMIT ?4 OFFSET ?5",
-                cache::COLUMNS,
-            );
-            let mut statement = connection.prepare(&sql).map_err(|e| e.to_string())?;
+            let mut statement = connection.prepare_cached(&sql).map_err(|e| e.to_string())?;
             let commits = statement
                 .query_map(
-                    params![fts, sha, reference, limit, offset],
+                    params![offset as i64, limit as i64, indexed as i64],
                     cache::row_commit,
                 )
                 .map_err(|e| e.to_string())?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| e.to_string())?;
-            let total = connection.query_row(
-                &format!("{search_cte} SELECT COUNT(*) FROM matched m JOIN commits c ON c.id = m.id JOIN walk w ON w.sha = c.sha"),
-                params![fts, sha, reference], |row| cache::row_usize(row, 0),
-            ).map_err(|e| e.to_string())?;
-            (commits, total)
-        };
-        let indexed = if query.is_empty() {
-            total
+            (commits, indexed)
         } else {
-            connection
-                .query_row("SELECT COUNT(*) FROM walk", [], |row| {
-                    cache::row_usize(row, 0)
-                })
+            let mut cache = session.searches.lock().unwrap();
+            let (positions, total) = if let Some(snapshot) = cache.get(&query, index_run, indexed) {
+                let page = snapshot
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .copied()
+                    .collect::<Vec<_>>();
+                (page, snapshot.len())
+            } else {
+                let fts = cache::search_terms(&query);
+                let sha = query
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+                    .then(|| format!("{}*", query.to_ascii_lowercase()));
+                let cte = search_cte(sha.is_some());
+                // CROSS JOIN keeps selective matches ahead of the walk scan.
+                // Only positions are materialized; graph JSON is read for the
+                // requested page after the complete matching set is known.
+                let sql = format!(
+                    "{cte} SELECT w.position FROM matched m
+                     CROSS JOIN commits c ON c.id = m.id
+                     CROSS JOIN walk w ON w.sha = c.sha
+                     WHERE w.position < ?4 ORDER BY w.position"
+                );
+                let mut statement = connection.prepare_cached(&sql).map_err(|e| e.to_string())?;
+                let mut rows = statement
+                    .query(params![
+                        fts,
+                        sha,
+                        cache::like_prefix(&query),
+                        indexed as i64
+                    ])
+                    .map_err(|e| e.to_string())?;
+                let maximum = MAX_SEARCH_SNAPSHOT_BYTES / std::mem::size_of::<usize>();
+                let mut snapshot = Vec::new();
+                let mut page = Vec::with_capacity(limit);
+                let mut total = 0usize;
+                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                    let position = cache::row_usize(row, 0).map_err(|e| e.to_string())?;
+                    if total < maximum {
+                        snapshot.push(position);
+                    }
+                    if total >= offset && total.saturating_sub(offset) < limit {
+                        page.push(position);
+                    }
+                    total += 1;
+                }
+                if total <= maximum {
+                    cache.insert(query.clone(), snapshot);
+                }
+                // An exceptionally large match set stays bounded in memory.
+                // Its requested page and total are still computed in one pass.
+                (page, total)
+            };
+            drop(cache);
+            let positions = serde_json::to_string(&positions).map_err(|e| e.to_string())?;
+            let sql = format!(
+                "SELECT {} FROM json_each(?1) p
+                 JOIN walk w ON w.position = p.value
+                 JOIN commits c ON c.sha = w.sha ORDER BY w.position",
+                cache::COLUMNS,
+            );
+            let mut statement = connection.prepare_cached(&sql).map_err(|e| e.to_string())?;
+            let commits = statement
+                .query_map([positions], cache::row_commit)
                 .map_err(|e| e.to_string())?
-        };
-        let error = session.error.lock().unwrap().clone();
-        let complete =
-            cache::meta(&connection, "complete")?.as_deref() == Some("1") || error.is_some();
-        // Progress belongs to the same SQLite snapshot as the rows. Otherwise a
-        // final worker commit could advertise complete=true with an older total.
-        let index = IndexProgress {
-            indexed,
-            complete,
-            error,
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            (commits, total)
         };
         Ok(CommitPage {
             commits,
             total,
-            offset: offset as usize,
+            offset,
             index,
         })
     }
 
     pub fn commit_position(&self, id: &str, sha: &str) -> Result<Option<usize>> {
+        self.commit_position_with_status(id, sha)
+            .map(|(position, _)| position)
+    }
+
+    /// The position and traversal run are read from one snapshot. A buffered
+    /// publication between two separate calls must never redirect a jump to
+    /// the same position in a different traversal.
+    pub fn commit_position_with_status(
+        &self,
+        id: &str,
+        sha: &str,
+    ) -> Result<(Option<usize>, IndexProgress)> {
         let session = self.session(id)?;
-        let mut connection = cache::connect(&session.database, true)?;
+        let mut connection = session.reads.acquire()?;
         let connection = connection.transaction().map_err(|e| e.to_string())?;
         ensure_current(&connection, &session)?;
-        connection
+        let position = connection
             .query_row("SELECT position FROM walk WHERE sha = ?1", [sha], |row| {
                 cache::row_usize(row, 0)
             })
             .optional()
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok((position, published_progress(&connection, &session)?))
     }
 
     pub fn commit_details(&self, id: &str, sha: &str) -> Result<CommitDetails> {
+        self.commit_details_shared(id, sha)
+            .map(|details| (*details).clone())
+    }
+
+    pub fn commit_details_shared(&self, id: &str, sha: &str) -> Result<Arc<CommitDetails>> {
         let session = self.session(id)?;
+        let oid = Oid::from_str(sha).map_err(|_| "Identifiant de commit invalide.")?;
+        if let Some(details) = session.commit_diffs.lock().unwrap().get_details(oid) {
+            return Ok(details);
+        }
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        let (commit, diff) = commit_diff(&repository, sha)?;
+        let (commit, diff, similarity_limited) = commit_diff(&repository, sha)?;
         session
             .commit_diffs
             .lock()
@@ -619,7 +736,7 @@ impl Workspace {
             .enumerate()
             .map(|(index, delta)| changed_file(index, &delta))
             .collect();
-        Ok(CommitDetails {
+        let details = Arc::new(CommitDetails {
             sha: commit.id().to_string(),
             message: String::from_utf8_lossy(commit.message_bytes()).into_owned(),
             author: String::from_utf8_lossy(author.name_bytes()).into_owned(),
@@ -628,7 +745,14 @@ impl Workspace {
             parents: commit.parent_ids().map(|id| id.to_string()).collect(),
             files,
             file_count: diff.deltas().len(),
-        })
+            similarity_limited,
+        });
+        session
+            .commit_diffs
+            .lock()
+            .unwrap()
+            .remember_details(oid, details.clone());
+        Ok(details)
     }
 
     pub fn file_diff(&self, id: &str, sha: &str, file_index: usize) -> Result<FileDiff> {
@@ -639,7 +763,7 @@ impl Workspace {
         if let Some(files) = files {
             return files.file_diff(&repository, oid, file_index);
         }
-        let (commit, diff) = commit_diff(&repository, sha)?;
+        let (commit, diff, _) = commit_diff(&repository, sha)?;
         session
             .commit_diffs
             .lock()
@@ -648,7 +772,7 @@ impl Workspace {
         if file_index >= diff.deltas().len() {
             return Err("Fichier introuvable dans ce commit.".into());
         }
-        render_file_diff(&diff, file_index)
+        commit_diff::render_bounded(&repository, &diff, file_index)
     }
 
     pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {
@@ -678,7 +802,8 @@ impl Workspace {
     pub fn working_tree_status(&self, id: &str) -> Result<WorkingTreeStatus> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        working_tree::status(&repository)
+        let mut cache = session.working_tree.lock().unwrap();
+        working_tree::status(&repository, &mut cache)
     }
 
     pub fn file_content(&self, id: &str, sha: &str, file_key: &str) -> Result<FileContent> {
@@ -696,9 +821,12 @@ impl Workspace {
                 file_key,
                 comparison,
             } => file_browser::images(&repository, sha, file_key, *comparison),
-            FileImageSource::WorkingTree { area, file_key } => {
-                working_tree::images(&repository, area, file_key)
-            }
+            FileImageSource::WorkingTree { area, file_key } => working_tree::images(
+                &repository,
+                area,
+                file_key,
+                &mut session.working_tree.lock().unwrap(),
+            ),
             FileImageSource::Stash {
                 sha,
                 area,
@@ -734,7 +862,8 @@ impl Workspace {
     pub fn working_tree_diff(&self, id: &str, area: &str, file_key: &str) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        working_tree::diff(&repository, area, file_key)
+        let mut cache = session.working_tree.lock().unwrap();
+        working_tree::diff(&repository, area, file_key, &mut cache)
     }
 }
 
@@ -770,6 +899,36 @@ fn resolve_cache_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+fn repository_lock(locks: &Mutex<HashMap<String, Weak<Mutex<()>>>>, key: &str) -> Arc<Mutex<()>> {
+    let mut locks = locks.lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = locks.get(key).and_then(Weak::upgrade).unwrap_or_default();
+    locks.insert(key.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+fn published_count(connection: &rusqlite::Connection) -> Result<usize> {
+    cache::meta(connection, "indexed")?
+        .ok_or_else(|| "Le compteur d'historique est absent.".to_owned())?
+        .parse()
+        .map_err(|_| "Le compteur d'historique est invalide.".to_owned())
+}
+
+fn published_progress(
+    connection: &rusqlite::Connection,
+    session: &Session,
+) -> Result<IndexProgress> {
+    let error = session.error.lock().unwrap().clone();
+    // All traversal fields belong to the caller's SQLite snapshot. In-memory
+    // progress may already describe the run published after it began.
+    Ok(IndexProgress {
+        indexed: published_count(connection)?,
+        complete: cache::meta(connection, "complete")?.as_deref() == Some("1") || error.is_some(),
+        index_run: cache::meta(connection, "index_run")?.unwrap_or_default(),
+        error,
+    })
+}
+
 fn new_index_run() -> String {
     static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
     format!(
@@ -792,8 +951,8 @@ fn ensure_current(connection: &rusqlite::Connection, session: &Session) -> Resul
 
 fn is_current(connection: &rusqlite::Connection, session: &Session) -> Result<bool> {
     Ok(!(session.cancel.load(Ordering::Acquire)
-        || cache::meta(connection, "fingerprint")?.as_deref() != Some(&session.fingerprint)
-        || cache::meta(connection, "index_run")?.as_deref() != Some(&session.index_run)))
+        || cache::meta(connection, "lease_fingerprint")?.as_deref() != Some(&session.fingerprint)
+        || cache::meta(connection, "lease_run")?.as_deref() != Some(&session.index_run)))
 }
 
 fn open_source_repository(path: &str) -> Result<Repository> {
@@ -859,7 +1018,7 @@ fn repository_head_name(repository: &Repository) -> String {
 fn commit_diff<'a>(
     repository: &'a Repository,
     sha: &str,
-) -> Result<(git2::Commit<'a>, git2::Diff<'a>)> {
+) -> Result<(git2::Commit<'a>, git2::Diff<'a>, Option<String>)> {
     let oid = Oid::from_str(sha).map_err(|_| "Identifiant de commit invalide.")?;
     let commit = repository.find_commit(oid).map_err(|e| e.to_string())?;
     let tree = commit.tree().map_err(|e| e.to_string())?;
@@ -873,8 +1032,8 @@ fn commit_diff<'a>(
     } else {
         None
     };
-    let diff = tree_diff(repository, parent.as_ref(), &tree)?;
-    Ok((commit, diff))
+    let (diff, limit) = tree_diff_with_limit(repository, parent.as_ref(), &tree)?;
+    Ok((commit, diff, limit))
 }
 
 fn tree_diff<'repo>(
@@ -882,16 +1041,24 @@ fn tree_diff<'repo>(
     old: Option<&git2::Tree<'repo>>,
     new: &git2::Tree<'repo>,
 ) -> Result<git2::Diff<'repo>> {
+    tree_diff_with_limit(repository, old, new).map(|(diff, _)| diff)
+}
+
+fn tree_diff_with_limit<'repo>(
+    repository: &'repo Repository,
+    old: Option<&git2::Tree<'repo>>,
+    new: &git2::Tree<'repo>,
+) -> Result<(git2::Diff<'repo>, Option<String>)> {
     let mut options = DiffOptions::new();
-    options.include_typechange(true).max_size(MAX_FILE_SIZE);
+    options
+        .include_typechange(true)
+        .max_size(MAX_FILE_SIZE)
+        .skip_binary_check(true);
     let mut diff = repository
         .diff_tree_to_tree(old, Some(new), Some(&mut options))
         .map_err(|e| e.to_string())?;
-    let mut find = DiffFindOptions::new();
-    find.renames(true).rename_limit(200);
-    diff.find_similar(Some(&mut find))
-        .map_err(|e| e.to_string())?;
-    Ok(diff)
+    let limited = similarity::find_renames(repository, &mut diff, false)?;
+    Ok((diff, limited))
 }
 
 fn index_repository(session: &Session) -> Result<()> {
@@ -974,11 +1141,15 @@ fn index_repository(session: &Session) -> Result<()> {
                     "INSERT OR IGNORE INTO commits(sha, summary, message, author, email, time, parents)
                      VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 ).map_err(|e| e.to_string())?;
+                let table = if session.buffered {
+                    "walk_build"
+                } else {
+                    "walk"
+                };
                 let mut order = transaction
-                    .prepare_cached("INSERT INTO walk(position, sha, graph) VALUES(?1, ?2, ?3)")
-                    .map_err(|e| e.to_string())?;
-                let mut parents = transaction
-                    .prepare_cached("UPDATE commits SET parents = ?2 WHERE sha = ?1")
+                    .prepare_cached(&format!(
+                        "INSERT INTO {table}(position, sha, graph, parents) VALUES(?1, ?2, ?3, ?4)"
+                    ))
                     .map_err(|e| e.to_string())?;
                 for value in values {
                     if let Some(metadata) = value.metadata {
@@ -993,29 +1164,59 @@ fn index_repository(session: &Session) -> Result<()> {
                                 value.parents
                             ])
                             .map_err(|e| e.to_string())?;
-                    } else {
-                        // Metadata text remains immutable, but effective parents
-                        // change when a shallow boundary is added or removed.
-                        parents
-                            .execute(params![value.sha, value.parents])
-                            .map_err(|e| e.to_string())?;
                     }
+                    // Effective shallow parents belong to the traversal, not
+                    // immutable commit metadata shared with the previous run.
                     order
-                        .execute(params![position as i64, value.sha, value.graph])
+                        .execute(params![
+                            position as i64,
+                            value.sha,
+                            value.graph,
+                            value.parents
+                        ])
                         .map_err(|e| e.to_string())?;
                     position += 1;
                 }
+            }
+            if exhausted && session.buffered {
+                // Schema changes are transactional in SQLite: readers see
+                // either the old traversal and refs or the finished new pair.
+                // Renaming avoids copying every graph row during publication.
+                transaction
+                    .execute_batch(
+                        "DROP TABLE walk;
+                     ALTER TABLE walk_build RENAME TO walk;
+                     CREATE TABLE walk_build (
+                         position INTEGER PRIMARY KEY, sha TEXT NOT NULL UNIQUE,
+                         graph TEXT NOT NULL, parents TEXT NOT NULL
+                     );
+                     DROP TABLE refs;
+                     ALTER TABLE refs_build RENAME TO refs;
+                     CREATE TABLE refs_build (
+                         name TEXT PRIMARY KEY, label TEXT NOT NULL, sha TEXT NOT NULL
+                     );",
+                    )
+                    .map_err(|e| e.to_string())?;
+                cache::set_meta(&transaction, "index_run", &session.index_run)?;
+                cache::set_meta(&transaction, "fingerprint", &session.fingerprint)?;
+            }
+            if !session.buffered || exhausted {
+                cache::set_meta(&transaction, "indexed", &position.to_string())?;
             }
             if exhausted {
                 cache::set_meta(&transaction, "complete", "1")?;
             }
             transaction.commit().map_err(|e| e.to_string())?;
-            session.indexed.store(position, Ordering::Release);
+            if !session.buffered || exhausted {
+                let mut progress = session.progress.lock().unwrap();
+                progress.indexed = position;
+                progress.index_run = session.index_run.clone();
+            }
             if exhausted {
                 // Closing SQLite may still checkpoint and remove WAL sidecars.
                 // Publish completion only once those cache writes are finished.
                 drop(connection);
-                session.complete.store(true, Ordering::Release);
+                session.progress.lock().unwrap().complete = true;
                 return Ok(());
             }
         }

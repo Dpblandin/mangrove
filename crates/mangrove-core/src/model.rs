@@ -33,9 +33,18 @@ pub struct RepositoryName {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexProgress {
+    pub index_run: String,
     pub indexed: usize,
     pub complete: bool,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphEdgeKind {
+    Through,
+    Incoming,
+    Parent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,7 +53,7 @@ pub struct GraphEdge {
     pub from: usize,
     pub to: usize,
     pub color: usize,
-    pub kind: String,
+    pub kind: GraphEdgeKind,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,7 +87,7 @@ pub struct CommitPage {
     pub index: IndexProgress,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedFile {
     pub index: usize,
@@ -100,6 +109,7 @@ pub struct WorkingTreeFile {
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkingTreeStatus {
+    pub similarity_limited: Option<String>,
     pub available: bool,
     pub staged: Vec<WorkingTreeFile>,
     pub unstaged: Vec<WorkingTreeFile>,
@@ -107,9 +117,10 @@ pub struct WorkingTreeStatus {
     pub unstaged_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitDetails {
+    pub similarity_limited: Option<String>,
     pub sha: String,
     pub message: String,
     pub author: String,

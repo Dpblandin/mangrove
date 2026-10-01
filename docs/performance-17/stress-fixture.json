@@ -1,0 +1,14 @@
+{
+  "destination": "<isolated synthetic repository>",
+  "base": "8c6c194b30f84996b08b2f6d728445b85bd6074d",
+  "syntax": "b4180b772643de3228abce3308d9e1299476bd62",
+  "renames": "fa012e88195b580cc4519bcce018a0d4e1bb073f",
+  "merge": "87276461b23f20a045e82255bbb443019a90dda2",
+  "longSummary": "1b99adb56dd3a029e4b78d4af0a1f0e6a26efdf7",
+  "hunks": 150,
+  "rename_files": 1000,
+  "graph_parents": 40,
+  "tags": 50000,
+  "validated_merge_parents": 40,
+  "validated_merge_exact_renames": 1001
+}

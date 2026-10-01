@@ -1,4 +1,5 @@
-use mangrove_core::model::{CommitRow, Reference};
+use gpui_kit::SharedString;
+use mangrove_core::model::{CommitPage, CommitRow, IndexProgress, Reference};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{
@@ -10,6 +11,9 @@ use std::{
 
 pub const PAGE_SIZE: usize = 128;
 const MAX_PAGES: usize = 12;
+const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GRAPH_EDGES: usize = 2_000_000;
+const MAX_SUBJECT_CHARS: usize = 500;
 
 #[derive(Default)]
 struct ReadCounts {
@@ -194,7 +198,17 @@ impl PositionRequests {
     }
 }
 
-pub fn group_references(references: &[Reference]) -> HashMap<String, Arc<Vec<Reference>>> {
+pub struct ReferenceGroup {
+    pub references: Arc<Vec<Reference>>,
+    pub badges: Vec<Arc<Reference>>,
+    pub has_branches: bool,
+}
+
+pub fn group_references(
+    references: &[Reference],
+    solo: &[String],
+) -> HashMap<String, Arc<ReferenceGroup>> {
+    let solo: HashSet<_> = solo.iter().map(String::as_str).collect();
     let mut groups = HashMap::<String, Vec<Reference>>::new();
     for reference in references {
         groups
@@ -204,97 +218,339 @@ pub fn group_references(references: &[Reference]) -> HashMap<String, Arc<Vec<Ref
     }
     groups
         .into_iter()
-        .map(|(sha, references)| (sha, Arc::new(references)))
+        .map(|(sha, references)| {
+            let has_branches = references
+                .iter()
+                .any(|reference| reference.kind == "local" || reference.kind == "remote");
+            let badges = badges_for_solo(&references, &solo);
+            (
+                sha,
+                Arc::new(ReferenceGroup {
+                    references: Arc::new(references),
+                    badges,
+                    has_branches,
+                }),
+            )
+        })
         .collect()
 }
 
-pub fn reference_badges(references: &[Reference], solo: &[String]) -> Vec<Arc<Reference>> {
+#[cfg(test)]
+fn reference_badges(references: &[Reference], solo: &[String]) -> Vec<Arc<Reference>> {
+    let solo: HashSet<_> = solo.iter().map(String::as_str).collect();
+    badges_for_solo(references, &solo)
+}
+
+fn badges_for_solo(references: &[Reference], solo: &HashSet<&str>) -> Vec<Arc<Reference>> {
     references
         .iter()
-        .filter(|reference| solo.is_empty() || solo.contains(&reference.name))
+        .filter(|reference| solo.is_empty() || solo.contains(reference.name.as_str()))
         .take(2)
         .map(|reference| Arc::new(reference.clone()))
         .collect()
 }
 
+/// Text used by a virtualized row is prepared once, away from the UI thread.
+/// The full commit remains available for selection and inspector operations.
+pub struct HistoryRow {
+    pub commit: Arc<CommitRow>,
+    pub subject: SharedString,
+    pub author: SharedString,
+    pub initials: SharedString,
+    pub date: SharedString,
+    pub short_sha: SharedString,
+}
+
+impl HistoryRow {
+    fn new(commit: CommitRow) -> Self {
+        let subject = if commit.summary.is_empty() {
+            "(sans message)".to_owned()
+        } else {
+            let mut chars = commit.summary.chars();
+            let mut subject: String = chars.by_ref().take(MAX_SUBJECT_CHARS).collect();
+            if chars.next().is_some() {
+                subject.push('…');
+            }
+            subject
+        };
+        Self {
+            subject: subject.into(),
+            author: commit.author.clone().into(),
+            initials: crate::format::initials(&commit.author).into(),
+            date: crate::history_view::short_date(commit.time).into(),
+            short_sha: crate::format::short_sha(&commit.sha).into(),
+            commit: Arc::new(commit),
+        }
+    }
+
+    fn allocation_bytes(&self) -> usize {
+        let row = &self.commit;
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<CommitRow>()
+            + 4 * std::mem::size_of::<usize>()
+            + row.sha.capacity()
+            + row.summary.capacity()
+            + row.author.capacity()
+            + row.email.capacity()
+            + row.parents.capacity() * std::mem::size_of::<String>()
+            + row.parents.iter().map(String::capacity).sum::<usize>()
+            + row.graph.edges.capacity() * std::mem::size_of::<mangrove_core::model::GraphEdge>()
+            + self.subject.len()
+            + self.author.len()
+            + self.initials.len()
+            + self.date.len()
+            + self.short_sha.len()
+    }
+}
+
+pub struct HistoryPage {
+    pub offset: usize,
+    pub total: usize,
+    pub index: IndexProgress,
+    pub rows: Vec<Arc<HistoryRow>>,
+    pub max_lanes: usize,
+    measurement: Option<Arc<HistoryRow>>,
+    bytes: usize,
+    edges: usize,
+    epoch: u64,
+}
+
+impl HistoryPage {
+    pub fn new(page: CommitPage) -> Self {
+        let rows: Vec<_> = page
+            .commits
+            .into_iter()
+            .map(|row| Arc::new(HistoryRow::new(row)))
+            .collect();
+        let bytes = rows.capacity() * std::mem::size_of::<Arc<HistoryRow>>()
+            + rows.iter().map(|row| row.allocation_bytes()).sum::<usize>();
+        let edges = rows.iter().map(|row| row.commit.graph.edges.len()).sum();
+        let max_lanes = rows
+            .iter()
+            .map(|row| row.commit.graph.width)
+            .max()
+            .unwrap_or(1);
+        let measurement = if page.offset == 0 {
+            rows.first().map(|first| {
+                let commit = &first.commit;
+                Arc::new(HistoryRow::new(CommitRow {
+                    sha: commit.sha.clone(),
+                    summary: first.subject.to_string(),
+                    author: commit.author.clone(),
+                    email: String::new(),
+                    time: commit.time,
+                    parents: commit.parents.iter().take(2).cloned().collect(),
+                    position: commit.position,
+                    graph: mangrove_core::model::GraphRow {
+                        lane: commit.graph.lane,
+                        color: commit.graph.color,
+                        width: commit.graph.width,
+                        edges: Vec::new(),
+                    },
+                }))
+            })
+        } else {
+            None
+        };
+        Self {
+            offset: page.offset,
+            total: page.total,
+            index: page.index,
+            rows,
+            max_lanes,
+            measurement,
+            bytes,
+            edges,
+            epoch: 0,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct HistoryCache {
-    pages: BTreeMap<usize, Vec<Arc<CommitRow>>>,
+    pages: BTreeMap<usize, HistoryPage>,
+    retired: Vec<HistoryPage>,
+    rejected: HashSet<usize>,
+    measurement: Option<Arc<HistoryRow>>,
+    requested_page: Option<usize>,
+    bytes: usize,
+    edges: usize,
+    epoch: u64,
     pub visible_page: usize,
 }
 
 impl HistoryCache {
+    #[cfg(test)]
     pub fn contains(&self, page: usize) -> bool {
         self.pages.contains_key(&page)
     }
 
-    pub fn row(&self, index: usize) -> Option<&CommitRow> {
+    pub fn current(&self, page: usize) -> bool {
         self.pages
-            .get(&(index / PAGE_SIZE))?
-            .get(index % PAGE_SIZE)
-            .map(Arc::as_ref)
+            .get(&page)
+            .is_some_and(|cached| cached.epoch == self.epoch)
     }
 
-    pub fn row_shared(&self, index: usize) -> Option<Arc<CommitRow>> {
+    pub fn can_request(&self, page: usize) -> bool {
+        !self.rejected.contains(&page)
+    }
+
+    pub fn defer(&mut self, page: usize) {
+        self.rejected.insert(page);
+    }
+
+    pub fn useful(&self, page: usize) -> bool {
+        page == 0 || page.abs_diff(self.visible_page) <= 1 || self.requested_page == Some(page)
+    }
+
+    pub fn set_visible_page(&mut self, page: usize) {
+        if self.visible_page != page {
+            self.visible_page = page;
+            self.rejected.clear();
+        }
+    }
+
+    pub fn set_requested_page(&mut self, page: Option<usize>) {
+        self.requested_page = page;
+        if let Some(page) = page {
+            self.rejected.remove(&page);
+        }
+    }
+
+    pub fn row(&self, index: usize) -> Option<&CommitRow> {
+        if index == 0 && !self.pages.contains_key(&0) {
+            return self.measurement.as_ref().map(|row| row.commit.as_ref());
+        }
         self.pages
             .get(&(index / PAGE_SIZE))?
+            .rows
+            .get(index % PAGE_SIZE)
+            .map(|row| row.commit.as_ref())
+    }
+
+    pub fn row_shared(&self, index: usize) -> Option<Arc<HistoryRow>> {
+        if index == 0 && !self.pages.contains_key(&0) {
+            return self.measurement.clone();
+        }
+        self.pages
+            .get(&(index / PAGE_SIZE))?
+            .rows
             .get(index % PAGE_SIZE)
             .cloned()
     }
 
+    fn remove(&mut self, page: usize) {
+        if let Some(retired) = self.pages.remove(&page) {
+            self.bytes -= retired.bytes;
+            self.edges -= retired.edges;
+            self.retired.push(retired);
+        }
+    }
+
+    /// Visible stale data survives until the replacement page has arrived.
+    pub fn mark_stale(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.rejected.clear();
+    }
+
     pub fn clear(&mut self) {
-        self.pages.clear();
+        self.retired
+            .extend(std::mem::take(&mut self.pages).into_values());
+        self.bytes = 0;
+        self.edges = 0;
+        self.measurement = None;
+        self.requested_page = None;
+        self.mark_stale();
+    }
+
+    pub fn take_retired(&mut self) -> Vec<HistoryPage> {
+        std::mem::take(&mut self.retired)
+    }
+
+    pub fn retire(&mut self, page: HistoryPage) {
+        self.retired.push(page);
     }
 
     pub fn find_sha(&self, sha: &str) -> Option<usize> {
-        self.pages.iter().find_map(|(page, rows)| {
-            rows.iter()
-                .position(|row| row.sha == sha)
+        self.pages.iter().find_map(|(page, cached)| {
+            cached
+                .rows
+                .iter()
+                .position(|row| row.commit.sha == sha)
                 .map(|index| page * PAGE_SIZE + index)
         })
     }
 
     pub fn invalidate_trailing(&mut self, total: usize) -> bool {
-        let count = self.pages.len();
-        self.pages
-            .retain(|page, rows| rows.len() == PAGE_SIZE || page * PAGE_SIZE + rows.len() >= total);
-        self.pages.len() != count
+        let mut changed = false;
+        for (page, cached) in &mut self.pages {
+            if cached.epoch == self.epoch
+                && cached.rows.len() < PAGE_SIZE
+                && page * PAGE_SIZE + cached.rows.len() < total
+            {
+                cached.epoch = self.epoch.wrapping_sub(1);
+                changed = true;
+            }
+        }
+        changed
     }
 
-    pub fn insert(&mut self, offset: usize, rows: Vec<CommitRow>, total: usize) -> bool {
-        // An incomplete trailing page becomes stale when indexing appends rows.
+    pub fn insert(&mut self, mut page: HistoryPage, total: usize) -> bool {
         let invalidated = self.invalidate_trailing(total);
-        if rows.is_empty() || (rows.len() < PAGE_SIZE && offset + rows.len() < total) {
+        let number = page.offset / PAGE_SIZE;
+        if page.rows.len() < PAGE_SIZE && page.offset + page.rows.len() < total {
+            self.retired.push(page);
             return invalidated;
         }
-        let page = offset / PAGE_SIZE;
-        if self.pages.get(&page).is_some_and(|cached| {
-            cached.len() == rows.len()
+        if self.pages.get(&number).is_some_and(|cached| {
+            cached.epoch == self.epoch
+                && cached.rows.len() == page.rows.len()
                 && cached
+                    .rows
                     .iter()
-                    .zip(&rows)
-                    .all(|(old, new)| old.sha == new.sha)
+                    .zip(&page.rows)
+                    .all(|(old, new)| old.commit.sha == new.commit.sha)
         }) {
-            // Metadata and graph geometry are immutable inside one index run.
-            // Repeated progress polling must not allocate or invalidate the list.
+            self.retired.push(page);
             return invalidated;
         }
-        self.pages
-            .insert(page, rows.into_iter().map(Arc::new).collect());
-        while self.pages.len() > MAX_PAGES {
-            // GPUI measures item zero for the list's fixed height; keep its page
-            // resident so that scrolling never repeatedly fetches and evicts it.
-            if let Some(farthest) = self
+        page.epoch = self.epoch;
+        if number == 0 {
+            // Item zero is measured by uniform_list on every layout. Its
+            // bounded presentation survives even if its heavy page is evicted.
+            self.measurement = page.measurement.take();
+        }
+        self.remove(number);
+        self.bytes += page.bytes;
+        self.edges += page.edges;
+        self.pages.insert(number, page);
+        while self.pages.len() > MAX_PAGES
+            || self.bytes > MAX_PAGE_BYTES
+            || self.edges > MAX_GRAPH_EDGES
+        {
+            // Retain one useful oversized page if it alone exceeds the budget:
+            // dropping its graph would break horizontal navigation. All other
+            // pages, including measurement page zero, are evicted in that case.
+            if self.pages.len() == 1 {
+                break;
+            }
+            let useful = self.requested_page.unwrap_or(self.visible_page);
+            let farthest = self
                 .pages
                 .keys()
                 .copied()
-                .filter(|page| *page != 0)
-                .max_by_key(|page| page.abs_diff(self.visible_page))
-            {
-                self.pages.remove(&farthest);
-            }
+                .max_by_key(|page| {
+                    (
+                        *page != useful,
+                        *page != 0,
+                        page.abs_diff(self.visible_page),
+                    )
+                })
+                .unwrap();
+            self.remove(farthest);
+            self.rejected.insert(farthest);
         }
-        true
+        self.pages.contains_key(&number) || invalidated
     }
 }
 
@@ -409,9 +665,12 @@ mod tests {
                 sha: "same".into(),
             })
             .collect();
-        let groups = group_references(&references);
-        let shared = groups.get("same").unwrap().clone();
-        assert!(Arc::ptr_eq(&shared, groups.get("same").unwrap()));
+        let groups = group_references(&references, &[]);
+        let shared = groups.get("same").unwrap().references.clone();
+        assert!(Arc::ptr_eq(
+            &shared,
+            &groups.get("same").unwrap().references
+        ));
         let badges = reference_badges(&shared, &[]);
         assert_eq!(badges.len(), 2);
         assert_eq!(badges[0].name, references[0].name);
@@ -444,17 +703,36 @@ mod tests {
             .collect()
     }
 
+    fn insert(cache: &mut HistoryCache, offset: usize, rows: Vec<CommitRow>, total: usize) -> bool {
+        cache.insert(
+            HistoryPage::new(CommitPage {
+                commits: rows,
+                offset,
+                total,
+                index: IndexProgress {
+                    indexed: total,
+                    complete: true,
+                    error: None,
+                    index_run: "test".into(),
+                },
+            }),
+            total,
+        )
+    }
+
     #[test]
     fn indexing_growth_invalidates_a_previously_partial_page() {
         let mut cache = HistoryCache::default();
-        cache.insert(0, rows(0, 3), 3);
+        insert(&mut cache, 0, rows(0, 3), 3);
         assert!(cache.row(2).is_some());
-        cache.insert(PAGE_SIZE, rows(PAGE_SIZE, PAGE_SIZE), 300);
-        assert!(cache.row(2).is_none());
+        insert(&mut cache, PAGE_SIZE, rows(PAGE_SIZE, PAGE_SIZE), 300);
+        assert!(cache.row(2).is_some());
+        assert!(!cache.current(0));
         // A response from an older SQLite snapshot cannot restore stale rows.
-        cache.insert(0, rows(0, 3), 300);
-        assert!(!cache.contains(0));
-        cache.insert(0, rows(0, PAGE_SIZE), 300);
+        insert(&mut cache, 0, rows(0, 3), 300);
+        assert!(cache.contains(0));
+        assert!(!cache.current(0));
+        insert(&mut cache, 0, rows(0, PAGE_SIZE), 300);
         assert_eq!(cache.row(127).unwrap().position, 127);
     }
 
@@ -463,7 +741,12 @@ mod tests {
         let mut cache = HistoryCache::default();
         for page in 0..50 {
             cache.visible_page = page;
-            cache.insert(page * PAGE_SIZE, rows(page * PAGE_SIZE, PAGE_SIZE), 10_000);
+            insert(
+                &mut cache,
+                page * PAGE_SIZE,
+                rows(page * PAGE_SIZE, PAGE_SIZE),
+                10_000,
+            );
         }
         assert_eq!(cache.pages.len(), MAX_PAGES);
         assert!(cache.row(0).is_some());
@@ -474,17 +757,143 @@ mod tests {
     #[test]
     fn unchanged_progress_page_preserves_shared_rows() {
         let mut cache = HistoryCache::default();
-        assert!(cache.insert(0, rows(0, PAGE_SIZE), PAGE_SIZE));
+        assert!(insert(&mut cache, 0, rows(0, PAGE_SIZE), PAGE_SIZE));
         let before = cache.row_shared(30).unwrap();
-        assert!(!cache.insert(0, rows(0, PAGE_SIZE), PAGE_SIZE));
+        assert!(!insert(&mut cache, 0, rows(0, PAGE_SIZE), PAGE_SIZE));
         assert!(Arc::ptr_eq(&before, &cache.row_shared(30).unwrap()));
     }
 
     #[test]
     fn filtered_positions_are_result_offsets_and_not_walk_positions() {
         let mut cache = HistoryCache::default();
-        cache.insert(0, rows(900, 4), 4);
+        insert(&mut cache, 0, rows(900, 4), 4);
         assert_eq!(cache.find_sha("903"), Some(3));
         assert_eq!(cache.row(3).unwrap().position, 903);
+    }
+
+    #[test]
+    fn a_late_distant_page_is_abandoned_after_eviction_until_the_viewport_moves() {
+        let mut cache = HistoryCache::default();
+        cache.set_visible_page(20);
+        insert(&mut cache, 0, rows(0, PAGE_SIZE), 100_000);
+        for page in 15..26 {
+            insert(
+                &mut cache,
+                page * PAGE_SIZE,
+                rows(page * PAGE_SIZE, PAGE_SIZE),
+                100_000,
+            );
+        }
+        assert_eq!(cache.pages.len(), MAX_PAGES);
+        assert!(!insert(
+            &mut cache,
+            100 * PAGE_SIZE,
+            rows(100 * PAGE_SIZE, PAGE_SIZE),
+            100_000
+        ));
+        assert!(!cache.contains(100));
+        assert!(!cache.useful(100));
+        assert!(!cache.can_request(100));
+        assert!(cache.current(20));
+        assert!(!cache.take_retired().is_empty());
+        // Explicit keyboard intent is useful before the scroll has painted its
+        // new range, and can retry a page previously rejected by the budget.
+        cache.set_requested_page(Some(100));
+        assert!(cache.useful(100));
+        assert!(cache.can_request(100));
+        insert(
+            &mut cache,
+            100 * PAGE_SIZE,
+            rows(100 * PAGE_SIZE, PAGE_SIZE),
+            100_000,
+        );
+        assert!(cache.current(100));
+    }
+
+    #[test]
+    fn wide_graphs_evict_by_edges_and_allocated_bytes_before_the_page_limit() {
+        use mangrove_core::model::{GraphEdge, GraphEdgeKind};
+        let mut cache = HistoryCache::default();
+        for page in 0..6 {
+            let mut commits = rows(page * PAGE_SIZE, PAGE_SIZE);
+            for row in &mut commits {
+                row.graph.width = 5000;
+                row.graph.edges = (0..5000)
+                    .map(|lane| GraphEdge {
+                        from: lane,
+                        to: lane,
+                        color: lane % 8,
+                        kind: GraphEdgeKind::Through,
+                    })
+                    .collect();
+            }
+            cache.set_visible_page(page);
+            insert(&mut cache, page * PAGE_SIZE, commits, 10_000);
+            drop(cache.take_retired());
+            assert!(cache.bytes <= MAX_PAGE_BYTES);
+            assert!(cache.edges <= MAX_GRAPH_EDGES);
+            assert!(cache.current(page));
+        }
+        assert!(cache.pages.len() < MAX_PAGES);
+        assert!(cache.row(0).is_some());
+    }
+
+    #[test]
+    fn only_one_useful_oversized_page_survives_and_measurement_does_not_pin_its_graph() {
+        use mangrove_core::model::GraphEdge;
+        let mut cache = HistoryCache::default();
+        let oversized_rows = |page| {
+            let mut commits = rows(page * PAGE_SIZE, PAGE_SIZE);
+            commits[0].graph.edges =
+                Vec::with_capacity(MAX_PAGE_BYTES / std::mem::size_of::<GraphEdge>() + 1);
+            commits
+        };
+        insert(&mut cache, 0, oversized_rows(0), 100_000);
+        assert!(cache.bytes > MAX_PAGE_BYTES);
+        cache.set_visible_page(20);
+        insert(&mut cache, 20 * PAGE_SIZE, oversized_rows(20), 100_000);
+        assert_eq!(cache.pages.len(), 1);
+        assert!(cache.current(20));
+        assert!(!cache.contains(0));
+        assert!(!cache.can_request(0));
+        assert!(cache.row(0).unwrap().graph.edges.is_empty());
+        drop(cache.take_retired());
+    }
+
+    #[test]
+    fn refreshing_a_search_or_published_run_keeps_stale_rows_until_replaced() {
+        let mut cache = HistoryCache::default();
+        insert(&mut cache, 0, rows(100, PAGE_SIZE), PAGE_SIZE * 2);
+        insert(&mut cache, PAGE_SIZE, rows(400, PAGE_SIZE), PAGE_SIZE * 2);
+        let first = cache.row_shared(0).unwrap();
+        let second = cache.row_shared(PAGE_SIZE).unwrap();
+        cache.mark_stale();
+        assert!(!cache.current(0));
+        assert!(Arc::ptr_eq(&first, &cache.row_shared(0).unwrap()));
+        insert(&mut cache, 0, rows(101, PAGE_SIZE), PAGE_SIZE * 2);
+        assert!(cache.current(0));
+        assert!(!cache.current(1));
+        assert!(Arc::ptr_eq(&second, &cache.row_shared(PAGE_SIZE).unwrap()));
+        assert_eq!(cache.find_sha("101"), Some(0));
+    }
+
+    #[test]
+    fn display_subject_is_unicode_bounded_while_the_original_commit_is_preserved() {
+        let mut commits = rows(0, 1);
+        commits[0].summary = "é🐚".repeat(25_000);
+        let prepared = HistoryRow::new(commits.pop().unwrap());
+        assert_eq!(prepared.subject.chars().count(), MAX_SUBJECT_CHARS + 1);
+        assert!(prepared.subject.ends_with('…'));
+        assert_eq!(prepared.commit.summary.chars().count(), 50_000);
+    }
+
+    #[test]
+    fn an_empty_replacement_removes_stale_matches_without_repeated_reads() {
+        let mut cache = HistoryCache::default();
+        insert(&mut cache, 0, rows(0, 4), 4);
+        cache.mark_stale();
+        assert!(insert(&mut cache, 0, Vec::new(), 0));
+        assert!(cache.current(0));
+        assert!(cache.row(0).is_none());
     }
 }

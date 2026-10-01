@@ -1,0 +1,44 @@
+{
+  "note": "Optimized isolated DisplayLine probe; SharedString replaced with Arc<str>; excludes GPUI, shaping, paint and original copy",
+  "results": [
+    {
+      "fixture": "512 KiB tabs",
+      "originalBytes": 524288,
+      "samples": 20,
+      "oldP50Ms": 2.889417,
+      "oldP95Ms": 2.936917,
+      "newP50Ms": 0.016709,
+      "newP95Ms": 0.024209,
+      "oldDisplayBytes": 4194304,
+      "oldMappingBytes": 4194312,
+      "newDisplayBytes": 16383,
+      "newMappingBytes": 16328
+    },
+    {
+      "fixture": "400 KiB ASCII",
+      "originalBytes": 409600,
+      "samples": 20,
+      "oldP50Ms": 0.014833,
+      "oldP95Ms": 0.01775,
+      "newP50Ms": 0.00175,
+      "newP95Ms": 0.001917,
+      "oldDisplayBytes": 409600,
+      "oldMappingBytes": 0,
+      "newDisplayBytes": 16384,
+      "newMappingBytes": 0
+    },
+    {
+      "fixture": "UTF8 plus tabs",
+      "originalBytes": 600000,
+      "samples": 20,
+      "oldP50Ms": 0.723875,
+      "oldP95Ms": 0.762583,
+      "newP50Ms": 0.021375,
+      "newP95Ms": 0.024709,
+      "oldDisplayBytes": 650006,
+      "oldMappingBytes": 4800008,
+      "newDisplayBytes": 16384,
+      "newMappingBytes": 120488
+    }
+  ]
+}

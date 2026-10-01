@@ -1,6 +1,15 @@
 //! Read-only, virtualized code and patch viewer. Selection is expressed in
 //! snapshot byte positions, so unmounted lines still participate in copying.
-use std::{cell::RefCell, collections::BTreeMap, ops::Range, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    ops::Range,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use accesskit::Role;
 use gpui_kit::component::input::{Copy, SelectAll};
@@ -64,45 +73,98 @@ struct DisplayLine {
     text: SharedString,
     /// Original byte positions mapped to display byte positions, only for tabs.
     mapping: Option<Vec<usize>>,
+    original_end: usize,
+    original_len: usize,
+    content_end: usize,
+    columns: usize,
 }
+// Bound expansion, shaping and glyph preparation even for a line made entirely
+// of tabs. The omitted bytes remain in Row::original for selection and copying.
+const MAX_DISPLAY_BYTES: usize = 16 * 1024;
+const OMITTED_LINE: &str = " … [suite masquée ; sélectionner la ligne pour tout copier]";
+
 impl DisplayLine {
-    fn new(text: &str) -> Self {
-        if !text.contains('\t') {
+    fn new(text: Arc<str>) -> Self {
+        let budget = MAX_DISPLAY_BYTES - OMITTED_LINE.len();
+        let mut end = text.len().min(budget);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if !text[..end].contains('\t') {
+            let columns = text[..end].chars().count();
+            let display = if end == text.len() {
+                text.clone().into()
+            } else {
+                format!("{}{OMITTED_LINE}", &text[..end]).into()
+            };
             return Self {
-                text: text.to_owned().into(),
+                text: display,
                 mapping: None,
+                original_end: end,
+                original_len: text.len(),
+                content_end: end,
+                columns: columns
+                    + if end < text.len() {
+                        OMITTED_LINE.chars().count()
+                    } else {
+                        0
+                    },
             };
         }
         let mut expanded = String::new();
-        let mut map = vec![0; text.len() + 1];
+        let mut map = vec![0];
         let mut column = 0;
+        let mut original_end = 0;
         for (offset, ch) in text.char_indices() {
             let before = expanded.len();
-            map[offset] = before;
+            let bytes = if ch == '\t' {
+                8 - column % 8
+            } else {
+                ch.len_utf8()
+            };
+            if before + bytes > budget {
+                break;
+            }
             if ch == '\t' {
-                let spaces = 8 - column % 8;
-                expanded.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
+                expanded.extend(std::iter::repeat_n(' ', bytes));
+                column += bytes;
             } else {
                 expanded.push(ch);
                 column += 1;
             }
-            for entry in map.iter_mut().take(offset + ch.len_utf8()).skip(offset + 1) {
-                *entry = before;
-            }
-            map[offset + ch.len_utf8()] = expanded.len();
+            map.extend(std::iter::repeat_n(before, ch.len_utf8() - 1));
+            map.push(expanded.len());
+            original_end = offset + ch.len_utf8();
+        }
+        let content_end = expanded.len();
+        if original_end < text.len() {
+            expanded.push_str(OMITTED_LINE);
+            column += OMITTED_LINE.chars().count();
         }
         Self {
             text: expanded.into(),
             mapping: Some(map),
+            original_end,
+            original_len: text.len(),
+            content_end,
+            columns: column,
         }
     }
+    fn truncated(&self) -> bool {
+        self.original_end < self.original_len
+    }
     fn display_byte(&self, original: usize) -> usize {
+        if original > self.original_end {
+            return self.text.len();
+        }
         self.mapping
             .as_ref()
             .map_or(original, |map| map[original.min(map.len() - 1)])
     }
     fn original_byte(&self, display: usize) -> usize {
+        if display > self.content_end {
+            return self.original_len;
+        }
         self.mapping.as_ref().map_or(display, |map| {
             let right = map.partition_point(|byte| *byte < display);
             if right == 0 {
@@ -126,18 +188,18 @@ struct Row {
     original: Arc<str>,
     display: DisplayLine,
 }
-impl From<&diff::DiffRow> for Row {
-    fn from(row: &diff::DiffRow) -> Self {
+impl Row {
+    fn new(kind: String, old_number: String, new_number: String, text: &str) -> Self {
+        let original: Arc<str> = text.into();
+        let display = DisplayLine::new(original.clone());
         Self {
-            kind: row.kind.clone(),
-            old_number: row.old_number.clone(),
-            new_number: row.new_number.clone(),
-            original: row.text.clone().into(),
-            display: DisplayLine::new(&row.text),
+            kind,
+            old_number,
+            new_number,
+            original,
+            display,
         }
     }
-}
-impl Row {
     fn height_tenths(&self, index: usize, font_size: f32) -> f64 {
         f64::from(font_size) * 17.
             + if self.kind == "hunk" {
@@ -146,6 +208,76 @@ impl Row {
                 0.
             }
     }
+}
+
+struct CodeLineLayout {
+    line: ShapedLine,
+    bounds: Bounds<Pixels>,
+}
+impl CodeLineLayout {
+    fn byte_at(&self, point: Point<Pixels>) -> usize {
+        if point.y < self.bounds.top() {
+            0
+        } else if point.y > self.bounds.bottom() {
+            self.line.len()
+        } else {
+            self.line.closest_index_for_x(point.x - self.bounds.left())
+        }
+    }
+}
+
+/// Keep full shaped geometry for hit testing and selection backgrounds, but send
+/// only viewport glyphs to foreground paint. Preserve their positions and byte
+/// indices, including fallback fonts and ligatures. Reordered runs stay intact.
+fn visible_shaped_line(
+    line: &ShapedLine,
+    left: Pixels,
+    right: Pixels,
+    overhang: Pixels,
+) -> ShapedLine {
+    if left <= px(0.) && right >= line.width() {
+        return line.clone();
+    }
+    let ordered = line
+        .runs
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .try_fold((px(f32::NEG_INFINITY), 0), |(x, byte), glyph| {
+            (glyph.position.x >= x && glyph.index >= byte)
+                .then_some((glyph.position.x, glyph.index))
+        })
+        .is_some();
+    if !ordered {
+        return line.clone();
+    }
+    // Include neighbors whose ink can extend beyond their advance positions.
+    let margin = overhang;
+    let runs = line
+        .runs
+        .iter()
+        .filter_map(|run| {
+            let start = run
+                .glyphs
+                .partition_point(|glyph| glyph.position.x < left - margin);
+            let end = run
+                .glyphs
+                .partition_point(|glyph| glyph.position.x <= right + margin);
+            (start < end).then(|| ShapedRun {
+                font_id: run.font_id,
+                glyphs: run.glyphs[start..end].to_vec(),
+            })
+        })
+        .collect();
+    let mut visible = line.clone();
+    *visible = Arc::new(LineLayout {
+        font_size: line.font_size,
+        width: line.width(),
+        ascent: line.ascent,
+        descent: line.descent,
+        runs,
+        len: line.len(),
+    });
+    visible
 }
 
 fn row_geometry(rows: &[Row], font_size: f32, scale_factor: f32) -> RowGeometry {
@@ -157,6 +289,39 @@ fn row_geometry(rows: &[Row], font_size: f32, scale_factor: f32) -> RowGeometry 
     )
 }
 
+fn selected_rows_text(rows: &[Row], selection: Option<Selection>, final_newline: bool) -> String {
+    let Some(selection) = selection else {
+        return String::new();
+    };
+    let (start, end) = selection.ordered();
+    if start == end {
+        return String::new();
+    }
+    let mut text = String::new();
+    for (index, row) in rows
+        .iter()
+        .enumerate()
+        .take(end.row.saturating_add(1))
+        .skip(start.row)
+    {
+        let range = selection
+            .range_in_row(index, row.original.len())
+            .unwrap_or(0..0);
+        if index > start.row {
+            text.push('\n');
+        }
+        text.push_str(&row.original[range]);
+    }
+    if final_newline
+        && start == Position::default()
+        && end.row + 1 == rows.len()
+        && end.byte == rows[end.row].original.len()
+    {
+        text.push('\n');
+    }
+    text
+}
+
 pub struct CodeView {
     rows: Arc<Vec<Row>>,
     scroll: VirtualScrollHandle,
@@ -165,12 +330,13 @@ pub struct CodeView {
     content_source: Option<Arc<FileContent>>,
     tokens: Arc<Vec<Vec<Token>>>,
     generation: u64,
+    live_generation: Arc<AtomicU64>,
     syntax_task: Option<Task<()>>,
     syntax_pending: bool,
     focus: FocusHandle,
     list: ListState,
     horizontal: ScrollHandle,
-    layouts: Rc<RefCell<BTreeMap<usize, TextLayout>>>,
+    layouts: Rc<RefCell<BTreeMap<usize, CodeLineLayout>>>,
     palette: Palette,
     font_size: f32,
     ui_offset: f32,
@@ -212,6 +378,7 @@ impl CodeView {
             content_source: None,
             tokens: Arc::new(Vec::new()),
             generation: 0,
+            live_generation: Arc::new(AtomicU64::new(0)),
             syntax_task: None,
             syntax_pending: false,
             focus: cx.focus_handle(),
@@ -240,8 +407,13 @@ impl CodeView {
         }
     }
 
-    fn reset(&mut self, rows: Vec<Row>, window: &mut Window, cx: &mut Context<Self>) {
+    fn invalidate_syntax(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.live_generation
+            .store(self.generation, Ordering::Release);
+    }
+    fn reset(&mut self, rows: Vec<Row>, window: &mut Window, cx: &mut Context<Self>) {
+        self.invalidate_syntax();
         self.syntax_task = None;
         self.syntax_pending = false;
         self.rows = Arc::new(rows);
@@ -297,10 +469,7 @@ impl CodeView {
             .width()
             .into();
         self.number_width = (largest.to_string().len() + 2) as f32 * char_width;
-        let widest = self
-            .rows
-            .iter()
-            .max_by_key(|row| row.display.text.chars().count());
+        let widest = self.rows.iter().max_by_key(|row| row.display.columns);
         let text_width = widest.map_or(0., |row| {
             let run = TextRun {
                 len: row.display.text.len(),
@@ -327,6 +496,15 @@ impl CodeView {
             self.content_width += 240.;
         }
     }
+    fn append_line_notice(&mut self) {
+        if self.rows.iter().any(|row| row.display.truncated()) {
+            let notice = self.notice.get_or_insert_with(String::new);
+            if !notice.is_empty() {
+                notice.push(' ');
+            }
+            notice.push_str("Lignes longues : aperçu limité à 16 Kio après développement des tabulations. La sélection d’une ligne et Tout sélectionner copient son texte original complet.");
+        }
+    }
     fn row_height(&self, index: usize) -> Pixels {
         self.scroll
             .row_height(index)
@@ -350,30 +528,11 @@ impl CodeView {
             offset_in_item: top.offset_in_item * scale,
         });
     }
-    pub fn set_diff(
-        &mut self,
-        diff: Arc<FileDiff>,
-        path: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_diff(diff, path, None, window, cx);
-    }
     pub fn set_prepared_diff(
         &mut self,
         diff: Arc<FileDiff>,
         path: String,
         tokens: syntax::Tokens,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_diff(diff, path, Some(tokens), window, cx);
-    }
-    fn apply_diff(
-        &mut self,
-        diff: Arc<FileDiff>,
-        path: String,
-        prepared: Option<syntax::Tokens>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -383,13 +542,29 @@ impl CodeView {
             .is_some_and(|(source, source_path)| {
                 Arc::ptr_eq(source, &diff) && source_path == &path
             });
-        if unchanged && prepared.is_none() {
-            return;
-        }
         if !unchanged {
             self.is_diff = true;
             self.ends_with_newline = false;
-            let rows = diff::rows(Some(&diff)).iter().map(Row::from).collect();
+            let rows = diff
+                .hunks
+                .iter()
+                .flat_map(|hunk| {
+                    std::iter::once(Row::new(
+                        "hunk".into(),
+                        String::new(),
+                        String::new(),
+                        hunk.header.trim_end(),
+                    ))
+                    .chain(hunk.lines.iter().map(|line| {
+                        Row::new(
+                            line.kind.clone(),
+                            line.old_line.map(|n| n.to_string()).unwrap_or_default(),
+                            line.new_line.map(|n| n.to_string()).unwrap_or_default(),
+                            diff::strip_line_ending(&line.content),
+                        )
+                    }))
+                })
+                .collect();
             self.reset(rows, window, cx);
             self.diff_source = Some((diff.clone(), path.clone()));
             if diff.binary {
@@ -400,34 +575,15 @@ impl CodeView {
             if diff.truncated {
                 self.notice=Some("Aperçu limité pour préserver la réactivité. Le fichier est volumineux ou le diff dépasse la limite d’affichage.".into());
             }
+            self.append_line_notice();
         }
-        if let Some(tokens) = prepared {
-            self.generation = self.generation.wrapping_add(1);
-            self.syntax_task = None;
-            self.syntax_pending = false;
-            if !Arc::ptr_eq(&self.tokens, &tokens) {
-                self.tokens = tokens;
-                cx.notify();
-            }
-            return;
+        self.invalidate_syntax();
+        self.syntax_task = None;
+        self.syntax_pending = false;
+        if !Arc::ptr_eq(&self.tokens, &tokens) {
+            self.tokens = tokens;
+            cx.notify();
         }
-        let generation = self.generation;
-        self.syntax_pending = true;
-        self.syntax_task = Some(cx.spawn(async move |this, cx| {
-            let tokens = cx
-                .background_executor()
-                .spawn(async move { syntax::cached_diff_tokens(&path, &diff) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                if view.generation == generation {
-                    view.tokens = tokens;
-                    view.syntax_pending = false;
-                    view.syntax_task = None;
-                    cx.notify();
-                }
-            });
-        }));
-        cx.notify();
     }
     pub fn set_content(
         &mut self,
@@ -448,12 +604,13 @@ impl CodeView {
             .lines
             .iter()
             .enumerate()
-            .map(|(index, text)| Row {
-                kind: "content".into(),
-                old_number: String::new(),
-                new_number: (index + 1).to_string(),
-                original: text.clone().into(),
-                display: DisplayLine::new(text),
+            .map(|(index, text)| {
+                Row::new(
+                    "content".into(),
+                    String::new(),
+                    (index + 1).to_string(),
+                    text,
+                )
             })
             .collect();
         self.reset(rows, window, cx);
@@ -483,15 +640,23 @@ impl CodeView {
         } else if content.size > 0 && !content.ends_with_newline {
             self.notice = Some("Pas de saut de ligne à la fin du fichier.".into());
         }
+        self.append_line_notice();
         let generation = self.generation;
+        let live_generation = self.live_generation.clone();
         self.syntax_pending = true;
         self.syntax_task = Some(cx.spawn(async move |this, cx| {
             let tokens = cx
                 .background_executor()
-                .spawn(async move { syntax::cached_content_tokens(&content.path, &content.lines) })
+                .spawn(async move {
+                    syntax::cached_content_tokens_cancellable(&content.path, &content.lines, || {
+                        live_generation.load(Ordering::Acquire) != generation
+                    })
+                })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                if view.generation == generation {
+                if view.generation == generation
+                    && let Some(tokens) = tokens
+                {
                     view.tokens = tokens;
                     view.syntax_pending = false;
                     view.syntax_task = None;
@@ -548,7 +713,7 @@ impl CodeView {
         cx.notify();
     }
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.generation = self.generation.wrapping_add(1);
+        self.invalidate_syntax();
         self.syntax_task = None;
         self.syntax_pending = false;
         self.rows = Arc::new(Vec::new());
@@ -671,11 +836,11 @@ impl CodeView {
     }
 
     fn position_from_layout(&self, index: usize, position: Point<Pixels>) -> Position {
-        let byte = self.layouts.borrow().get(&index).map_or(0, |layout| {
-            layout
-                .index_for_position(position)
-                .unwrap_or_else(|closest| closest)
-        });
+        let byte = self
+            .layouts
+            .borrow()
+            .get(&index)
+            .map_or(0, |layout| layout.byte_at(position));
         let row = &self.rows[index];
         let mut byte = row.display.original_byte(byte).min(row.original.len());
         while !row.original.is_char_boundary(byte) {
@@ -750,7 +915,7 @@ impl CodeView {
     fn drag_selection(
         &mut self,
         event: &MouseMoveEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.dragging || self.rows.is_empty() {
@@ -775,35 +940,20 @@ impl CodeView {
                 break;
             }
         }
-        if target.is_none() {
-            let top = self
-                .list
-                .logical_scroll_top()
-                .item_ix
-                .min(self.rows.len() - 1);
-            if point.y < viewport.top() {
-                self.scroll.scroll_vertical_by(px(-self.font_size * 1.7));
-                target = Some(top.saturating_sub(1));
-            } else if point.y > viewport.bottom() {
-                self.scroll.scroll_vertical_by(px(self.font_size * 1.7));
-                target = Some(
-                    self.layouts
-                        .borrow()
-                        .keys()
-                        .next_back()
-                        .copied()
-                        .unwrap_or(top)
-                        .saturating_add(1)
-                        .min(self.rows.len() - 1),
-                );
-            }
+        if point.y < viewport.top() || point.y > viewport.bottom() {
+            // Only the animation loop changes scroll position; event frequency
+            // must not add a second source of scrolling during a drag.
+            window.request_animation_frame();
+            return;
         }
         if let Some(index) = target {
             let head = self.position_from_layout(index, point);
-            if let Some(selection) = &mut self.selection {
+            if let Some(selection) = &mut self.selection
+                && selection.head != head
+            {
                 selection.head = head;
+                cx.notify();
             }
-            cx.notify();
         }
     }
     fn autoscroll_selection(&mut self, window: &mut Window) {
@@ -869,33 +1019,11 @@ impl CodeView {
         window.request_animation_frame();
     }
     pub fn selected_text(&self) -> String {
-        let Some(selection) = self.selection else {
-            return String::new();
-        };
-        let (start, end) = selection.ordered();
-        if start == end {
-            return String::new();
-        }
-        let mut text = String::new();
-        for index in start.row..=end.row.min(self.rows.len().saturating_sub(1)) {
-            let row = &self.rows[index];
-            let range = selection
-                .range_in_row(index, row.original.len())
-                .unwrap_or(0..0);
-            if index > start.row {
-                text.push('\n');
-            }
-            text.push_str(&row.original[range]);
-        }
-        if !self.is_diff
-            && self.ends_with_newline
-            && start == Position::default()
-            && end.row + 1 == self.rows.len()
-            && end.byte == self.rows[end.row].original.len()
-        {
-            text.push('\n');
-        }
-        text
+        selected_rows_text(
+            &self.rows,
+            self.selection,
+            !self.is_diff && self.ends_with_newline,
+        )
     }
     fn copy_selection(&self, cx: &mut Context<Self>) {
         let text = self.selected_text();
@@ -1029,12 +1157,18 @@ impl CodeView {
             .selection
             .and_then(|selection| selection.range_in_row(index, row.original.len()));
         let tokens = self.tokens.get(index).map(Vec::as_slice).unwrap_or(&[]);
-        let mut cuts = vec![0, row.original.len()];
+        let mut cuts = vec![0, row.display.original_end];
         for token in tokens {
-            cuts.extend([token.range.start, token.range.end]);
+            cuts.extend([
+                token.range.start.min(row.display.original_end),
+                token.range.end.min(row.display.original_end),
+            ]);
         }
         if let Some(selected) = &selection {
-            cuts.extend([selected.start, selected.end]);
+            cuts.extend([
+                selected.start.min(row.display.original_end),
+                selected.end.min(row.display.original_end),
+            ]);
         }
         cuts.sort_unstable();
         cuts.dedup();
@@ -1055,8 +1189,13 @@ impl CodeView {
             let selected = selection
                 .as_ref()
                 .is_some_and(|selected| selected.start <= range.start && selected.end >= range.end);
+            let display_range =
+                row.display.display_byte(range.start)..row.display.display_byte(range.end);
+            if display_range.is_empty() {
+                continue;
+            }
             result.push((
-                row.display.display_byte(range.start)..row.display.display_byte(range.end),
+                display_range,
                 HighlightStyle {
                     color: if selected {
                         Some(rgb(self.palette.text).into())
@@ -1064,6 +1203,26 @@ impl CodeView {
                         kind.palette_index()
                             .map(|index| rgb(self.palette.syntax[index]).into())
                     },
+                    background_color: selected.then(|| rgb(self.palette.selection).into()),
+                    ..Default::default()
+                },
+            ));
+        }
+        if row.display.truncated() {
+            let selected = selection.as_ref().is_some_and(|selection| {
+                selection.end > row.display.original_end && selection.start < row.original.len()
+            });
+            result.push((
+                row.display.content_end..row.display.text.len(),
+                HighlightStyle {
+                    color: Some(
+                        rgb(if selected {
+                            self.palette.text
+                        } else {
+                            self.palette.warning
+                        })
+                        .into(),
+                    ),
                     background_color: selected.then(|| rgb(self.palette.selection).into()),
                     ..Default::default()
                 },
@@ -1081,11 +1240,79 @@ impl CodeView {
         let row = &self.rows[index];
         let p = self.palette;
         let hunk = row.kind == "hunk";
-        let text =
-            StyledText::new(row.display.text.clone()).with_highlights(self.highlights(index, row));
-        self.layouts
-            .borrow_mut()
-            .insert(index, text.layout().clone());
+        let default_color = rgb(if hunk { p.accent } else { p.text }).into();
+        let runs = self
+            .highlights(index, row)
+            .into_iter()
+            .map(|(range, highlight)| TextRun {
+                len: range.len(),
+                font: font(MONO),
+                color: highlight.color.unwrap_or(default_color),
+                background_color: highlight.background_color,
+                underline: None,
+                strikethrough: None,
+            })
+            .collect::<Vec<_>>();
+        let shaped = window.text_system().shape_line(
+            row.display.text.clone(),
+            px(self.font_size),
+            &runs,
+            None,
+        );
+        let width = shaped.width().ceil();
+        let layouts = self.layouts.clone();
+        let line_height = window.pixel_snap(px(self.font_size * 1.7));
+        let text = canvas(
+            move |bounds, _, _| {
+                layouts.borrow_mut().insert(
+                    index,
+                    CodeLineLayout {
+                        line: shaped.clone(),
+                        bounds,
+                    },
+                );
+                shaped
+            },
+            move |bounds, shaped, window, cx| {
+                let viewport = window.content_mask().bounds;
+                let overhang = shaped
+                    .runs
+                    .iter()
+                    .map(|run| {
+                        window
+                            .text_system()
+                            .bounding_box(run.font_id, shaped.font_size)
+                            .size
+                            .width
+                    })
+                    .fold(shaped.font_size, Pixels::max);
+                let visible = visible_shaped_line(
+                    &shaped,
+                    viewport.left() - bounds.left(),
+                    viewport.right() - bounds.left(),
+                    overhang,
+                );
+                let _ = shaped.paint_background(
+                    bounds.origin,
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                let _ = visible.paint(
+                    bounds.origin,
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            },
+        )
+        .w(width)
+        .h_full()
+        .flex_shrink_0();
         let gutter = |value: String| {
             div()
                 .w(px(self.number_width))
@@ -1111,18 +1338,20 @@ impl CodeView {
             } else {
                 Role::Paragraph
             })
-            .aria_label(if hunk {
-                row.original.to_string()
-            } else {
-                format!(
-                    "Ligne {} : {}",
-                    if row.new_number.is_empty() {
-                        &row.old_number
-                    } else {
-                        &row.new_number
-                    },
-                    row.original
-                )
+            .when(window.is_a11y_active(), |line| {
+                line.aria_label(if hunk {
+                    row.original.to_string()
+                } else {
+                    format!(
+                        "Ligne {} : {}",
+                        if row.new_number.is_empty() {
+                            &row.old_number
+                        } else {
+                            &row.new_number
+                        },
+                        row.original
+                    )
+                })
             })
             .when(self.show_blame && !self.is_diff, |line| {
                 line.aria_selected(index == self.active_line)
@@ -1476,19 +1705,20 @@ impl Render for CodeView {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayLine, Position, Row, Selection, row_geometry};
+    use super::{
+        CodeLineLayout, DisplayLine, MAX_DISPLAY_BYTES, OMITTED_LINE, Position, Row, Selection,
+        row_geometry, selected_rows_text, visible_shaped_line,
+    };
     use crate::virtual_scroll::VirtualScrollHandle;
     use gpui_kit::component::scroll::ScrollbarHandle;
-    use gpui_kit::{ListAlignment, ListState, ScrollHandle, point, px};
+    use gpui_kit::{
+        Bounds, FontId, GlyphId, LineLayout, ListAlignment, ListState, ScrollHandle, ShapedGlyph,
+        ShapedLine, ShapedRun, point, px, size,
+    };
+    use std::sync::Arc;
 
     fn row(kind: &str) -> Row {
-        Row {
-            kind: kind.into(),
-            old_number: String::new(),
-            new_number: String::new(),
-            original: "line".into(),
-            display: DisplayLine::new("line"),
-        }
+        Row::new(kind.into(), String::new(), String::new(), "line")
     }
 
     fn near(value: gpui_kit::Pixels, expected: f32) {
@@ -1608,12 +1838,154 @@ mod tests {
     }
     #[test]
     fn tabs_render_with_columns_but_copy_keeps_original_bytes() {
-        let line = DisplayLine::new("\télève\tx");
+        let line = DisplayLine::new("\télève\tx".into());
         assert_eq!(line.text.as_ref(), "        élève   x");
         for byte in [0, 1, 3, 4, 6, 7, 8, 9, 10] {
             if "\télève\tx".is_char_boundary(byte) {
                 assert_eq!(line.original_byte(line.display_byte(byte)), byte);
             }
         }
+    }
+
+    #[test]
+    fn long_utf8_and_tab_lines_bound_expansion_and_keep_original_copy() {
+        for original in [
+            "x".repeat(400 * 1024),
+            "\t".repeat(512 * 1024),
+            "\télève🦀".repeat(50_000),
+        ] {
+            let row = Row::new("content".into(), String::new(), "1".into(), &original);
+            let line = &row.display;
+            assert!(line.truncated());
+            assert!(line.text.len() <= MAX_DISPLAY_BYTES);
+            assert!(line.text.ends_with(OMITTED_LINE));
+            assert!(original.is_char_boundary(line.original_end));
+            assert!(
+                line.mapping
+                    .as_ref()
+                    .is_none_or(|map| map.len() <= MAX_DISPLAY_BYTES + 1)
+            );
+            for (byte, _) in original[..line.original_end].char_indices() {
+                assert_eq!(line.original_byte(line.display_byte(byte)), byte);
+            }
+            assert_eq!(line.original_byte(line.content_end), line.original_end);
+            assert_eq!(line.original_byte(line.text.len()), original.len());
+            assert_eq!(line.display_byte(original.len()), line.text.len());
+            let selection = Selection {
+                anchor: Position::default(),
+                head: Position {
+                    row: 0,
+                    byte: original.len(),
+                },
+            };
+            assert_eq!(
+                selected_rows_text(std::slice::from_ref(&row), Some(selection), false),
+                original
+            );
+            assert_eq!(
+                selected_rows_text(&[row], Some(selection), true),
+                format!("{original}\n")
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_utf8_prefix_and_cross_row_selection_copy_hidden_bytes() {
+        let original = "🦀".repeat(100_000);
+        let first = Row::new("deletion".into(), "1".into(), String::new(), &original);
+        let second = Row::new("addition".into(), String::new(), "1".into(), "\télève");
+        let start = first.display.original_end;
+        let rows = [first, second];
+        let selection = Selection {
+            anchor: Position {
+                row: 0,
+                byte: start,
+            },
+            head: Position { row: 1, byte: 3 },
+        };
+        assert_eq!(
+            selected_rows_text(&rows, Some(selection), false),
+            format!("{}\n\té", &original[start..])
+        );
+    }
+
+    #[test]
+    fn plain_lines_share_their_original_allocation() {
+        let original: Arc<str> = "a normal line long enough to use shared heap storage".into();
+        let line = DisplayLine::new(original.clone());
+        assert_eq!(line.text.as_ptr(), original.as_ptr());
+        assert!(!line.truncated());
+    }
+
+    fn shaped_fixture(text: &str) -> ShapedLine {
+        let glyphs: Vec<_> = text
+            .char_indices()
+            .enumerate()
+            .map(|(index, (byte, _))| ShapedGlyph {
+                id: GlyphId(index as u32),
+                position: point(px(index as f32 * 6.), px(0.)),
+                index: byte,
+                is_emoji: false,
+            })
+            .collect();
+        let mut line = ShapedLine::default();
+        *line = Arc::new(LineLayout {
+            font_size: px(11.),
+            width: px(glyphs.len() as f32 * 6.),
+            ascent: px(9.),
+            descent: px(2.),
+            runs: vec![ShapedRun {
+                font_id: FontId(0),
+                glyphs,
+            }],
+            len: text.len(),
+        });
+        line.text = text.to_owned().into();
+        line
+    }
+
+    #[test]
+    fn horizontal_culling_preserves_utf8_glyphs_positions_and_scrolled_hit_testing() {
+        let display = DisplayLine::new("\télève🦀xyz".repeat(500).into());
+        let shaped = shaped_fixture(&display.text);
+        let visible = visible_shaped_line(&shaped, px(1_200.), px(1_500.), px(12.));
+        assert_eq!(visible.len(), shaped.len());
+        assert_eq!(visible.width(), shaped.width());
+        assert!(visible.runs[0].glyphs.len() < 60);
+        for glyph in &visible.runs[0].glyphs {
+            assert!(display.text.is_char_boundary(glyph.index));
+            near(glyph.position.x, f32::from(shaped.x_for_index(glyph.index)));
+            assert!(glyph.position.x >= px(1_188.) && glyph.position.x <= px(1_512.));
+        }
+        let layout = CodeLineLayout {
+            line: shaped,
+            bounds: Bounds::new(point(px(-1_000.), px(300.)), size(px(10_000.), px(19.))),
+        };
+        // Screen coordinates retain the full line's scrolled origin, independent
+        // of the much smaller foreground glyph set.
+        let byte = layout.byte_at(point(px(200.), px(310.)));
+        assert_eq!(layout.line.x_for_index(byte), px(1_200.));
+        assert_eq!(layout.byte_at(point(px(200.), px(299.))), 0);
+        assert_eq!(layout.byte_at(point(px(200.), px(320.))), layout.line.len());
+        let original = display.original_byte(byte);
+        assert_eq!(display.display_byte(original), byte);
+    }
+
+    #[test]
+    fn reordered_glyphs_keep_the_full_bounded_layout() {
+        let mut shaped = shaped_fixture("abcאבג");
+        let mut layout = LineLayout {
+            font_size: shaped.font_size,
+            width: shaped.width(),
+            ascent: shaped.ascent,
+            descent: shaped.descent,
+            runs: shaped.runs.clone(),
+            len: shaped.len(),
+        };
+        layout.runs[0].glyphs[3].index = 7;
+        layout.runs[0].glyphs[4].index = 5;
+        *shaped = Arc::new(layout);
+        let visible = visible_shaped_line(&shaped, px(25.), px(30.), px(1.));
+        assert_eq!(visible.runs[0].glyphs.len(), shaped.runs[0].glyphs.len());
     }
 }

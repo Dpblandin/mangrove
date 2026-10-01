@@ -1,0 +1,213 @@
+--- a/src-gpui/src/perf.rs
++++ b/src-gpui/src/perf.rs
+@@ -11,0 +12 @@
++    sync::{Mutex, OnceLock},
+@@ -17,0 +19,40 @@
++const BURST_SELECTIONS: usize = 60;
++const BURST_INTERVAL: Duration = Duration::from_millis(33);
++
++#[derive(Default, Serialize)]
++struct Operations {
++    timings_ms: BTreeMap<&'static str, Vec<f64>>,
++    counts: BTreeMap<&'static str, usize>,
++    counts_by_phase: BTreeMap<&'static str, BTreeMap<&'static str, usize>>,
++    #[serde(skip)]
++    phase: &'static str,
++}
++
++fn operations() -> &'static Mutex<Operations> {
++    static OPERATIONS: OnceLock<Mutex<Operations>> = OnceLock::new();
++    OPERATIONS.get_or_init(|| Mutex::new(Operations::default()))
++}
++
++pub fn record_operation(name: &'static str, duration: Duration) {
++    let mut operations = operations()
++        .lock()
++        .unwrap_or_else(|error| error.into_inner());
++    let samples = operations.timings_ms.entry(name).or_default();
++    if samples.len() < MAX_FRAME_SAMPLES {
++        samples.push(duration.as_secs_f64() * 1_000.0);
++    }
++}
++
++pub fn record_count(name: &'static str) {
++    let mut operations = operations()
++        .lock()
++        .unwrap_or_else(|error| error.into_inner());
++    *operations.counts.entry(name).or_default() += 1;
++    let phase = operations.phase;
++    *operations
++        .counts_by_phase
++        .entry(phase)
++        .or_default()
++        .entry(name)
++        .or_default() += 1;
++}
+@@ -107,0 +149 @@
++    pub coloring: bool,
+@@ -123,0 +166 @@
++    SelectCommitKeyboard(usize),
+@@ -150,0 +194 @@
++    operations: Operations,
+@@ -164,0 +209 @@
++    burst_selections: usize,
+@@ -181,0 +227,2 @@
++    Burst,
++    BurstRestore,
+@@ -205,0 +253,2 @@
++    syntax_raw_ready: bool,
++    burst_last_selection: Option<Instant>,
+@@ -238,0 +288,3 @@
++        *operations()
++            .lock()
++            .unwrap_or_else(|error| error.into_inner()) = Operations::default();
+@@ -251,0 +304,2 @@
++            syntax_raw_ready: false,
++            burst_last_selection: None,
+@@ -263,0 +318 @@
++                operations: Operations::default(),
+@@ -280 +335,5 @@
+-    fn phase(&mut self, name: &str) -> Result<(), String> {
++    fn phase(&mut self, name: &'static str) -> Result<(), String> {
++        operations()
++            .lock()
++            .unwrap_or_else(|error| error.into_inner())
++            .phase = name;
+@@ -284 +343 @@
+-    fn transition(&mut self, stage: Stage, phase: &str) {
++    fn transition(&mut self, stage: Stage, phase: &'static str) {
+@@ -288,0 +348 @@
++        self.burst_last_selection = None;
+@@ -313,0 +374,3 @@
++            Stage::Select => Some("selection"),
++            Stage::Burst => Some("selection_burst"),
++            Stage::Syntax => Some("syntax"),
+@@ -374 +437,3 @@
+-        if matches!(self.stage, Stage::Idle | Stage::Index) {
++        if self.stage == Stage::Burst && self.sample < BURST_SELECTIONS {
++            burst_wait(self.burst_last_selection, Instant::now())
++        } else if matches!(self.stage, Stage::Idle | Stage::Index) {
+@@ -497 +562 @@
+-                        self.transition(Stage::Syntax, "syntax");
++                        self.transition(Stage::Burst, "selection_burst");
+@@ -499,0 +565,37 @@
++            }
++            Stage::Burst => {
++                if self.sample < BURST_SELECTIONS {
++                    let now = Instant::now();
++                    if burst_wait(self.burst_last_selection, now).is_zero() {
++                        if let Some(previous) = self.burst_last_selection {
++                            self.timing(
++                                "burst_inter_selection",
++                                now.duration_since(previous).as_secs_f64() * 1_000.0,
++                            );
++                        }
++                        self.burst_last_selection = Some(now);
++                        let target = burst_target(self.sample, snapshot.history_total);
++                        self.sample += 1;
++                        if self.sample == BURST_SELECTIONS {
++                            self.stage_started = now;
++                        }
++                        return Some(PerfAction::SelectCommitKeyboard(target));
++                    }
++                } else {
++                    let target = burst_target(BURST_SELECTIONS - 1, snapshot.history_total);
++                    if self.submitted_ready(
++                        snapshot.details_ready && snapshot.selected_index == target,
++                        "burst_last_details",
++                    ) {
++                        self.timing(
++                            "burst_last_details",
++                            self.stage_started.elapsed().as_secs_f64() * 1_000.0,
++                        );
++                        self.report.workload.burst_selections = self.sample;
++                        self.transition(Stage::BurstRestore, "selection_restore");
++                        return Some(PerfAction::SelectCommit(0));
++                    }
++                }
++            }
++            Stage::BurstRestore if snapshot.details_ready && snapshot.selected_index == 0 => {
++                self.transition(Stage::Syntax, "syntax");
+@@ -505,0 +608 @@
++                    self.syntax_raw_ready = false;
+@@ -506,0 +610,10 @@
++                }
++                if !self.syntax_raw_ready
++                    && snapshot.diff_ready
++                    && snapshot.syntax_target == Some(target)
++                {
++                    self.syntax_raw_ready = true;
++                    self.timing(
++                        "select_raw_diff_cpu_ready",
++                        self.stage_started.elapsed().as_secs_f64() * 1_000.0,
++                    );
+@@ -510,0 +624 @@
++                        && !snapshot.coloring
+@@ -529,0 +644 @@
++                    self.syntax_raw_ready = false;
+@@ -531,0 +647,7 @@
++                if !self.syntax_raw_ready && snapshot.diff_ready && snapshot.heavy_diff {
++                    self.syntax_raw_ready = true;
++                    self.timing(
++                        "open_heavy_raw_cpu_ready",
++                        self.stage_started.elapsed().as_secs_f64() * 1_000.0,
++                    );
++                }
+@@ -533 +655 @@
+-                    snapshot.diff_ready && snapshot.heavy_diff,
++                    snapshot.diff_ready && snapshot.heavy_diff && !snapshot.coloring,
+@@ -592,0 +715,5 @@
++        self.report.operations = std::mem::take(
++            &mut *operations()
++                .lock()
++                .unwrap_or_else(|error| error.into_inner()),
++        );
+@@ -603,0 +731,12 @@
++fn burst_target(sample: usize, total: usize) -> usize {
++    (sample + 1).min(total.saturating_sub(1))
++}
++
++// Schedule from the last dispatched action. After a slow render/Git step, an
++// absolute schedule would catch up by sending multiple keys less than 33 ms apart.
++fn burst_wait(previous: Option<Instant>, now: Instant) -> Duration {
++    previous.map_or(Duration::ZERO, |previous| {
++        BURST_INTERVAL.saturating_sub(now.duration_since(previous))
++    })
++}
++
+@@ -607,0 +747,21 @@
++
++    #[test]
++    fn burst_pacing_waits_from_the_actual_last_key_without_catching_up() {
++        use std::time::{Duration, Instant};
++        let start = Instant::now();
++        assert_eq!(super::burst_wait(None, start), Duration::ZERO);
++        assert_eq!(
++            super::burst_wait(Some(start), start + Duration::from_millis(32)),
++            Duration::from_millis(1)
++        );
++        assert_eq!(
++            super::burst_wait(Some(start), start + Duration::from_millis(33)),
++            Duration::ZERO
++        );
++        let delayed = start + Duration::from_millis(200);
++        assert_eq!(super::burst_wait(Some(start), delayed), Duration::ZERO);
++        assert_eq!(
++            super::burst_wait(Some(delayed), delayed),
++            Duration::from_millis(33)
++        );
++    }
+--- a/src-gpui/src/app.rs
++++ b/src-gpui/src/app.rs
+@@ -868,2 +868 @@
+-            details_ready: !inspector.is_loading()
+-                && inspector
++            details_ready: inspector
+@@ -873,0 +873 @@
++            coloring: false,
+@@ -922,0 +923 @@
++            Some(PerfAction::SelectCommitKeyboard(index)) => self.history.update(cx, |view, cx| view.select_index(index, window, cx)),
+--- a/src-gpui/src/inspector.rs
++++ b/src-gpui/src/inspector.rs
+@@ -2509,0 +2510 @@
++        #[cfg(feature = "app-benchmark")] crate::perf::record_count("inspector_render");

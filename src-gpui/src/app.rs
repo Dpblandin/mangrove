@@ -591,9 +591,14 @@ impl Mangrove {
     }
     fn history_event(&mut self, event: &HistoryEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            HistoryEvent::Selected { sha, .. } => {
-                self.inspector
-                    .update(cx, |view, cx| view.select_commit(sha.clone(), cx));
+            HistoryEvent::Selected { sha, keyboard } => {
+                self.inspector.update(cx, |view, cx| {
+                    if *keyboard {
+                        view.select_commit_keyboard(sha.clone(), cx);
+                    } else {
+                        view.select_commit(sha.clone(), cx);
+                    }
+                });
                 self.sync_selection(cx);
             }
             HistoryEvent::ToggleSolo(name) => self.toggle_solo(Some(name.clone()), window, cx),
@@ -865,12 +870,13 @@ impl Mangrove {
         PerfSnapshot {
             history_ready: !inspector.central_active() && history.visible_loaded_rows() >= 10,
             index_complete: history.index_complete(),
-            details_ready: !inspector.is_loading()
+            details_ready: inspector.details_ready()
                 && inspector
                     .details()
                     .is_some_and(|details| details.sha == history.selected_sha()),
             diff_ready,
             syntax_ready,
+            coloring: inspector.is_coloring(),
             selected_index: history.selected_index(),
             syntax_target,
             heavy_diff: file.is_some_and(|path| {
@@ -920,6 +926,9 @@ impl Mangrove {
             Some(PerfAction::SelectCommit(index)) => self
                 .history
                 .update(cx, |view, cx| view.select_index(index, window, cx)),
+            Some(PerfAction::SelectCommitKeyboard(index)) => self
+                .history
+                .update(cx, |view, cx| view.select_index_keyboard(index, window, cx)),
             Some(PerfAction::OpenSyntaxFile(slot)) => {
                 let path = self.perf.as_ref().unwrap().syntax_file(slot).to_owned();
                 self.perf_open_file(&path, cx);
@@ -1149,11 +1158,9 @@ impl Render for Mangrove {
                                 )
                                 .when(self.repository.is_some(), |view| {
                                     view.child(right_divider).child(
-                                        div()
-                                            .w(px(layout.right))
-                                            .h_full()
-                                            .flex_shrink_0()
-                                            .child(self.inspector.clone()),
+                                        div().w(px(layout.right)).h_full().flex_shrink_0().child(
+                                            render_cached_view(self.inspector.clone(), window),
+                                        ),
                                     )
                                 })
                                 .children(error_toast),

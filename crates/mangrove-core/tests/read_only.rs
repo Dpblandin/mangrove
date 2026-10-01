@@ -9,7 +9,7 @@ use std::{
 
 use git2::{Oid, Repository, Signature, Time};
 use mangrove_core::{
-    model::{FileImageData, FileImageSource, Reference, RepositoryInfo},
+    model::{FileImageData, FileImageSource, GraphEdgeKind, Reference, RepositoryInfo},
     Workspace,
 };
 use rusqlite::Connection;
@@ -364,7 +364,7 @@ fn history_is_topological_and_merge_edges_preserve_git_parent_order() {
             row.graph
                 .edges
                 .iter()
-                .filter(|edge| edge.kind == "parent")
+                .filter(|edge| edge.kind == GraphEdgeKind::Parent)
                 .count(),
             row.parents.len()
         );
@@ -900,7 +900,7 @@ fn removing_shallow_boundaries_rebuilds_history_and_effective_parents_without_re
             .graph
             .edges
             .iter()
-            .filter(|edge| edge.kind == "parent")
+            .filter(|edge| edge.kind == GraphEdgeKind::Parent)
             .count(),
         1
     );
@@ -3368,7 +3368,7 @@ fn solo_walk_uses_selected_roots_all_merge_parents_and_shared_ancestors() {
             .graph
             .edges
             .iter()
-            .filter(|edge| edge.kind == "parent")
+            .filter(|edge| edge.kind == GraphEdgeKind::Parent)
             .count(),
         2
     );

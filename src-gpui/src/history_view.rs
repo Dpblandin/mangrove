@@ -1,9 +1,9 @@
 use crate::{
-    format::{format_count, initials, short_sha},
+    format::format_count,
     graph::{self, ROW_HEIGHT},
     history::{
-        HistoryCache, HistoryReadSlots, PAGE_SIZE, PageRequests, PositionRead, PositionRequests,
-        group_references, reference_badges,
+        HistoryCache, HistoryPage, HistoryReadSlots, PAGE_SIZE, PageRequests, PositionRead,
+        PositionRequests, ReferenceGroup, group_references,
     },
     theme::{self, Palette},
 };
@@ -24,7 +24,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub enum HistoryEvent {
-    Selected { sha: String },
+    Selected { sha: String, keyboard: bool },
     ToggleSolo(String),
     ExitSoloAndNavigate(String),
     SelectWorkingTree,
@@ -39,14 +39,18 @@ pub enum HistoryEvent {
 pub struct HistoryView {
     engine: Arc<Workspace>,
     repository: Option<Arc<RepositoryInfo>>,
-    references: HashMap<String, Arc<Vec<Reference>>>,
+    references: HashMap<String, Arc<ReferenceGroup>>,
+    solo_banner: Option<SharedString>,
+    head_label: SharedString,
     pages: HistoryCache,
     page_requests: PageRequests,
     position_requests: PositionRequests,
     failed: HashSet<usize>,
     total: usize,
     progress: IndexProgress,
+    retired_index_run: Option<String>,
     search_indexed: usize,
+    search_refreshed: Option<Instant>,
     query: String,
     search: Entity<InputState>,
     _search_subscription: Subscription,
@@ -55,6 +59,7 @@ pub struct HistoryView {
     repository_generation: u64,
     navigation_generation: u64,
     requested_index: Option<usize>,
+    requested_keyboard: bool,
     jump_pending: bool,
     selected_sha: String,
     autoselect: bool,
@@ -173,6 +178,8 @@ impl HistoryView {
             engine,
             repository: None,
             references: HashMap::new(),
+            solo_banner: None,
+            head_label: "HEAD".into(),
             pages: HistoryCache::default(),
             page_requests: PageRequests::new(read_slots.clone()),
             position_requests: PositionRequests::new(read_slots),
@@ -182,8 +189,11 @@ impl HistoryView {
                 indexed: 0,
                 complete: false,
                 error: None,
+                index_run: String::new(),
             },
+            retired_index_run: None,
             search_indexed: 0,
+            search_refreshed: None,
             query: String::new(),
             search,
             _search_subscription: search_subscription,
@@ -192,6 +202,7 @@ impl HistoryView {
             repository_generation: 0,
             navigation_generation: 0,
             requested_index: None,
+            requested_keyboard: false,
             jump_pending: false,
             selected_sha: String::new(),
             autoselect: true,
@@ -340,11 +351,15 @@ impl HistoryView {
         self.query_task = None;
         self.repository = None;
         self.references.clear();
+        self.solo_banner = None;
+        self.head_label = "HEAD".into();
         self.total = 0;
+        self.retired_index_run = None;
         self.progress = IndexProgress {
             indexed: 0,
             complete: false,
             error: None,
+            index_run: String::new(),
         };
         self.query.clear();
         self.filter.clear();
@@ -385,6 +400,8 @@ impl HistoryView {
                 self.request_page(0, cx);
             }
             if self.merge_progress(&info.index) || recovered {
+                self.request_visible_pages(cx);
+                self.start_polling(cx);
                 self.changed(cx);
             }
             return;
@@ -392,9 +409,22 @@ impl HistoryView {
         if !same_path {
             self.clear(cx);
         }
-        self.references = group_references(&info.references);
+        self.references = group_references(&info.references, &info.solo_refs);
+        let solo: HashSet<_> = info.solo_refs.iter().map(String::as_str).collect();
+        let solo_labels: Vec<_> = info
+            .references
+            .iter()
+            .filter(|reference| solo.contains(reference.name.as_str()))
+            .map(|reference| reference.label.as_str())
+            .collect();
+        self.solo_banner =
+            (!solo_labels.is_empty()).then(|| format!("Solo : {}", solo_labels.join(", ")).into());
+        self.head_label = format!("HEAD · {}", info.head_name).into();
         self.repository_generation += 1;
-        self.cancel_pages();
+        self.page_requests.reset();
+        self.position_requests.clear();
+        self.failed.clear();
+        self.pages.mark_stale();
         self.cancel_navigation();
         self.index_task = None;
         self.query_task = None;
@@ -402,11 +432,12 @@ impl HistoryView {
         self.filter = normalized_query(&self.query);
         self.repository = Some(info.clone());
         self.progress = info.index.clone();
-        self.total = if self.filter.is_empty() {
-            info.index.indexed
-        } else {
-            0
-        };
+        self.retired_index_run = None;
+        if self.filter.is_empty() {
+            self.total = info.index.indexed;
+        }
+        self.search_indexed = 0;
+        self.search_refreshed = None;
         self.selection_needs_position = !self.selected_sha.is_empty();
         self.error = info.index.error.clone();
         self.max_lanes = 1;
@@ -418,9 +449,25 @@ impl HistoryView {
         self.changed(cx);
     }
 
-    fn changed(&self, cx: &mut Context<Self>) {
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        self.retire_pages(cx);
         cx.emit(HistoryEvent::Changed);
         cx.notify();
+    }
+
+    fn retire_pages(&mut self, cx: &mut Context<Self>) {
+        let retired = self.pages.take_retired();
+        if !retired.is_empty() {
+            cx.background_executor()
+                .spawn(async move {
+                    drop(retired);
+                })
+                .detach();
+        }
+    }
+
+    fn page_useful(&self, page: usize) -> bool {
+        self.pages.useful(page)
     }
 
     fn cancel_pages(&mut self) {
@@ -429,11 +476,14 @@ impl HistoryView {
         self.failed.clear();
         self.pages.clear();
         self.search_indexed = 0;
+        self.search_refreshed = None;
     }
 
     fn cancel_navigation(&mut self) {
         self.navigation_generation += 1;
         self.requested_index = None;
+        self.requested_keyboard = false;
+        self.pages.set_requested_page(None);
         self.jump_pending = false;
         self.navigation_task = None;
         self.position_requests.clear();
@@ -479,20 +529,45 @@ impl HistoryView {
     }
 
     fn merge_progress(&mut self, incoming: &IndexProgress) -> bool {
-        let indexed = self.progress.indexed.max(incoming.indexed);
-        let complete = self.progress.complete || incoming.complete;
-        let error = incoming
-            .error
-            .clone()
-            .or_else(|| self.progress.error.clone());
-        let changed = indexed != self.progress.indexed
-            || complete != self.progress.complete
-            || error != self.progress.error;
+        let new_run = self.progress.index_run != incoming.index_run;
+        if new_run && self.retired_index_run.as_deref() == Some(&incoming.index_run) {
+            // A position lookup can observe publication before an already
+            // running status/open finishes. The superseded run cannot return.
+            return false;
+        }
+        if new_run {
+            // Each session publishes at most one replacement traversal.
+            self.retired_index_run = Some(self.progress.index_run.clone());
+        }
+        let indexed = if new_run {
+            incoming.indexed
+        } else {
+            self.progress.indexed.max(incoming.indexed)
+        };
+        // A refresh can start a background rebuild of the published run.
+        let changed = new_run
+            || indexed != self.progress.indexed
+            || incoming.complete != self.progress.complete
+            || incoming.error != self.progress.error;
         self.progress = IndexProgress {
             indexed,
-            complete,
-            error,
+            complete: incoming.complete,
+            error: incoming.error.clone(),
+            index_run: incoming.index_run.clone(),
         };
+        if new_run {
+            self.page_requests.reset();
+            self.position_requests.clear();
+            self.pages.mark_stale();
+            self.failed.clear();
+            self.search_indexed = 0;
+            self.search_refreshed = None;
+            self.selection_needs_position = !self.selected_sha.is_empty();
+            self.max_lanes = 1;
+            if !self.filtered() {
+                self.total = indexed;
+            }
+        }
         changed
     }
 
@@ -528,12 +603,18 @@ impl HistoryView {
                                 if view.filter.is_empty() {
                                     view.total = view.total.max(view.progress.indexed);
                                     view.pages.invalidate_trailing(view.total);
-                                } else if view.search_indexed < view.progress.indexed {
-                                    // Appended matches can shift every filtered page. Never pair
-                                    // offsets from different search/index snapshots.
-                                    view.pages.clear();
+                                } else if view.search_indexed < view.progress.indexed
+                                    && (view.progress.complete
+                                        || view.search_refreshed.is_none_or(|last| {
+                                            last.elapsed() >= Duration::from_millis(1400)
+                                        }))
+                                {
+                                    // Refresh a bounded snapshot without blanking the visible
+                                    // list on each index tick. Old pages remain until replaced.
+                                    view.pages.mark_stale();
+                                    view.search_refreshed = Some(Instant::now());
                                 }
-                                view.request_page(0, cx);
+                                view.request_visible_pages(cx);
                                 if view.selection_needs_position {
                                     view.refresh_position(cx);
                                 }
@@ -559,53 +640,64 @@ impl HistoryView {
         }));
     }
 
-    fn accept_page(&mut self, page: CommitPage, cx: &mut Context<Self>) -> bool {
-        let mut changed = self.merge_progress(&page.index);
+    fn accept_page(&mut self, page: HistoryPage, cx: &mut Context<Self>) -> bool {
+        // A response from an older published run must not roll progress back.
+        if page.index.index_run != self.progress.index_run {
+            // A newly published run can arrive before the next status tick.
+            // Wait for that authoritative tick rather than spin on hot reads.
+            self.pages.defer(page.offset / PAGE_SIZE);
+            self.pages.retire(page);
+            return false;
+        }
+        let mut changed = page.index.indexed > self.progress.indexed;
+        self.progress.indexed = self.progress.indexed.max(page.index.indexed);
         if let Some(error) = page.index.error.clone() {
             self.error = Some(error);
         }
         if self.filtered() {
-            if page.index.indexed < self.search_indexed.max(self.progress.indexed) {
+            if page.index.indexed < self.search_indexed {
+                self.pages.retire(page);
                 return false;
             }
             if page.index.indexed > self.search_indexed {
-                self.pages.clear();
+                self.pages.mark_stale();
                 self.search_indexed = page.index.indexed;
+                self.search_refreshed = Some(Instant::now());
                 changed = true;
             }
         }
-        let total = self.total.max(page.total).max(if self.filtered() {
-            0
+        let total = if self.filtered() {
+            page.total
         } else {
-            self.progress.indexed
-        });
+            page.total.max(self.progress.indexed)
+        };
         changed |= total != self.total;
         self.total = total;
         let first = if page.offset == 0 {
-            page.commits.first().map(|row| row.sha.clone())
+            page.rows.first().map(|row| row.commit.sha.clone())
         } else {
             None
         };
-        for row in &page.commits {
-            self.max_lanes = self.max_lanes.max(row.graph.width);
-        }
-        changed |= self.pages.insert(page.offset, page.commits, self.total);
+        self.max_lanes = self.max_lanes.max(page.max_lanes);
+        changed |= self.pages.insert(page, self.total);
         if self.autoselect
             && self.selected_sha.is_empty()
             && self.requested_index.is_none()
             && !self.jump_pending
             && let Some(sha) = first
         {
-            self.select(sha, 0, cx);
+            self.select(sha, 0, false, cx);
         }
         if let Some(index) = self.requested_index
+            && self.pages.current(index / PAGE_SIZE)
             && let Some(row) = self.pages.row(index)
         {
-            self.select(row.sha.clone(), index, cx);
+            self.select(row.sha.clone(), index, self.requested_keyboard, cx);
         }
         if self.selection_needs_position
             && self.filtered()
             && let Some(position) = self.pages.find_sha(&self.selected_sha)
+            && self.pages.current(position / PAGE_SIZE)
         {
             self.selected_index = position;
             self.selection_needs_position = false;
@@ -617,9 +709,21 @@ impl HistoryView {
         true
     }
 
+    fn request_visible_pages(&mut self, cx: &mut Context<Self>) {
+        self.request_page(0, cx);
+        let visible = self.pages.visible_page;
+        for page in visible.saturating_sub(1)..=visible.saturating_add(1) {
+            if page * PAGE_SIZE < self.total {
+                self.request_page(page, cx);
+            }
+        }
+    }
+
     fn request_page(&mut self, page: usize, cx: &mut Context<Self>) {
         if self.debounce_pending
-            || self.pages.contains(page)
+            || self.pages.current(page)
+            || !self.pages.can_request(page)
+            || !self.page_useful(page)
             || self.failed.contains(&page)
             || self.repository.is_none()
         {
@@ -639,7 +743,11 @@ impl HistoryView {
         let id = info.id.clone();
         while let Some((read, lease)) = self.page_requests.try_start() {
             let page = read.page;
-            if self.pages.contains(page) || self.failed.contains(&page) {
+            if self.pages.current(page)
+                || !self.pages.can_request(page)
+                || !self.page_useful(page)
+                || self.failed.contains(&page)
+            {
                 self.page_requests.finish(read);
                 drop(lease);
                 continue;
@@ -647,11 +755,19 @@ impl HistoryView {
             let engine = self.engine.clone();
             let id = id.clone();
             let filter = self.filter.clone();
+            #[cfg(feature = "app-benchmark")]
+            crate::perf::record_count("list_commits_read");
             cx.spawn(async move |this, cx| {
                 let (lease, result) = cx
                     .background_executor()
                     .spawn(async move {
-                        let result = engine.list_commits(&id, page * PAGE_SIZE, PAGE_SIZE, &filter);
+                        #[cfg(feature = "app-benchmark")]
+                        let started = Instant::now();
+                        let result = engine
+                            .list_commits(&id, page * PAGE_SIZE, PAGE_SIZE, &filter)
+                            .map(HistoryPage::new);
+                        #[cfg(feature = "app-benchmark")]
+                        crate::perf::record_operation("history_page", started.elapsed());
                         (lease, result)
                     })
                     .await;
@@ -660,11 +776,18 @@ impl HistoryView {
                     if view.page_requests.finish(read) {
                         match result {
                             Ok(result) => {
-                                let accepted = view.accept_page(result, cx);
+                                let accepted = if view.page_useful(page) {
+                                    view.accept_page(result, cx)
+                                } else {
+                                    view.pages.retire(result);
+                                    true
+                                };
                                 // A trailing page from an older SQLite snapshot
                                 // must wait for another physically available slot.
                                 if !accepted
-                                    || (!view.pages.contains(page) && page * PAGE_SIZE < view.total)
+                                    && view.page_useful(page)
+                                    && view.pages.can_request(page)
+                                    && page * PAGE_SIZE < view.total
                                 {
                                     view.page_requests.request(page);
                                 }
@@ -675,16 +798,22 @@ impl HistoryView {
                                 failed = true;
                             }
                         }
+                    } else if let Ok(page) = result {
+                        view.pages.retire(page);
                     }
                     // Accept/reject first. Stale reads still release a physical
                     // slot and wake this generation's bounded page intents.
                     drop(lease);
                     if let Some(index) = view.requested_index {
                         let page = index / PAGE_SIZE;
-                        if !view.pages.contains(page) && !view.failed.contains(&page) {
+                        if !view.pages.current(page)
+                            && view.pages.can_request(page)
+                            && !view.failed.contains(&page)
+                        {
                             view.page_requests.request(page);
                         }
                     }
+                    view.retire_pages(cx);
                     view.pump_pages(cx);
                     if failed {
                         view.changed(cx);
@@ -717,7 +846,7 @@ impl HistoryView {
         cx.notify();
     }
 
-    fn select(&mut self, sha: String, position: usize, cx: &mut Context<Self>) {
+    fn select(&mut self, sha: String, position: usize, keyboard: bool, cx: &mut Context<Self>) {
         self.cancel_navigation();
         if self.selected_sha == sha && self.selected_index == position && !self.working.selected {
             return;
@@ -728,11 +857,30 @@ impl HistoryView {
         self.selected_index = position;
         self.selection_needs_position = false;
         self.error = None;
-        cx.emit(HistoryEvent::Selected { sha });
+        cx.emit(HistoryEvent::Selected { sha, keyboard });
         cx.notify();
     }
 
     pub fn select_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_index_with_source(index, false, window, cx);
+    }
+
+    pub fn select_index_keyboard(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_index_with_source(index, true, window, cx);
+    }
+
+    fn select_index_with_source(
+        &mut self,
+        index: usize,
+        keyboard: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.total == 0 || self.debounce_pending {
             return;
         }
@@ -740,10 +888,14 @@ impl HistoryView {
         let target = index.min(self.total - 1);
         self.focus.focus(window, cx);
         self.scroll_to_index(target);
-        if let Some(row) = self.pages.row(target) {
-            self.select(row.sha.clone(), target, cx);
+        if self.pages.current(target / PAGE_SIZE)
+            && let Some(row) = self.pages.row(target)
+        {
+            self.select(row.sha.clone(), target, keyboard, cx);
         } else {
             self.requested_index = Some(target);
+            self.requested_keyboard = keyboard;
+            self.pages.set_requested_page(Some(target / PAGE_SIZE));
             self.request_page(target / PAGE_SIZE, cx);
             cx.notify();
         }
@@ -751,7 +903,7 @@ impl HistoryView {
 
     pub fn navigate(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
         if self.working.selected && direction >= 0 {
-            self.select_index(0, window, cx);
+            self.select_index_keyboard(0, window, cx);
             return;
         }
         if direction < 0 && self.selected_index == 0 && self.show_working_row() {
@@ -763,14 +915,14 @@ impl HistoryView {
             return;
         }
         if self.selected_sha.is_empty() && self.requested_index.is_none() {
-            self.select_index(0, window, cx);
+            self.select_index_keyboard(0, window, cx);
             return;
         }
         let target = self
             .requested_index
             .unwrap_or(self.selected_index)
             .saturating_add_signed(direction);
-        self.select_index(target, window, cx);
+        self.select_index_keyboard(target, window, cx);
     }
 
     fn refresh_position(&mut self, cx: &mut Context<Self>) {
@@ -818,27 +970,31 @@ impl HistoryView {
             let engine = self.engine.clone();
             let id = id.clone();
             let sha = read.sha().to_owned();
-            let with_progress = matches!(&read, PositionRead::Jump { .. });
+            let started_run = self.progress.index_run.clone();
             cx.spawn(async move |this, cx| {
                 let (lease, result) = cx
                     .background_executor()
                     .spawn(async move {
-                        let result = (|| {
-                            let position = engine.commit_position(&id, &sha)?;
-                            let progress = if with_progress {
-                                Some(engine.index_status(&id)?)
-                            } else {
-                                None
-                            };
-                            Ok::<_, String>((position, progress))
-                        })();
+                        let result = engine.commit_position_with_status(&id, &sha);
                         (lease, result)
                     })
                     .await;
                 let _ = this.update(cx, |view, cx| {
                     view.position_requests.finish(&read);
                     if view.position_is_current(&read) {
-                        view.accept_position(read, result, cx);
+                        if result.as_ref().is_ok_and(|(_, progress)| {
+                            !position_snapshot_can_publish(
+                                &started_run,
+                                &view.progress.index_run,
+                                &progress.index_run,
+                            )
+                        }) {
+                            // Status polling published a different traversal
+                            // while this lookup read the previous snapshot.
+                            view.position_requests.request(read);
+                        } else {
+                            view.accept_position(read, result, cx);
+                        }
                     }
                     drop(lease);
                     view.pump_position(cx);
@@ -851,33 +1007,41 @@ impl HistoryView {
     fn accept_position(
         &mut self,
         read: PositionRead,
-        result: mangrove_core::Result<(Option<usize>, Option<IndexProgress>)>,
+        result: mangrove_core::Result<(Option<usize>, IndexProgress)>,
         cx: &mut Context<Self>,
     ) {
         let PositionRead::Jump {
             ref sha, deadline, ..
         } = read
         else {
-            if let Ok((Some(position), _)) = result {
+            if let Ok((Some(position), progress)) = result {
+                let changed = self.merge_progress(&progress);
                 self.selected_index = position;
                 self.selection_needs_position = false;
-                cx.notify();
+                if changed {
+                    self.request_visible_pages(cx);
+                    self.changed(cx);
+                } else {
+                    cx.notify();
+                }
             }
             return;
         };
         match result {
-            Ok((Some(position), Some(progress))) => {
+            Ok((Some(position), progress)) => {
                 self.jump_pending = false;
                 self.merge_progress(&progress);
                 self.total = self.total.max(progress.indexed);
                 self.requested_index = Some(position);
+                self.pages.set_requested_page(Some(position / PAGE_SIZE));
                 self.scroll_to_index(position);
                 self.request_page(position / PAGE_SIZE, cx);
                 self.changed(cx);
             }
-            Ok((None, Some(progress))) => {
+            Ok((None, progress)) => {
                 self.merge_progress(&progress);
-                if progress.error.is_none()
+                if progress.complete
+                    && progress.error.is_none()
                     && self
                         .repository
                         .as_ref()
@@ -915,7 +1079,6 @@ impl HistoryView {
                 self.error = Some(error);
                 self.changed(cx);
             }
-            Ok((_, None)) => unreachable!("jump position reads include index progress"),
         }
     }
 
@@ -1371,7 +1534,7 @@ impl HistoryView {
             .lane_offset
             .min(self.max_lanes.saturating_sub(self.visible_lanes()));
         if range.len() > 1 {
-            self.pages.visible_page = range.start / PAGE_SIZE;
+            self.pages.set_visible_page(range.start / PAGE_SIZE);
             #[cfg(feature = "app-benchmark")]
             {
                 self.visible_range = range.clone();
@@ -1389,7 +1552,7 @@ impl HistoryView {
         let filtered = self.filtered();
         range
             .map(|index| {
-                let Some(row) = self.pages.row_shared(index) else {
+                let Some(prepared) = self.pages.row_shared(index) else {
                     return div()
                         .id(("commit-loading", index))
                         .role(Role::ListBoxOption)
@@ -1410,38 +1573,39 @@ impl HistoryView {
                         .child("Chargement…")
                         .into_any_element();
                 };
+                let row = prepared.commit.clone();
                 let selected = row.sha == self.selected_sha && !self.working.selected;
                 let sha = row.sha.clone();
-                let refs = self.references.get(&row.sha).cloned();
+                let group = self.references.get(&row.sha).cloned();
+                let refs = group.as_ref().map(|group| group.references.clone());
                 let context_refs = refs.clone();
                 let accessible_refs = refs.clone();
+                let has_branches = group.as_ref().is_some_and(|group| group.has_branches);
                 let displayed_refs = if hide_refs {
-                    Vec::new()
+                    &[][..]
                 } else {
-                    reference_badges(
-                        refs.as_deref().map(Vec::as_slice).unwrap_or_default(),
-                        self.repository
-                            .as_ref()
-                            .map_or(&[][..], |info| info.solo_refs.as_slice()),
-                    )
+                    group
+                        .as_ref()
+                        .map_or(&[][..], |group| group.badges.as_slice())
                 };
-                let subject = if row.summary.is_empty() {
-                    "(sans message)".to_owned()
-                } else {
-                    row.summary.clone()
-                };
+                let subject = prepared.subject.clone();
                 let font_size = self.font_size;
                 let entity = cx.entity().downgrade();
                 let menu_entity = entity.clone();
                 let element = div()
                     .id(("commit", index))
-                    .accessibility_id(format!("commit-option-{index}"))
+                    .when(window.is_a11y_active(), |style| {
+                        style.accessibility_id(format!("commit-option-{index}"))
+                    })
                     .role(Role::ListBoxOption)
                     .focusable()
                     .tab_index(0)
                     .tab_stop(false)
-                    .aria_label(format!("{}, {}", subject, row.author))
-                    .aria_description(format!("{}, {}", short_date(row.time), short_sha(&row.sha)))
+                    .when(window.is_a11y_active(), |style| {
+                        style
+                            .aria_label(format!("{}, {}", subject, row.author))
+                            .aria_description(format!("{}, {}", prepared.date, prepared.short_sha))
+                    })
                     .aria_selected(selected)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(self.total)
@@ -1499,7 +1663,7 @@ impl HistoryView {
                             .items_center()
                             .gap(px(7.))
                             .overflow_hidden()
-                            .children(displayed_refs.into_iter().enumerate().map(
+                            .children(displayed_refs.iter().enumerate().map(
                                 |(ref_index, reference)| {
                                     let tag = reference.kind == "tag";
                                     let color = if tag { palette.warning } else { palette.accent };
@@ -1514,11 +1678,13 @@ impl HistoryView {
                                         .focusable()
                                         .tab_index(0)
                                         .tab_stop(false)
-                                        .aria_label(format!(
-                                            "{} {}",
-                                            if tag { "Tag" } else { "Branche" },
-                                            reference.label
-                                        ))
+                                        .when(window.is_a11y_active(), |style| {
+                                            style.aria_label(format!(
+                                                "{} {}",
+                                                if tag { "Tag" } else { "Branche" },
+                                                reference.label,
+                                            ))
+                                        })
                                         .on_a11y_action(
                                             AccessibleAction::Click,
                                             move |_, window, cx| {
@@ -1639,11 +1805,18 @@ impl HistoryView {
                                             .justify_center()
                                             .text_size(px(8. + font_size))
                                             .text_color(rgb(palette.text))
-                                            .child(initials(&row.author)),
+                                            .child(prepared.initials.clone()),
                                     )
-                                    .child(div().min_w_0().truncate().child(row.author.clone())),
+                                    .child(
+                                        div().min_w_0().truncate().child(prepared.author.clone()),
+                                    ),
                             )
-                            .child(div().w(px(72.)).flex_shrink_0().child(short_date(row.time)))
+                            .child(
+                                div()
+                                    .w(px(72.))
+                                    .flex_shrink_0()
+                                    .child(prepared.date.clone()),
+                            )
                     })
                     .child(
                         div()
@@ -1652,7 +1825,7 @@ impl HistoryView {
                             .text_right()
                             .font_family(theme::MONO)
                             .text_size(px(10. + font_size))
-                            .child(short_sha(&row.sha)),
+                            .child(prepared.short_sha.clone()),
                     )
                     .when(selected, |style| {
                         style.child(
@@ -1668,7 +1841,7 @@ impl HistoryView {
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.close_menu(window, cx);
                         view.focus.focus(window, cx);
-                        view.select(sha.clone(), index, cx);
+                        view.select(sha.clone(), index, false, cx);
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -1685,31 +1858,24 @@ impl HistoryView {
                             cx.stop_propagation();
                         }),
                     )
-                    .when(
-                        accessible_refs.as_ref().is_some_and(|references| {
-                            references.iter().any(|reference| {
-                                reference.kind == "local" || reference.kind == "remote"
-                            })
-                        }),
-                        |style| {
-                            style.on_a11y_action(
-                                AccessibleAction::ShowContextMenu,
-                                move |_, window, cx| {
-                                    let _ = menu_entity.update(cx, |view, cx| {
-                                        view.open_menu(
-                                            accessible_refs
-                                                .as_deref()
-                                                .map(Vec::as_slice)
-                                                .unwrap_or_default(),
-                                            view.context_position(index),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                },
-                            )
-                        },
-                    );
+                    .when(window.is_a11y_active() && has_branches, |style| {
+                        style.on_a11y_action(
+                            AccessibleAction::ShowContextMenu,
+                            move |_, window, cx| {
+                                let _ = menu_entity.update(cx, |view, cx| {
+                                    view.open_menu(
+                                        accessible_refs
+                                            .as_deref()
+                                            .map(Vec::as_slice)
+                                            .unwrap_or_default(),
+                                        view.context_position(index),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            },
+                        )
+                    });
                 element.into_any_element()
             })
             .collect()
@@ -1718,23 +1884,14 @@ impl HistoryView {
 
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_count("history_render");
         let palette = self.palette;
         if self.search.read(cx).value().as_ref() != self.query {
             let query = self.query.clone();
             self.search
                 .update(cx, |input, cx| input.set_value(query, window, cx));
         }
-        let solo_labels: Vec<_> = self
-            .repository
-            .as_ref()
-            .map(|info| {
-                info.references
-                    .iter()
-                    .filter(|reference| info.solo_refs.contains(&reference.name))
-                    .map(|reference| reference.label.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
         let mut root = div()
             .id("history-view")
             .size_full()
@@ -1775,13 +1932,9 @@ impl Render for HistoryView {
                                 div()
                                     .id("history-head-reference")
                                     .role(Role::Label)
-                                    .aria_label(format!(
-                                        "HEAD · {}",
-                                        self.repository
-                                            .as_ref()
-                                            .map(|info| info.head_name.as_str())
-                                            .unwrap_or("HEAD")
-                                    ))
+                                    .when(window.is_a11y_active(), |style| {
+                                        style.aria_label(self.head_label.clone())
+                                    })
                                     .ml(px(6.))
                                     .max_w(px(180.))
                                     .min_w_0()
@@ -1794,13 +1947,7 @@ impl Render for HistoryView {
                                     .bg(rgb(palette.accent_soft))
                                     .text_size(px(10. + self.font_size))
                                     .text_color(rgb(palette.accent))
-                                    .child(format!(
-                                        "HEAD · {}",
-                                        self.repository
-                                            .as_ref()
-                                            .map(|info| info.head_name.as_str())
-                                            .unwrap_or("HEAD")
-                                    )),
+                                    .child(self.head_label.clone()),
                             ),
                     )
                     .child(
@@ -1824,7 +1971,7 @@ impl Render for HistoryView {
                             ),
                     ),
             );
-        if !solo_labels.is_empty() {
+        if let Some(solo_banner) = &self.solo_banner {
             root = root.child(
                 div()
                     .w_full()
@@ -1844,7 +1991,7 @@ impl Render for HistoryView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(format!("Solo : {}", solo_labels.join(", "))),
+                            .child(solo_banner.clone()),
                     )
                     .child(
                         div()
@@ -1984,15 +2131,15 @@ impl Render for HistoryView {
                 match event.keystroke.key.as_str() {
                     "down" => view.navigate(1, window, cx),
                     "up" => view.navigate(-1, window, cx),
-                    "home" => view.select_index(0, window, cx),
-                    "end" => view.select_index(view.total.saturating_sub(1), window, cx),
+                    "home" => view.select_index_keyboard(0, window, cx),
+                    "end" => view.select_index_keyboard(view.total.saturating_sub(1), window, cx),
                     "contextmenu" | "f10"
                         if event.keystroke.key == "contextmenu"
                             || event.keystroke.modifiers.shift =>
                     {
                         if let Some(references) = view.references.get(&view.selected_sha).cloned() {
                             view.open_menu(
-                                references.as_slice(),
+                                references.references.as_slice(),
                                 view.context_position(view.selected_index),
                                 window,
                                 cx,
@@ -2123,6 +2270,12 @@ impl Render for HistoryView {
     }
 }
 
+// A lookup may observe publication before the next poll. It can advance the
+// run that it started with, but never restore a run superseded while in flight.
+fn position_snapshot_can_publish(started: &str, current: &str, snapshot: &str) -> bool {
+    started == current || snapshot == current
+}
+
 fn normalized_query(query: &str) -> String {
     query.trim().chars().take(256).collect()
 }
@@ -2146,7 +2299,10 @@ pub fn short_date(timestamp: i64) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::{BranchMenu, WorkingSummary, format_count, initials, normalized_query, short_sha};
+    use super::{
+        BranchMenu, WorkingSummary, format_count, normalized_query, position_snapshot_can_publish,
+    };
+    use crate::format::{initials, short_sha};
     use gpui_kit::{ScrollStrategy, point, px};
     use mangrove_core::model::Reference;
 
@@ -2157,6 +2313,16 @@ mod tests {
             kind: kind.into(),
             sha: "commit".into(),
         }
+    }
+
+    #[test]
+    fn position_lookup_cannot_restore_a_traversal_superseded_by_polling() {
+        assert!(position_snapshot_can_publish("old", "old", "old"));
+        // The lookup can publish a newly completed traversal before polling.
+        assert!(position_snapshot_can_publish("old", "old", "new"));
+        // An older read must retry once polling has already published the new run.
+        assert!(!position_snapshot_can_publish("old", "new", "old"));
+        assert!(position_snapshot_can_publish("old", "new", "new"));
     }
 
     #[test]
