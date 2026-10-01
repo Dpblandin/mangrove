@@ -2365,6 +2365,32 @@
             ],
             note: 'Targeted UI regression QA after manual comparison. The 120-launch series and the four syntax control launches keep their original source revisions and binaries; these UI captures are separate.',
           },
+          post_settings_interaction_validation: {
+            verified_at: '2026-10-01T06:14:30.342506+00:00',
+            source_git_revision: 'c0611c5b668019a5dd8a2cb47e34ccc40c8cbac3',
+            production_binary_sha256:
+              '20f487e64e2d162f5341d71f533f58917ce6b46e04380ace366cc10db8e2cd05',
+            configuration: 'release, default features, production bundle; classic theme',
+            bundle_identifier: 'dev.mangrove.gpui',
+            window_points: [1440, 920],
+            display_scale: 2,
+            gpui_test_count: 77,
+            gpui_benchmark_test_count: 82,
+            checks: [
+              'fractional draft 1.5 increments to 2 and decrements to 1 in the native numeric input; unit contracts cover integer steps and both range boundaries',
+              'Escape returns to the workspace directly from the input after stepping, after clicking Reset, and after clicking Save',
+              'Save persists 2 through closing and reopening Settings; the original interval 1 is then restored and saved',
+              'Cmd+O after Save opens the native picker and Cancel returns to the workspace',
+              'after dragging and releasing the left divider, the native Settings menu opens; Escape retains the selected file; Cmd+O and Cancel retain that file again',
+              'source review confirms the Settings button, native menu and keyboard action share the active-resize and native-picker guard',
+              'release clippy all-targets -D warnings passes in normal and instrumented configurations; all 77 normal and 82 instrumented tests pass',
+              'production bundle Info.plist passes plutil; the final GPUI bundle is left running on the previously consulted repository and file',
+            ],
+            limitations: [
+              'the automation drag API completes the drag atomically; Settings during a held mouse drag was verified by source review, while native QA covers actions after release',
+              'the comparison screenshots retain their original source and binary provenance; this final interaction pass does not replace the frozen benchmark runs',
+            ],
+          },
         },
         verification:
           'Vérifications consignées dans le manifeste QA du 2026-10-01T00:02:10.732786+00:00 : 75 tests GPUI, configuration normale; 80 tests GPUI, configuration instrumentée; 70 tests du moteur Git; 327 tests Vue; 8 tests de fixture; 6 tests du harness Linux. 9 captures affichées vérifiées par SHA-256 et dimensions. La provenance des captures est distinguée de celle des binaires mesurés dans le contexte ; aucune égalité pixel par pixel n’est annoncée.',
