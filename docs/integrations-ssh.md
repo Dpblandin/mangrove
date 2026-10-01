@@ -13,6 +13,8 @@ modification des références d’un dépôt local. Les références renvoyées 
 en mémoire pour l’affichage. Ce service est indépendant du fetch déjà présent
 dans le moteur des dépôts locaux.
 
+Le clonage explicite disponible depuis **Nouvel onglet → Cloner** est une action distincte qui réutilise ce choix SSH et télécharge les objets dans un nouveau dossier. Il ne change pas le contrat de `ls-remote` décrit ici ; voir [le parcours de clonage](integrations.md#cloner-un-dépôt).
+
 ## Préparation
 
 - Installer Git et OpenSSH et les rendre accessibles à l’application.

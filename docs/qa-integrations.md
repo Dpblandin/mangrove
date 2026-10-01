@@ -1,6 +1,6 @@
 # QA profils et intégrations — issue 5
 
-Session du 1 octobre 2026, macOS ARM, Rust 1.95.0. La fixture est générée avec `node scripts/create-fixture.mjs --commits 200 --large-change` : 207 commits au total, dont le commit de démonstration de 46 fichiers. Les préférences et profils utilisent des fichiers temporaires distincts des données utilisateur. Aucun token utilisateur, dépôt professionnel ni serveur privé n’est utilisé.
+Session du 1 octobre 2026, macOS ARM, Rust 1.95.0. La fixture initiale est générée avec `node scripts/create-fixture.mjs --commits 200 --large-change` : 207 commits au total, dont le commit de démonstration de 46 fichiers. Les préférences et profils de cette première passe utilisent des fichiers temporaires distincts des données utilisateur, sans token utilisateur, dépôt professionnel ni serveur privé. Les ajouts et validations suivants sont détaillés dans leurs sections respectives.
 
 ## Contrôles automatisés
 
@@ -72,6 +72,28 @@ Le [job Windows de la passe OAuth](https://github.com/Dpblandin/mangrove/actions
 
 Clippy GPUI tous targets et le packaging macOS release passent. Le bundle reconstruit est relancé sur Intégrations, avec GitLab.com et l’ID public configurés localement. SHA-256 de l’exécutable : `7eeb1e33721d9a42320c70d39db922088139363c1c5a21b1a7d32dc2f94d6e6b`. Le nouvel essai authentifié reste à effectuer par l’utilisateur ; cette passe de diagnostic n’a utilisé aucun credential réel.
 
+## Refonte des connexions et clonage explicite
+
+L’utilisateur confirme que la connexion GitLab fonctionne mieux après la correction précédente et demande une interface de connexions sans liste de dépôts dans les paramètres. Il autorise ensuite explicitement le clonage réel.
+
+La refonte ajoute une navigation verticale des six éditions, des cartes de comptes connectés et un formulaire visible seulement pour une nouvelle connexion. SSH devient une rubrique distincte avec sélecteur de clé existante. L’accueil propose Ouvrir et Cloner ; la navigation des dépôts, les PR/MR et la CI sont déplacées dans un écran dédié. À la demande suivante de l’utilisateur, un Select natif recherchable et groupé par namespace remplace la liste permanente. Le formulaire aligne le dossier parent, le dépôt et le nouveau dossier. Les anciens comptes peuvent actualiser leur identité sans déconnexion ni modification du coffre.
+
+Le backend ajoute la lecture de l’identité GitLab/GitHub, les URLs de clone SSH normalisées et un clonage explicite dans un nouveau dossier. Les tokens API restent séparés des identifiants Git. Les tests utilisent un vrai dépôt synthétique pour vérifier checkout, historique, tag et origin, le refus des destinations existantes et des liens symboliques, la réservation concurrente, l’annulation de Git et de son descendant, les URLs dangereuses et les diagnostics fixes. Après les corrections finales, 74 tests distants passent : 50 unitaires, 23 fournisseurs et un doctest. Les dix tests de clone sont inclus ; le test opt-in du coffre n’est pas relancé dans cette passe. Formatage et Clippy remote/GPUI sans warnings, 84 tests GPUI production et 89 instrumentés passent.
+
+Deux revues `refactor` backend/UI et trois lectures `simplify` parallèles couvrent ce delta. Les corrections rendent la sélection d’un dépôt indépendante des lectures PR/MR, rétablissent Échap depuis les champs, synchronisent le retour aux paramètres et empêchent un clic sur le compte actif d’annuler un clone. Les URLs HTTPS annoncées par les forges partagent désormais le contrat du clone ; les helpers d’environnement Git, d’initiales et de sélecteurs natifs sont réutilisés.
+
+Le delta Select reçoit une revue `refactor` et trois lectures `simplify` supplémentaires. La page ou le compte recrée l’entité et sa subscription : les indices des confirmations différées du kit ne peuvent pas cibler un autre dépôt dans un nouveau jeu de données. Les gardes vérifient aussi le scope et l’entité. Rechoisir la même valeur préserve le nom de dossier personnalisé et les PR/MR ; changer de valeur pendant une lecture MR/CI annule cette lecture. Une confirmation tardive pendant clone/pagination rétablit la sélection correcte. Les fixtures vérifient IDs stables, namespaces et recherche sur le nom complet sans distinction de casse. Les recherches filtrent la page chargée, sans requête réseau ni chargement massif.
+
+Une première passe native avec préférences et profils temporaires vérifie l’accueil Ouvrir/Cloner, les rubriques Profils/SSH/Intégrations, les cartes de comptes et le formulaire GitLab replié. Les comptes synthétiques sans credentials servent uniquement à vérifier l’affichage et le diagnostic de credential absent. L’icône GitLab embarquée remplace le monogramme dans les rails fournisseurs et comptes. Les paramètres n’affichent aucune liste de dépôts. Échap depuis l’URL de clone et le champ SSH revient à l’espace local ; la rubrique SSH est correctement restaurée après ouverture puis fermeture de l’écran distant.
+
+Un clonage HTTPS réel de [octocat/Hello-World](https://github.com/octocat/Hello-World) est déclenché par l’interface vers un nouveau dossier temporaire. Le dépôt s’ouvre automatiquement avec son historique et ses branches : trois commits depuis HEAD, cinq sur toutes les références, `README` contenant `Hello World!`, origin public attendu et working tree propre. Une seconde tentative vers le même dossier affiche le refus de destination existante ; les contenus et dates des treize fichiers du clone restent identiques au snapshot préalable. Ce clone public ne valide pas les credentials HTTPS privés ni un transport SSH réel.
+
+Après l’ajout du Select, le bundle final est reconstruit et relancé avec les mêmes profils temporaires. Le formulaire affiche le dossier parent avant le sélecteur, puis le nouveau dossier ; le sélecteur reste désactivé pour le compte synthétique sans credential. Un nouveau clone public, vers un autre dossier neuf, s’ouvre automatiquement et conserve les mêmes résultats de vérification Git. Le menu peuplé par une forge authentifiée reste à vérifier en essai réel.
+
+Le bundle de QA final utilise les mêmes octets exécutables que le bundle production. SHA-256 : `5eb11a73d4078d6c8b11912e21ddba1eb9c4ccc753233a540c0f6b7031401156`. La fenêtre de validation du clone est quittée par son menu après ces essais.
+
+Les [sept jobs de la correction précédente](https://github.com/Dpblandin/mangrove/actions/runs/36865020055) passent, dont Windows. La refonte et le clonage demandent leur propre validation sur le nouveau commit.
+
 ## Essais restants et statut
 
 La PR reste **draft à la demande de l’utilisateur**. Les essais suivants restent à effectuer :
@@ -79,6 +101,7 @@ La PR reste **draft à la demande de l’utilisateur**. Les essais suivants rest
 - Connexion réussie, déconnexion et navigation dépôt → PR/MR → commentaires → CI avec un compte de test sur GitLab.com et chaque édition auto-hébergée annoncée, GitHub.com/Enterprise Server et Bitbucket Cloud/Server/Data Center.
 - Expiration/révocation et limitation d’API réelles, policies SSO et certificats/proxys d’entreprise sur ces environnements.
 - Serveur SSH réel avec identité et clé d’hôte de test déjà autorisées, en mode agent puis fichier ; refus des hôtes inconnus et des clés non autorisées.
+- Clones privés réels via les gestionnaires HTTPS de Git et via SSH, sur les éditions annoncées ; comportement sous proxy et avec certificats d’entreprise selon les limites documentées.
 - QA native Windows/Linux et coffres natifs de ces plateformes. Les commandes de CI couvrent leurs builds et tests sans prétendre remplacer cette QA.
 - Comparaison du rendu natif avec et sans enrichissement authentifié réel. La mesure actuelle couvre uniquement le moteur local et un transport simulé.
 

@@ -28,6 +28,7 @@ pub enum SettingsEvent {
 enum SettingsSection {
     General,
     Profiles,
+    Ssh,
     Integrations,
 }
 
@@ -120,20 +121,35 @@ impl SettingsView {
     ) {
         self.section = section;
         if section == SettingsSection::General {
+            self.leave(window, cx);
             self.focus(window, cx);
         } else if let Some(integrations) = &self.integrations {
             integrations.update(cx, |view, cx| {
                 view.set_section(
-                    if section == SettingsSection::Profiles {
-                        IntegrationsSection::Profiles
-                    } else {
-                        IntegrationsSection::Integrations
+                    match section {
+                        SettingsSection::Profiles => IntegrationsSection::Profiles,
+                        SettingsSection::Ssh => IntegrationsSection::Ssh,
+                        _ => IntegrationsSection::Integrations,
                     },
                     cx,
                 )
             });
         }
         cx.notify();
+    }
+
+    pub fn show_integrations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_section(SettingsSection::Integrations, window, cx);
+    }
+
+    pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_section(self.section, window, cx);
+    }
+
+    pub fn leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(integrations) = &self.integrations {
+            integrations.update(cx, |view, cx| view.leave_settings(window, cx));
+        }
     }
 
     pub fn set_theme(&mut self, palette: Palette, font_size_offset: f32, cx: &mut Context<Self>) {
@@ -348,11 +364,13 @@ impl Render for SettingsView {
                                     .child("Général")
                                     .on_click(cx.listener(|this, _, window, cx| this.select_section(SettingsSection::General, window, cx))),
                             )
-                            .children([(SettingsSection::Profiles, "settings-profiles", "Profils"), (SettingsSection::Integrations, "settings-integrations", "Intégrations")].into_iter().map(|(section, id, label)| {
+                            .children([(SettingsSection::Profiles, "settings-profiles", "Profils", IconName::Users), (SettingsSection::Ssh, "settings-ssh", "SSH", IconName::ShieldCheck), (SettingsSection::Integrations, "settings-integrations", "Intégrations", IconName::Plug)].into_iter().map(|(section, id, label, glyph)| {
                                 Button::new(id).w_full().mt(px(4.)).px(px(16.)).py(px(12.)).justify_start().rounded(px(6.))
                                     .when(self.section == section, |button| button.bg(rgb(p.accent).opacity(0.1)))
                                     .text_color(rgb(p.text)).text_size(px(16. + offset)).cursor_pointer().accessibility_label(label)
                                     .focus_visible(move |style| style.bg(rgb(p.selection)))
+                                    .gap(px(12.))
+                                    .child(icon(glyph, 16., p.text))
                                     .child(label)
                                     .on_click(cx.listener(move |this, _, window, cx| this.select_section(section, window, cx)))
                             })),

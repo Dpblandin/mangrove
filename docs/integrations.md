@@ -1,18 +1,28 @@
-# Profils et consultation des hébergeurs
+# Profils, connexions et clonage
 
-Les paramètres contiennent les rubriques **Profils** et **Intégrations**. Les profils Personnel et Professionnel existent dès le premier lancement ; d’autres profils peuvent être créés. Chacun conserve ses comptes, ses URLs de serveur, ses favoris, son choix SSH, son thème, ses tailles de texte, ses panneaux, ses récents et son intervalle d’auto-fetch.
+Les paramètres contiennent les rubriques **Profils**, **SSH** et **Intégrations**. Les profils Personnel et Professionnel existent dès le premier lancement ; d’autres profils peuvent être créés. Chacun conserve ses comptes, ses URLs de serveur, ses favoris, son choix SSH, son thème, ses tailles de texte, ses panneaux, ses récents et son intervalle d’auto-fetch.
 
 Changer de profil annule les lectures distantes, retire leurs pages affichées et revient à un espace local vide. Ouvrir un dépôt local, rechercher des commits ou consulter un diff ne nécessite aucun compte ni réseau. Les lectures d’API et SSH sont explicites ; elles s’exécutent en arrière-plan.
 
 ## Parcours
 
 1. Dans Profils, sélectionner un contexte et ajouter éventuellement un chemin local ou une URL aux favoris. Le bouton Ouvrir d’un favori local ouvre le dépôt existant ; un favori distant ne déclenche aucun clone.
-2. Dans Intégrations, choisir GitLab, GitHub, Bitbucket Cloud ou Bitbucket Server et renseigner le serveur HTTPS. GitLab propose une connexion dans le navigateur avec une application OAuth configurée, ou un token personnel. Les autres fournisseurs utilisent un token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
-3. Connecter vérifie la première page des dépôts accessibles, puis conserve les identifiants dans le coffre de l’OS. Sélectionner le compte charge ses dépôts. Choisir un dépôt charge les PR/MR ouvertes ; choisir une PR/MR permet de consulter ses discussions et les statuts CI du commit source.
+2. Dans Intégrations, choisir une édition dans la navigation verticale : GitLab.com ou auto-hébergé, GitHub.com ou Enterprise, Bitbucket Cloud ou Data Center. La fiche affiche les comptes connectés du profil, leur identité disponible et leur serveur. Le formulaire apparaît lors d’un ajout. GitLab propose une connexion navigateur ou un token personnel ; les autres fournisseurs utilisent un token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
+3. Connecter vérifie l’utilisateur authentifié pour GitLab/GitHub, ou la première page de dépôts pour Bitbucket sans élargir les permissions, puis conserve les identifiants dans le coffre de l’OS. Aucun dépôt n’est affiché dans les paramètres. Dans **Nouvel onglet → Cloner**, choisir un compte et un dossier parent, puis rechercher et sélectionner un dépôt dans le menu déroulant. Le sélecteur groupe les dépôts par namespace et filtre la page chargée ; les boutons de pagination permettent d’en consulter d’autres. La sélection remplit le nom du nouveau dossier et rend le clonage disponible ; **Consulter les PR/MR** charge leurs données séparément, puis leurs discussions et statuts CI sont consultables dans cet écran dédié.
 4. Chaque bouton de pagination charge la page suivante en remplaçant la page affichée. Les collections sont bornées et les curseurs restent liés au compte et à la ressource. Les commentaires et les statuts CI ont leur pagination propre.
-5. Déconnecter retire le token du coffre et le compte du profil. Un token expiré, révoqué ou privé de droits produit une erreur ; reconnecter avec un token valide après déconnexion. Les erreurs de réseau, de coffre, de permissions et de limite d’API sont affichées dans cette rubrique.
+5. Déconnecter retire le token du coffre et le compte du profil. Un token expiré, révoqué ou privé de droits produit une erreur ; reconnecter avec un token valide après déconnexion. Les erreurs de réseau, de coffre, de permissions et de limite d’API sont affichées au niveau de l’action concernée.
 
 Aucune action ne crée ou modifie une PR/MR, un commentaire, une review, une issue ou un pipeline. Les liens et textes renvoyés par la forge sont des données de lecture ; les adaptateurs REST exposent uniquement GET. Aucun avatar, log CI ni artefact n’est téléchargé automatiquement.
+
+## Cloner un dépôt
+
+Depuis **Nouvel onglet → Cloner**, choisir un dépôt du compte ou **URL d’un dépôt** pour saisir une URL HTTPS/SSH. Choisir le dossier parent, le nom du nouveau dossier et le protocole proposé par la forge, puis **Cloner le dépôt**. Le clone s’exécute en arrière-plan et ouvre le dépôt local après réussite ; Échap ou Fermer annule le travail en cours.
+
+Le clonage écrit uniquement dans un dossier neuf réservé atomiquement. Un dossier existant, même vide, est refusé. En cas d’échec ou d’annulation, le dossier partiel est conservé ; sélectionner un autre nom pour réessayer ou gérer ce dossier avec les outils habituels. Mangrove ne supprime aucun dossier de clone.
+
+HTTPS utilise les gestionnaires d’identifiants Git déjà configurés sur la machine, sans invite interactive. SSH utilise l’agent ou la clé existante du profil et exige un hôte déjà reconnu. Les tokens API du coffre Mangrove ne sont pas transmis à Git ; la connexion à une forge ne suffit donc pas à authentifier un clone privé. Les URLs contenant des credentials, une query ou un fragment, les transports locaux et les commandes distantes sont refusés.
+
+Le clone ne lance aucun hook, filtre de checkout ou sous-module et ne récupère pas les objets LFS. Les configurations Git de réécriture d’URL, de proxy et de certificats personnalisés ne sont pas reprises ; seules les configurations de credentials pertinentes sont conservées. Le délai maximal est de quinze minutes, les sorties sont bornées et l’annulation termine Git et ses descendants.
 
 ## Connexion GitLab dans le navigateur
 
@@ -59,7 +69,7 @@ L’auto-fetch déjà fourni pour les dépôts locaux reste une fonction distinc
 
 Les [adaptateurs par fournisseur](integrations-providers.md) séparent les éditions implémentées selon leurs documentations et les éditions effectivement validées avec un serveur réel. Les réponses simulées couvrent GitLab, GitHub, Bitbucket Cloud et Server/Data Center ; elles ne certifient pas chaque version auto-hébergée.
 
-La [QA de cette issue](qa-integrations.md) indique les contrôles automatisés, le coffre macOS et les parcours natifs réalisés. Aucun compte de forge réel ni serveur SSH distant n’est utilisé pour cette validation. Ces essais, ainsi que les parcours natifs Windows/Linux, restent à réaliser avant de présenter l’issue comme entièrement validée.
+La [QA de cette issue](qa-integrations.md) distingue les tests automatisés, le coffre macOS, les parcours natifs et les retours utilisateur. L’utilisateur a confirmé que la connexion GitLab fonctionne après correction de la pagination ; cela ne certifie pas toutes les éditions, la rotation, la révocation ou le clonage privé. Les essais de serveurs SSH et les parcours natifs Windows/Linux restent à réaliser.
 
 La comparaison [des lectures locales](performance-integrations.json) utilise une fixture synthétique de 207 commits, 50 recherches et 50 diffs par condition, avec puis sans requête API simulée en attente. Elle montre que ces lectures terminent pendant la requête distante. Elle ne mesure ni le rendu GPUI, ni un serveur réel, ni une garantie statistique sur un monorepo : les essais natifs avec enrichissement réel restent à faire.
 

@@ -4,7 +4,7 @@ use std::{
 };
 
 use mangrove_remote::{
-    providers::{ChangeRequest, PageCursor, ProviderClient, Repository},
+    providers::{AccountIdentity, ChangeRequest, PageCursor, ProviderClient, Repository},
     Account, CancellationToken, ExposeSecret, HttpRequest, HttpResponse, Provider, RemoteError,
     Result, SecretToken, Transport,
 };
@@ -105,6 +105,7 @@ fn repo(full_name: &str) -> Repository {
         full_name: full_name.into(),
         web_url: None,
         clone_url: None,
+        ssh_clone_url: None,
     }
 }
 
@@ -123,11 +124,207 @@ fn request() -> ChangeRequest {
 }
 
 #[test]
+fn connected_identity_uses_the_authenticated_user_without_listing_repositories() {
+    for (provider, server, user, expected_url, expected) in [
+        (
+            Provider::GitLab,
+            "https://gitlab.example/git",
+            json!({"id":42,"username":"alice","name":"Alice Martin",
+                "avatar_url":"https://avatar.example/alice.png","email":"private@example.com"}),
+            "https://gitlab.example/git/api/v4/user",
+            AccountIdentity {
+                username: "alice".into(),
+                display_name: "Alice Martin".into(),
+            },
+        ),
+        (
+            Provider::GitHub,
+            "https://github.com",
+            json!({"id":42,"login":"octocat","name":null,
+                "avatar_url":"https://avatar.example/octocat.png"}),
+            "https://api.github.com/user",
+            AccountIdentity {
+                username: "octocat".into(),
+                display_name: "octocat".into(),
+            },
+        ),
+        (
+            Provider::GitHub,
+            "https://github.example",
+            json!({"id":42,"login":"octocat","name":"Mona Lisa"}),
+            "https://github.example/api/v3/user",
+            AccountIdentity {
+                username: "octocat".into(),
+                display_name: "Mona Lisa".into(),
+            },
+        ),
+    ] {
+        let transport = MockTransport::new(vec![response(user)]);
+        let identity = client(provider, server, transport.clone())
+            .account_identity(&CancellationToken::new())
+            .unwrap();
+        assert_eq!(identity, Some(expected));
+        assert_eq!(transport.urls(), [expected_url]);
+    }
+}
+
+#[test]
+fn bitbucket_connections_keep_repository_permissions_without_claiming_a_user() {
+    for (provider, server, page, endpoint) in [
+        (
+            Provider::BitbucketCloud,
+            "https://bitbucket.org/team",
+            json!({"values":[],"next":"https://api.bitbucket.org/2.0/repositories/team?role=member&pagelen=50&page=2"}),
+            "https://api.bitbucket.org/2.0/repositories/team?role=member&pagelen=50",
+        ),
+        (
+            Provider::BitbucketServer,
+            "https://bitbucket.example/git",
+            json!({"values":[],"isLastPage":false,"nextPageStart":50}),
+            "https://bitbucket.example/git/rest/api/1.0/repos?permission=REPO_READ&limit=50",
+        ),
+    ] {
+        let transport = MockTransport::new(vec![response(page)]);
+        let identity = client(provider, server, transport.clone())
+            .account_identity(&CancellationToken::new())
+            .unwrap();
+        assert_eq!(identity, None);
+        assert_eq!(transport.urls(), [endpoint]);
+    }
+}
+
+#[test]
+fn connected_identity_rejects_invalid_or_credential_echoed_usernames() {
+    for user in [
+        json!([]),
+        json!({"username":null}),
+        json!({"username":"  "}),
+        json!({"username":"alice\nadmin"}),
+        json!({"username":"a".repeat(257)}),
+        json!({"username":format!("user-{TOKEN}")}),
+    ] {
+        let error = client(
+            Provider::GitLab,
+            "https://gitlab.com",
+            MockTransport::new(vec![response(user)]),
+        )
+        .account_identity(&CancellationToken::new())
+        .unwrap_err();
+        assert_eq!(error, RemoteError::InvalidResponse);
+        assert!(!format!("{error:?} {error}").contains(TOKEN));
+    }
+    let error = ProviderClient::new(
+        MockTransport::new(vec![response(
+            json!({"login":"%252b%252f%253dsecret-fixture"}),
+        )]),
+        account(Provider::GitHub, "https://github.com"),
+        SecretToken::from("+/=secret-fixture"),
+    )
+    .unwrap()
+    .account_identity(&CancellationToken::new())
+    .unwrap_err();
+    assert_eq!(error, RemoteError::InvalidResponse);
+}
+
+#[test]
+fn connected_display_names_are_bounded_and_never_echo_credentials() {
+    for name in [
+        format!("Name {TOKEN}"),
+        "test-secret-never-in-\ndiagnostics".into(),
+    ] {
+        let identity = client(
+            Provider::GitLab,
+            "https://gitlab.com",
+            MockTransport::new(vec![response(json!({"username":"alice","name":name}))]),
+        )
+        .account_identity(&CancellationToken::new())
+        .unwrap()
+        .unwrap();
+        assert_eq!(identity.display_name, "alice");
+        assert!(!format!("{identity:?}").contains(TOKEN));
+    }
+    let identity = client(
+        Provider::GitHub,
+        "https://github.com",
+        MockTransport::new(vec![response(
+            json!({"login":"alice","name":"é".repeat(100)}),
+        )]),
+    )
+    .account_identity(&CancellationToken::new())
+    .unwrap()
+    .unwrap();
+    assert_eq!(identity.display_name, "é".repeat(64));
+}
+
+#[test]
+fn connected_identity_rejects_revocation_oversized_bodies_and_cancellation() {
+    for (status, body, expected) in [
+        (
+            401,
+            TOKEN.as_bytes().to_vec(),
+            RemoteError::CredentialsExpired,
+        ),
+        (
+            403,
+            TOKEN.as_bytes().to_vec(),
+            RemoteError::Http { status: 403 },
+        ),
+        (
+            200,
+            vec![b' '; 4 * 1024 * 1024 + 1],
+            RemoteError::ResponseTooLarge,
+        ),
+        (200, b"invalid json".to_vec(), RemoteError::InvalidResponse),
+    ] {
+        let error = client(
+            Provider::GitLab,
+            "https://gitlab.com",
+            MockTransport::new(vec![HttpResponse {
+                status,
+                headers: BTreeMap::new(),
+                body,
+            }]),
+        )
+        .account_identity(&CancellationToken::new())
+        .unwrap_err();
+        assert_eq!(error, expected);
+        assert!(!format!("{error:?} {error}").contains(TOKEN));
+    }
+    let transport = MockTransport::default();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        client(Provider::GitLab, "https://gitlab.com", transport.clone()).account_identity(&cancel),
+        Err(RemoteError::Cancelled)
+    );
+    assert!(transport.urls().is_empty());
+
+    struct CancelDuringRead;
+    impl Transport for CancelDuringRead {
+        fn get(&self, _request: &HttpRequest, cancel: &CancellationToken) -> Result<HttpResponse> {
+            cancel.cancel();
+            Ok(response(json!({"username":"alice","name":"Alice"})))
+        }
+    }
+    assert_eq!(
+        ProviderClient::new(
+            CancelDuringRead,
+            account(Provider::GitLab, "https://gitlab.com"),
+            SecretToken::from(TOKEN),
+        )
+        .unwrap()
+        .account_identity(&CancellationToken::new()),
+        Err(RemoteError::Cancelled)
+    );
+}
+
+#[test]
 fn gitlab_reads_projects_merge_requests_discussion_threads_and_pipelines() {
     let transport = MockTransport::new(vec![
         response(
             json!([{"id":42,"name":"app","path_with_namespace":"group/app",
-            "web_url":"https://gitlab.example/git/group/app","http_url_to_repo":"https://gitlab.example/git/group/app.git"}]),
+            "web_url":"https://gitlab.example/git/group/app","http_url_to_repo":"https://gitlab.example/git/group/app.git",
+            "ssh_url_to_repo":"git@gitlab.example:group/app.git"}]),
         ),
         response(
             json!([{"id":700,"iid":7,"title":"Improve app","description":"Details","state":"opened",
@@ -147,6 +344,14 @@ fn gitlab_reads_projects_merge_requests_discussion_threads_and_pipelines() {
     );
     let cancel = CancellationToken::new();
     let repository = client.repositories(None, &cancel).unwrap().items.remove(0);
+    assert_eq!(
+        repository.clone_url.as_deref(),
+        Some("https://gitlab.example/git/group/app.git")
+    );
+    assert_eq!(
+        repository.ssh_clone_url.as_deref(),
+        Some("git@gitlab.example:group/app.git")
+    );
     let request = client
         .pull_requests(&repository, None, &cancel)
         .unwrap()
@@ -173,7 +378,8 @@ fn gitlab_reads_projects_merge_requests_discussion_threads_and_pipelines() {
 fn github_reads_issue_and_review_comments_plus_checks_and_legacy_statuses() {
     let transport = MockTransport::new(vec![
         response(json!([{"id":42,"name":"app","full_name":"org/app",
-            "html_url":"https://github.com/org/app","clone_url":"https://github.com/org/app.git"}])),
+            "html_url":"https://github.com/org/app","clone_url":"https://github.com/org/app.git",
+            "ssh_url":"git@github.com:org/app.git"}])),
         response(
             json!([{"id":987,"number":7,"title":"Improve app","body":"Details","state":"open",
             "user":{"login":"alice"},"head":{"ref":"topic","sha":SHA},"base":{"ref":"main"},
@@ -196,6 +402,14 @@ fn github_reads_issue_and_review_comments_plus_checks_and_legacy_statuses() {
     let client = client(Provider::GitHub, "https://github.com", transport.clone());
     let cancel = CancellationToken::new();
     let repository = client.repositories(None, &cancel).unwrap().items.remove(0);
+    assert_eq!(
+        repository.clone_url.as_deref(),
+        Some("https://github.com/org/app.git")
+    );
+    assert_eq!(
+        repository.ssh_clone_url.as_deref(),
+        Some("git@github.com:org/app.git")
+    );
     let request = client
         .pull_requests(&repository, None, &cancel)
         .unwrap()
@@ -247,7 +461,9 @@ fn bitbucket_cloud_uses_workspace_api_and_distinct_api_token_auth() {
     let transport = MockTransport::new(vec![
         cloud_page(
             json!([{"uuid":"{repo-id}","name":"app","full_name":"workspace/app",
-            "links":{"html":{"href":"https://bitbucket.org/workspace/app"},"clone":[{"name":"https","href":"https://bitbucket.org/workspace/app.git"}]}}]),
+            "links":{"html":{"href":"https://bitbucket.org/workspace/app"},"clone":[
+            {"name":"https","href":"https://bitbucket.org/workspace/app.git"},
+            {"name":"ssh","href":"ssh://git@bitbucket.org/workspace/app.git"}]}}]),
         ),
         cloud_page(
             json!([{"id":7,"title":"Improve app","description":"Details","state":"OPEN","author":{"display_name":"Alice"},
@@ -271,6 +487,14 @@ fn bitbucket_cloud_uses_workspace_api_and_distinct_api_token_auth() {
     .unwrap();
     let cancel = CancellationToken::new();
     let repository = client.repositories(None, &cancel).unwrap().items.remove(0);
+    assert_eq!(
+        repository.clone_url.as_deref(),
+        Some("https://bitbucket.org/workspace/app.git")
+    );
+    assert_eq!(
+        repository.ssh_clone_url.as_deref(),
+        Some("ssh://git@bitbucket.org/workspace/app.git")
+    );
     let request = client
         .pull_requests(&repository, None, &cancel)
         .unwrap()
@@ -321,7 +545,9 @@ fn bitbucket_server_reads_project_repos_nested_comments_and_repository_builds() 
     let transport = MockTransport::new(vec![
         server_page(
             json!([{"id":42,"slug":"app","name":"app","project":{"key":"PROJ"},
-            "links":{"self":[{"href":"https://bb.example/bitbucket/projects/PROJ/repos/app/browse"}],"clone":[{"name":"http","href":"https://bb.example/bitbucket/scm/proj/app.git"}]}}]),
+            "links":{"self":[{"href":"https://bb.example/bitbucket/projects/PROJ/repos/app/browse"}],"clone":[
+            {"name":"http","href":"https://bb.example/bitbucket/scm/proj/app.git"},
+            {"name":"ssh","href":"ssh://git@bb.example:7999/proj/app.git"}]}}]),
         ),
         server_page(
             json!([{"id":7,"title":"Improve app","description":"Details","state":"OPEN","author":{"user":{"displayName":"Alice"}},
@@ -343,6 +569,14 @@ fn bitbucket_server_reads_project_repos_nested_comments_and_repository_builds() 
     let cancel = CancellationToken::new();
     let repository = client.repositories(None, &cancel).unwrap().items.remove(0);
     assert_eq!(repository.full_name, "PROJ/app");
+    assert_eq!(
+        repository.clone_url.as_deref(),
+        Some("https://bb.example/bitbucket/scm/proj/app.git")
+    );
+    assert_eq!(
+        repository.ssh_clone_url.as_deref(),
+        Some("ssh://git@bb.example:7999/proj/app.git")
+    );
     let request = client
         .pull_requests(&repository, None, &cancel)
         .unwrap()
@@ -690,7 +924,8 @@ fn expired_revoked_rate_limited_and_permission_errors_do_not_expose_remote_bodie
 fn normalized_data_and_cursor_diagnostics_redact_secrets_and_reject_credential_links() {
     let mut response = response(
         json!([{"id":42,"name":format!("app {TOKEN}"),"full_name":"org/app",
-        "html_url":format!("https://github.com/org/app?token={TOKEN}"),"clone_url":"https://user:password@github.com/org/app.git"}]),
+        "html_url":format!("https://github.com/org/app?token={TOKEN}"),"clone_url":"https://user:password@github.com/org/app.git",
+        "ssh_url":format!("git@github.com:org/{TOKEN}.git")}]),
     );
     response.headers.insert(
         "link".into(),
@@ -705,10 +940,112 @@ fn normalized_data_and_cursor_diagnostics_redact_secrets_and_reject_credential_l
     assert!(page.items[0].name.contains("[redacted]"));
     assert!(page.items[0].web_url.is_none());
     assert!(page.items[0].clone_url.is_none());
+    assert!(page.items[0].ssh_clone_url.is_none());
     assert_eq!(
         format!("{:?}", page.next.unwrap()),
         "PageCursor([redacted])"
     );
+}
+
+#[test]
+fn advertised_https_clone_links_follow_the_clone_contract_without_restricting_web_links() {
+    const WEB: &str = "http://example.com/team/app?view=history#readme";
+    const SSH: &str = "git@example.com:team/app.git";
+    const HTTPS: &str = "https://example.com/team/app.git";
+    for (provider, server) in [
+        (Provider::GitLab, "https://gitlab.com"),
+        (Provider::GitHub, "https://github.com"),
+        (Provider::BitbucketCloud, "https://bitbucket.org/team"),
+        (Provider::BitbucketServer, "https://bitbucket.example"),
+    ] {
+        for remote in [
+            HTTPS,
+            "http://example.com/team/app.git",
+            "https://example.com/team/app.git?branch=main",
+            "https://example.com/team/app.git#main",
+            "https://user@example.com/team/app.git",
+            "https://user:password@example.com/team/app.git",
+            "https://example.com/team/app.git\n",
+            "https://example.com/team/app%0Aheader.git",
+            "https://example.com/team/app%00.git",
+            "https://example.com/",
+            "https://example.com:0/team/app.git",
+        ] {
+            let repository = match provider {
+                Provider::GitLab => json!({
+                    "id":42,"name":"app","path_with_namespace":"team/app",
+                    "web_url":WEB,"http_url_to_repo":remote,"ssh_url_to_repo":SSH
+                }),
+                Provider::GitHub => json!({
+                    "id":42,"name":"app","full_name":"team/app",
+                    "html_url":WEB,"clone_url":remote,"ssh_url":SSH
+                }),
+                Provider::BitbucketCloud => json!({
+                    "uuid":"{repo-id}","name":"app","full_name":"team/app",
+                    "links":{"html":{"href":WEB},"clone":[
+                        {"name":"https","href":remote},{"name":"ssh","href":SSH}
+                    ]}
+                }),
+                Provider::BitbucketServer => json!({
+                    "id":42,"name":"app","slug":"app","project":{"key":"TEAM"},
+                    "links":{"self":[{"href":WEB}],"clone":[
+                        {"name":"http","href":remote},{"name":"ssh","href":SSH}
+                    ]}
+                }),
+            };
+            let page = match provider {
+                Provider::GitLab | Provider::GitHub => json!([repository]),
+                Provider::BitbucketCloud => json!({"values":[repository]}),
+                Provider::BitbucketServer => {
+                    json!({"values":[repository],"isLastPage":true})
+                }
+            };
+            let repository = client(provider, server, MockTransport::new(vec![response(page)]))
+                .repositories(None, &CancellationToken::new())
+                .unwrap()
+                .items
+                .remove(0);
+            assert_eq!(
+                repository.clone_url.as_deref(),
+                (remote == HTTPS).then_some(HTTPS),
+                "{provider:?}: {remote}"
+            );
+            assert_eq!(repository.web_url.as_deref(), Some(WEB));
+            assert_eq!(repository.ssh_clone_url.as_deref(), Some(SSH));
+        }
+    }
+}
+
+#[test]
+fn ssh_clone_links_reject_local_transports_options_credentials_and_shell_paths() {
+    for remote in [
+        "https://github.com/org/app.git",
+        "file:///tmp/app",
+        "git@github.com:-oProxyCommand=id",
+        "ssh://git:password@github.com/org/app.git",
+        "git@github.com:org/app.git\n--config=evil",
+        "git@github.com:org/app;touch.git",
+        "ssh://git@github.com/org/app.git?token=secret",
+        "ssh://git@github.com:0/org/app.git",
+    ] {
+        let repository = client(
+            Provider::GitHub,
+            "https://github.com",
+            MockTransport::new(vec![response(json!([{
+                "id":42,"name":"app","full_name":"org/app",
+                "clone_url":"https://github.com/org/app.git","ssh_url":remote
+            }]))]),
+        )
+        .repositories(None, &CancellationToken::new())
+        .unwrap()
+        .items
+        .remove(0);
+        assert!(repository.ssh_clone_url.is_none(), "{remote}");
+        assert_eq!(
+            repository.clone_url.as_deref(),
+            Some("https://github.com/org/app.git")
+        );
+    }
 }
 
 #[test]

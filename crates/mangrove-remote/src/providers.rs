@@ -19,12 +19,19 @@ const MAX_ITEMS: usize = 200;
 const MAX_TEXT: usize = 32_768;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub username: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
     pub id: String,
     pub name: String,
     pub full_name: String,
     pub web_url: Option<String>,
     pub clone_url: Option<String>,
+    pub ssh_clone_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,6 +180,56 @@ impl<T: Transport> ProviderClient<T> {
     pub(crate) fn protect_secret(mut self, secret: &SecretToken) -> Self {
         self.protected_secrets.push(secret.clone());
         self
+    }
+
+    /// Verify the connection and read the authenticated GitLab/GitHub user.
+    ///
+    /// Bitbucket's current-user APIs require additional permissions or an explicit
+    /// username. Keep its existing permissions by verifying the first repository
+    /// page instead, discarding that page and returning no claimed user identity.
+    pub fn account_identity(&self, cancel: &CancellationToken) -> Result<Option<AccountIdentity>> {
+        let username_path = match self.account.provider {
+            Provider::GitLab => "/username",
+            Provider::GitHub => "/login",
+            Provider::BitbucketCloud | Provider::BitbucketServer => {
+                self.repositories(None, cancel)?;
+                return Ok(None);
+            }
+        };
+        let (_, json) = self.read_json(&self.base.url("user")?, cancel)?;
+        let raw_username = json
+            .pointer(username_path)
+            .and_then(Value::as_str)
+            .ok_or(RemoteError::InvalidResponse)?;
+        if raw_username.trim().is_empty()
+            || raw_username.len() > 256
+            || raw_username.chars().any(char::is_control)
+            || self.contains_credential(raw_username)
+        {
+            return Err(RemoteError::InvalidResponse);
+        }
+        let username = raw_username.trim().to_owned();
+        let name = json.get("name").and_then(Value::as_str);
+        let display_name = name
+            .filter(|name| !self.contains_credential(name))
+            .map(|name| {
+                name.chars()
+                    .filter(|c| !c.is_control())
+                    .take(128)
+                    .collect::<String>()
+            })
+            .filter(|name| !name.trim().is_empty() && !self.contains_credential(name))
+            .unwrap_or_else(|| username.clone());
+        let mut display_name = display_name.trim().to_owned();
+        let mut end = display_name.len().min(128);
+        while !display_name.is_char_boundary(end) {
+            end -= 1;
+        }
+        display_name.truncate(end);
+        Ok(Some(AccountIdentity {
+            username,
+            display_name,
+        }))
     }
 
     pub fn repositories(
@@ -425,20 +482,7 @@ impl<T: Transport> ProviderClient<T> {
         } else {
             (first.clone(), 0)
         };
-        let response = self.transport.get(
-            &HttpRequest {
-                url: url.clone(),
-                headers: self.headers(),
-            },
-            cancel,
-        )?;
-        cancel.check()?;
-        check_status(response.status, &response.headers)?;
-        if response.body.len() > MAX_RESPONSE_BYTES {
-            return Err(RemoteError::ResponseTooLarge);
-        }
-        let json: Value =
-            serde_json::from_slice(&response.body).map_err(|_| RemoteError::InvalidResponse)?;
+        let (response, json) = self.read_json(&url, cancel)?;
         let values =
             if self.account.provider == Provider::GitHub && url.path().ends_with("/check-runs") {
                 json.get("check_runs")
@@ -468,6 +512,26 @@ impl<T: Transport> ProviderClient<T> {
             items: items.clone(),
             next,
         })
+    }
+
+    fn read_json(&self, url: &Url, cancel: &CancellationToken) -> Result<(HttpResponse, Value)> {
+        cancel.check()?;
+        let response = self.transport.get(
+            &HttpRequest {
+                url: url.clone(),
+                headers: self.headers(),
+            },
+            cancel,
+        )?;
+        cancel.check()?;
+        check_status(response.status, &response.headers)?;
+        if response.body.len() > MAX_RESPONSE_BYTES {
+            return Err(RemoteError::ResponseTooLarge);
+        }
+        let json =
+            serde_json::from_slice(&response.body).map_err(|_| RemoteError::InvalidResponse)?;
+        cancel.check()?;
+        Ok((response, json))
     }
 
     fn transition(
@@ -711,6 +775,37 @@ impl<T: Transport> ProviderClient<T> {
         Some(url.to_string())
     }
 
+    fn ssh_link(&self, value: &Value, path: &str) -> Option<String> {
+        let raw = value.pointer(path).and_then(Value::as_str)?;
+        if self.contains_credential(raw) || crate::ssh::validate_remote(raw).is_err() {
+            return None;
+        }
+        Some(raw.to_owned())
+    }
+
+    fn https_clone_link(&self, value: &Value, path: &str) -> Option<String> {
+        let raw = value.pointer(path).and_then(Value::as_str)?;
+        if self.contains_credential(raw) {
+            return None;
+        }
+        crate::clone::parse_https_remote(raw)
+            .ok()
+            .map(|url| url.to_string())
+    }
+
+    fn named_clone_link(&self, value: &Value, name: &str) -> Option<String> {
+        let link = value
+            .pointer("/links/clone")?
+            .as_array()?
+            .iter()
+            .find(|link| link.get("name").and_then(Value::as_str) == Some(name))?;
+        if name == "ssh" {
+            self.ssh_link(link, "/href")
+        } else {
+            self.https_clone_link(link, "/href")
+        }
+    }
+
     fn contains_credential(&self, value: &str) -> bool {
         let token = self.token.expose_secret();
         if contains_credential(value, token) {
@@ -739,48 +834,38 @@ impl<T: Transport> ProviderClient<T> {
     }
 
     fn repository(&self, v: &Value) -> Result<Repository> {
-        let (id, name, full_name, web_url, clone_url) = match self.account.provider {
+        let (id, name, full_name, web_url, clone_url, ssh_clone_url) = match self.account.provider {
             Provider::GitLab => (
                 self.id(v, "/id")?,
                 self.text(v, "/name"),
                 self.text(v, "/path_with_namespace"),
                 self.link(v, "/web_url"),
-                self.link(v, "/http_url_to_repo"),
+                self.https_clone_link(v, "/http_url_to_repo"),
+                self.ssh_link(v, "/ssh_url_to_repo"),
             ),
             Provider::GitHub => (
                 self.id(v, "/id")?,
                 self.text(v, "/name"),
                 self.text(v, "/full_name"),
                 self.link(v, "/html_url"),
-                self.link(v, "/clone_url"),
+                self.https_clone_link(v, "/clone_url"),
+                self.ssh_link(v, "/ssh_url"),
             ),
             Provider::BitbucketCloud => (
                 self.id(v, "/uuid")?,
                 self.text(v, "/name"),
                 self.text(v, "/full_name"),
                 self.link(v, "/links/html/href"),
-                v.pointer("/links/clone")
-                    .and_then(Value::as_array)
-                    .and_then(|links| {
-                        links
-                            .iter()
-                            .find(|link| link.get("name").and_then(Value::as_str) == Some("https"))
-                            .and_then(|link| self.link(link, "/href"))
-                    }),
+                self.named_clone_link(v, "https"),
+                self.named_clone_link(v, "ssh"),
             ),
             Provider::BitbucketServer => (
                 self.id(v, "/id")?,
                 self.text(v, "/name"),
                 format!("{}/{}", self.text(v, "/project/key"), self.text(v, "/slug")),
                 self.link(v, "/links/self/0/href"),
-                v.pointer("/links/clone")
-                    .and_then(Value::as_array)
-                    .and_then(|links| {
-                        links
-                            .iter()
-                            .find(|link| link.get("name").and_then(Value::as_str) == Some("http"))
-                            .and_then(|link| self.link(link, "/href"))
-                    }),
+                self.named_clone_link(v, "http"),
+                self.named_clone_link(v, "ssh"),
             ),
         };
         if name.is_empty() || full_name.is_empty() {
@@ -792,6 +877,7 @@ impl<T: Transport> ProviderClient<T> {
             full_name,
             web_url,
             clone_url,
+            ssh_clone_url,
         })
     }
 

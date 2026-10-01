@@ -36,6 +36,9 @@ pub enum ChromeEvent {
     ActivateTab(u64),
     CloseTab(u64),
     NewTab,
+    BrowseRepositories,
+    CloseRepositoryBrowser,
+    ManageIntegrations,
     ShowSettings,
     BackToWorkspace,
     Fetch,
@@ -85,6 +88,7 @@ pub struct Chrome {
     error: Option<String>,
     recent_filter: Entity<InputState>,
     welcome_scroll: ScrollHandle,
+    repository_browser: bool,
     separator_focus: [FocusHandle; 2],
     resize: Option<Resize>,
     _subscriptions: Vec<Subscription>,
@@ -172,6 +176,7 @@ impl Chrome {
             error: profile_error,
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
+            repository_browser: false,
             separator_focus: [cx.focus_handle(), cx.focus_handle()],
             resize: None,
             _subscriptions: subscriptions,
@@ -274,7 +279,11 @@ impl Chrome {
         self.preferences_changed(cx);
     }
     pub fn begin_repository_picker(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.busy || self.choosing || self.resize.is_some() {
+        if self.busy
+            || self.choosing
+            || self.resize.is_some()
+            || self.integrations.read(cx).choosing_path()
+        {
             return false;
         }
         self.choosing = true;
@@ -284,8 +293,8 @@ impl Chrome {
     pub fn choosing_repository(&self) -> bool {
         self.choosing
     }
-    pub fn can_show_settings(&self) -> bool {
-        !self.choosing && self.resize.is_none()
+    pub fn can_show_settings(&self, cx: &App) -> bool {
+        !self.choosing && self.resize.is_none() && !self.integrations.read(cx).choosing_path()
     }
     pub fn finish_repository_picker(&mut self, cx: &mut Context<Self>) {
         self.choosing = false;
@@ -343,6 +352,10 @@ impl Chrome {
     ) {
         let mut profiles = self.profiles.clone();
         match event {
+            IntegrationsEvent::OpenIntegrationSettings => {
+                cx.emit(ChromeEvent::ManageIntegrations);
+                return;
+            }
             IntegrationsEvent::OpenLocalFavorite(path) => {
                 cx.emit(ChromeEvent::OpenRepository(path.clone()));
                 return;
@@ -697,7 +710,7 @@ impl Chrome {
                             .accessibility_label("Paramètres")
                             .tooltip("Paramètres · ⌘ ,")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if this.can_show_settings() {
+                                if this.can_show_settings(cx) {
                                     cx.emit(ChromeEvent::ShowSettings)
                                 }
                             })),
@@ -780,6 +793,119 @@ impl Chrome {
             .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
             .into_any_element()
     }
+    pub fn repository_browser_open(&self) -> bool {
+        self.repository_browser
+    }
+
+    pub fn open_repository_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_browser = true;
+        self.integrations
+            .update(cx, |view, cx| view.open_repositories(window, cx));
+        cx.notify();
+    }
+
+    pub fn close_repository_browser(&mut self, cx: &mut Context<Self>) {
+        if !self.repository_browser {
+            return;
+        }
+        self.repository_browser = false;
+        self.integrations
+            .update(cx, |view, cx| view.close_repositories(cx));
+        cx.notify();
+    }
+
+    pub fn render_repository_browser(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.preferences.palette();
+        let offset = self.preferences.font_size_offset;
+        div()
+            .id("remote-repository-browser")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .bg(rgb(p.bg))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .px(px(24.))
+                    .py(px(16.))
+                    .bg(rgb(p.panel))
+                    .border_b_1()
+                    .border_color(rgb(p.border))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(icon(IconName::Globe, 20., p.accent))
+                            .child(
+                                div()
+                                    .text_size(px(16. + offset))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Dépôts distants"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                NativeButton::new("remote-manage-accounts")
+                                    .px(px(12.))
+                                    .py(px(7.))
+                                    .text_size(px(12. + offset))
+                                    .rounded(px(5.))
+                                    .text_color(rgb(p.accent))
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(rgb(p.hover)))
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
+                                    .accessibility_label("Gérer les connexions")
+                                    .child("Gérer les connexions")
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ChromeEvent::ManageIntegrations)
+                                    })),
+                            )
+                            .child(
+                                NativeButton::new("remote-browser-close")
+                                    .size(px(32.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(rgb(p.hover)))
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
+                                    .accessibility_label("Fermer les dépôts distants")
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Fermer (Échap)").build(window, cx)
+                                    })
+                                    .child(icon(IconName::X, 18., p.muted))
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ChromeEvent::CloseRepositoryBrowser)
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(self.integrations.clone()),
+            )
+            .into_any_element()
+    }
+
     pub fn render_welcome(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.preferences.palette();
         let offset = self.preferences.font_size_offset;
@@ -805,67 +931,103 @@ impl Chrome {
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
-            .pt(px(35.))
-            .px(px(40.))
-            .pb(px(25.))
+            .justify_start()
+            .pt(px(54.))
+            .px(px(28.))
+            .pb(px(32.))
             .bg(rgb(p.bg))
-            .text_center()
+            .text_left()
             .child(
                 div()
-                    .p(px(13.))
-                    .rounded(px(24.))
-                    .border_1()
-                    .border_color(rgb(p.accent_border))
-                    .bg(rgb(p.accent_soft))
+                    .w_full()
+                    .max_w(px(660.))
                     .mb(px(24.))
-                    .child(logo()),
-            )
-            .child(
-                div()
-                    .mb(px(28.))
-                    .text_size(px(30. + offset))
-                    .font_weight(FontWeight(530.))
-                    .line_height(px((30. + offset) * 1.12))
-                    .child("Mangrove"),
-            )
-            .child(
-                NativeButton::new("welcome-open")
-                    .px(px(17.))
-                    .py(px(12.))
-                    .border_1()
-                    .border_color(rgb(p.accent_border))
-                    .bg(rgb(p.accent))
-                    .text_color(rgb(p.on_accent))
-                    .rounded(px(7.))
-                    .text_size(px(12. + offset))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .line_height(relative(1.5))
-                    .gap(px(9.))
-                    .cursor_pointer()
-                    .accessibility_label("Ouvrir un dépôt local")
-                    .hover(move |style| style.bg(rgb(mix(p.accent, p.text, 0.85))))
-                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                    .child(icon(IconName::FolderOpen, 17., p.on_accent))
-                    .child("Ouvrir un dépôt local")
                     .child(
                         div()
-                            .ml(px(14.))
-                            .child(icon(IconName::ArrowRight, 15., p.on_accent)),
+                            .text_size(px(24. + offset))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Dépôts"),
                     )
-                    .disabled(self.busy || self.choosing)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository))),
+                    .child(
+                        div()
+                            .mt(px(6.))
+                            .text_size(px(12. + offset))
+                            .text_color(rgb(p.muted))
+                            .child(format!(
+                                "Profil {}",
+                                self.profiles
+                                    .active()
+                                    .map_or("Personnel", |profile| profile.name.as_str())
+                            )),
+                    ),
             )
             .child(
                 div()
+                    .w_full()
+                    .max_w(px(660.))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(10.))
+                    .child(
+                        NativeButton::new("welcome-open")
+                            .px(px(17.))
+                            .py(px(12.))
+                            .border_1()
+                            .border_color(rgb(p.accent_border))
+                            .bg(rgb(p.accent))
+                            .text_color(rgb(p.on_accent))
+                            .rounded(px(7.))
+                            .text_size(px(12. + offset))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .line_height(relative(1.5))
+                            .gap(px(9.))
+                            .cursor_pointer()
+                            .accessibility_label("Ouvrir un dépôt local")
+                            .hover(move |style| style.bg(rgb(mix(p.accent, p.text, 0.85))))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                            .child(icon(IconName::FolderOpen, 17., p.on_accent))
+                            .child("Ouvrir")
+                            .disabled(self.busy || self.choosing)
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository)),
+                            ),
+                    )
+                    .child(
+                        NativeButton::new("welcome-remotes")
+                            .px(px(17.))
+                            .py(px(12.))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .bg(rgb(p.panel))
+                            .rounded(px(7.))
+                            .text_size(px(12. + offset))
+                            .font_weight(FontWeight::MEDIUM)
+                            .gap(px(9.))
+                            .cursor_pointer()
+                            .accessibility_label("Cloner ou consulter un dépôt distant")
+                            .hover(move |style| style.bg(rgb(p.hover)))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                            .disabled(self.busy || self.choosing)
+                            .child(icon(IconName::Globe, 17., p.muted))
+                            .child("Cloner")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::BrowseRepositories)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(660.))
                     .mt(px(15.))
                     .flex()
                     .items_center()
                     .gap(px(4.))
                     .text_size(px(9. + offset))
                     .text_color(rgb(p.muted))
-                    .child("ou")
+                    .child("Ouvrir un dépôt local")
                     .child(kbd(
                         if cfg!(target_os = "macos") {
                             "⌘ O"
@@ -889,14 +1051,14 @@ impl Chrome {
             .when(!self.preferences.recent.is_empty(), |view| {
                 view.child(
                     div()
-                        .w(px(340.))
+                        .w(px(660.))
                         .max_w_full()
                         .mt(px(28.))
                         .text_left()
                         .child(
                             div()
                                 .mb(px(8.))
-                                .text_size(px(9. + offset))
+                                .text_size(px(12. + offset))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(p.muted))
                                 .child("Récemment ouverts"),
@@ -978,11 +1140,17 @@ impl Chrome {
                                             .flex_1()
                                             .min_w_0()
                                             .text_size(px(11. + offset))
-                                            .child(div().truncate().child(entry.name.clone()))
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(p.accent))
+                                                    .child(entry.name.clone()),
+                                            )
                                             .child(
                                                 div()
                                                     .mt(px(4.))
-                                                    .max_w(px(270.))
+                                                    .w_full()
                                                     .truncate()
                                                     .text_size(px(9. + offset))
                                                     .text_color(rgb(p.muted))
@@ -1306,59 +1474,4 @@ fn kbd(label: &str, p: Palette, offset: f32) -> AnyElement {
         .text_color(rgb(p.muted))
         .child(label.to_string())
         .into_any_element()
-}
-
-fn logo() -> AnyElement {
-    canvas(
-        |_, _, _| (),
-        |bounds, _, window, _| {
-            let unit = f32::from(bounds.size.width) / 64.;
-            let position = |x, y| point(bounds.left() + px(x * unit), bounds.top() + px(y * unit));
-            window.paint_quad(fill(bounds, rgb(0x173a33)).corner_radii(px(18. * unit)));
-            // Separate segments plus endpoint circles reproduce the SVG's
-            // round caps and joins without adding a second SVG asset source.
-            let mut path = PathBuilder::stroke(px(5. * unit));
-            for ((x1, y1), (x2, y2)) in [
-                ((17., 46.), (17., 23.)),
-                ((17., 23.), (32., 37.)),
-                ((32., 37.), (47., 23.)),
-                ((47., 23.), (47., 46.)),
-                ((32., 37.), (32., 17.)),
-            ] {
-                path.move_to(position(x1, y1));
-                path.line_to(position(x2, y2));
-            }
-            if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0x78e4bb));
-            }
-            for (x, y) in [
-                (17., 46.),
-                (17., 23.),
-                (32., 37.),
-                (47., 23.),
-                (47., 46.),
-                (32., 17.),
-            ] {
-                window.paint_quad(
-                    fill(
-                        Bounds::new(
-                            position(x - 2.5, y - 2.5),
-                            size(px(5. * unit), px(5. * unit)),
-                        ),
-                        rgb(0x78e4bb),
-                    )
-                    .corner_radii(px(2.5 * unit)),
-                );
-            }
-            window.paint_quad(
-                fill(
-                    Bounds::new(position(27., 10.), size(px(10. * unit), px(10. * unit))),
-                    rgb(0x78e4bb),
-                )
-                .corner_radii(px(5. * unit)),
-            );
-        },
-    )
-    .size(px(56.))
-    .into_any_element()
 }

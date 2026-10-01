@@ -1,0 +1,1437 @@
+//! Native settings and remote-repository views. Credentials and background
+//! work remain owned by the parent view.
+use super::*;
+use crate::format::initials;
+
+impl IntegrationsView {
+    fn clone_content(&self, repository: Option<&Repository>, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let remote = self.clone_remote(cx);
+        let ssh = remote
+            .as_ref()
+            .is_some_and(|url| url.starts_with("ssh://") || !url.starts_with("https://"));
+        let destination_valid = PathBuf::from(self.clone_parent.read(cx).value().trim())
+            .is_absolute()
+            && valid_clone_directory_name(self.clone_name.read(cx).value().trim());
+        let mut form = card(p)
+            .gap(px(18.))
+            .child(subtitle(
+                if self.direct_clone {
+                    "Cloner avec une URL"
+                } else {
+                    "Cloner un dépôt"
+                },
+                offset,
+            ))
+            .child(clone_row(
+                "Dossier parent",
+                p,
+                offset,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        input_control(
+                            &self.clone_parent,
+                            "clone-parent",
+                            "Dossier parent",
+                            p,
+                            offset,
+                        )
+                        .flex_1()
+                        .min_w_0(),
+                    )
+                    .child(
+                        action("clone-browse", "Parcourir…", p, offset)
+                            .disabled(self.pending.is_some() || self.picking_path)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pick_path(PathPickerTarget::CloneParent, window, cx)
+                            })),
+                    ),
+            ));
+        if self.direct_clone {
+            form = form.child(clone_row(
+                "URL du dépôt",
+                p,
+                offset,
+                input_control(
+                    &self.clone_url,
+                    "clone-url",
+                    "URL du dépôt · HTTPS ou SSH",
+                    p,
+                    offset,
+                ),
+            ));
+        } else {
+            form = form.child(clone_row(
+                "Dépôt à cloner",
+                p,
+                offset,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        Select::new(&self.repository_select)
+                            .id("repository-select")
+                            .w_full()
+                            .h(px(36.))
+                            .px(px(12.))
+                            .py(px(6.))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .rounded(px(4.))
+                            .bg(rgb(p.bg))
+                            .text_color(rgb(p.text))
+                            .text_size(px(12. + offset))
+                            .menu_max_h(px(300.))
+                            .cleanable(true)
+                            .placeholder(
+                                if self.pending == Some(PendingOperation::RepositoryRead) {
+                                    "Chargement des dépôts…"
+                                } else {
+                                    "Choisir un dépôt…"
+                                },
+                            )
+                            .search_placeholder("Rechercher dans cette page…")
+                            .accessibility_label("Dépôt à cloner")
+                            .disabled(!self.can_select_repository() || self.repositories.is_empty())
+                            .empty(move |_, _| {
+                                div()
+                                    .p(px(16.))
+                                    .text_size(px(12. + offset))
+                                    .text_color(rgb(p.muted))
+                                    .whitespace_normal()
+                                    .child("Aucun dépôt ne correspond sur cette page.")
+                            }),
+                    )
+                    .child(self.repository_page_controls(cx)),
+            ));
+        }
+        form = form.child(clone_row(
+            "Nouveau dossier",
+            p,
+            offset,
+            input_control(
+                &self.clone_name,
+                "clone-directory-name",
+                "Nouveau dossier",
+                p,
+                offset,
+            ),
+        ));
+        if let Some(repository) = repository {
+            let mut protocols = div().flex().items_center().gap(px(8.));
+            for (id, label, ssh, available) in [
+                (
+                    "clone-protocol-ssh",
+                    "SSH",
+                    true,
+                    repository.ssh_clone_url.is_some() && self.profile.ssh != SshChoice::Disabled,
+                ),
+                (
+                    "clone-protocol-https",
+                    "HTTPS",
+                    false,
+                    repository.clone_url.is_some(),
+                ),
+            ] {
+                protocols = protocols.child(
+                    action(id, label, p, offset)
+                        .disabled(!available || self.pending.is_some())
+                        .when(self.clone_ssh == ssh, |button| {
+                            button
+                                .bg(rgb(p.accent_soft))
+                                .border_color(rgb(p.accent_border))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.clone_ssh = ssh;
+                            cx.notify();
+                        })),
+                );
+            }
+            form = form
+                .child(clone_row("Protocole", p, offset, protocols))
+                .when_some(remote.as_ref(), |view, remote| {
+                    view.child(clone_row(
+                        "",
+                        p,
+                        offset,
+                        note(remote, p).text_size(px(11. + offset)),
+                    ))
+                });
+        }
+        if remote.is_some() {
+            form = form.child(clone_row("", p, offset, note(if ssh { "Utilise l’agent ou la clé SSH de votre profil." } else { "Utilise les identifiants HTTPS de Git sur cet ordinateur. Le token de l’intégration reste réservé à l’API." }, p)));
+        }
+        form.child(clone_row(
+            "",
+            p,
+            offset,
+            div().flex().child(
+                primary_action("clone-repository", "Cloner le dépôt", p, offset)
+                    .disabled(
+                        remote.is_none()
+                            || !destination_valid
+                            || self.pending.is_some()
+                            || self.picking_path,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.clone_selected(cx))),
+            ),
+        ))
+    }
+
+    fn repository_page_controls(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let mut actions = div().flex().items_center().flex_wrap().gap(px(8.));
+        actions = actions.child(
+            link_action("repositories-reload", "Actualiser", p, offset)
+                .disabled(self.pending.is_some() || self.picking_path)
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.read(ReadRequest::Repositories(None, 0), cx)),
+                ),
+        );
+        if self.repositories_page > 0 {
+            let previous_page = self.repositories_page - 1;
+            let cursor = self
+                .repositories_history
+                .get(previous_page)
+                .cloned()
+                .flatten();
+            actions = actions.child(
+                link_action("repositories-previous", "Page précédente", p, offset)
+                    .disabled(self.pending.is_some() || self.picking_path)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.read(ReadRequest::Repositories(cursor.clone(), previous_page), cx)
+                    })),
+            );
+        }
+        if let Some(cursor) = self.repositories_next.clone() {
+            actions = actions.child(
+                link_action("repositories-next", "Page suivante", p, offset)
+                    .disabled(self.pending.is_some() || self.picking_path)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.read(
+                            ReadRequest::Repositories(
+                                Some(cursor.clone()),
+                                this.repositories_page + 1,
+                            ),
+                            cx,
+                        )
+                    })),
+            );
+        }
+        let count = self.repositories.len();
+        let description = if count == 0 && self.pending.is_none() {
+            "Aucun dépôt chargé. Actualisez ou vérifiez les accès de ce compte.".to_string()
+        } else {
+            format!(
+                "Page {} · {} dépôt{} · recherche dans cette page",
+                self.repositories_page + 1,
+                count,
+                if count > 1 { "s" } else { "" }
+            )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(5.))
+            .child(note(&description, p).text_size(px(10. + offset)))
+            .child(actions)
+    }
+
+    fn profiles_content(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let mut content = div().flex().flex_col().gap(px(24.)).child(section_header(
+            "Profils",
+            "Un espace personnel pour vos comptes, préférences et dépôts récents.",
+            p,
+            offset,
+        ));
+        let mut profiles = div().flex().flex_col().gap(px(10.));
+        for profile in &self.profiles {
+            let id = profile.id.clone();
+            let active = profile.id == self.profile.id;
+            profiles = profiles.child(
+                Button::new(SharedString::from(format!("profile-{id}")))
+                    .w_full()
+                    .min_w_0()
+                    .p(px(16.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(rgb(if active { p.accent_border } else { p.border }))
+                    .bg(rgb(if active { p.accent_soft } else { p.panel }))
+                    .justify_start()
+                    .gap(px(14.))
+                    .cursor_pointer()
+                    .accessibility_label(format!("Sélectionner le profil {}", profile.name))
+                    .hover(move |style| style.bg(rgb(p.hover)))
+                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                    .child(avatar(&profile.name, p, 36.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_left()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(profile.name.clone()),
+                            )
+                            .child(
+                                note(
+                                    &format!(
+                                        "{} compte{} connecté{}",
+                                        profile.accounts.len(),
+                                        if profile.accounts.len() > 1 { "s" } else { "" },
+                                        if profile.accounts.len() > 1 { "s" } else { "" }
+                                    ),
+                                    p,
+                                )
+                                .text_size(px(11. + offset)),
+                            ),
+                    )
+                    .when(active, |view| {
+                        view.child(badge("Actif", p.accent, p.accent_soft))
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
+                    })),
+            );
+        }
+        content = content.child(profiles).child(
+            card(p).child(subtitle("Nouveau profil", offset)).child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(12.))
+                    .mt(px(14.))
+                    .child(field(
+                        &self.profile_name,
+                        "profile-name",
+                        "Nom du profil",
+                        p,
+                        offset,
+                    ))
+                    .child(
+                        primary_action("profile-create", "Créer", p, offset).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                let name = this.profile_name.read(cx).value().trim().to_string();
+                                if !name.is_empty() {
+                                    this.profile_name
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    cx.emit(IntegrationsEvent::ProfileCreated(name));
+                                }
+                            },
+                        )),
+                    ),
+            ),
+        );
+        let mut favorites = card(p)
+            .gap(px(12.))
+            .child(subtitle("Favoris", offset))
+            .when(self.profile.favorites.is_empty(), |view| {
+                view.child(note(
+                    "Gardez vos dépôts les plus utilisés à portée de main.",
+                    p,
+                ))
+            });
+        for (index, favorite) in self.profile.favorites.iter().take(MAX_ROWS).enumerate() {
+            let value = favorite.clone();
+            favorites = favorites.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(icon(IconName::FolderGit2, 16., p.muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(value.clone()),
+                    )
+                    .when(PathBuf::from(favorite).is_absolute(), |view| {
+                        let path = favorite.clone();
+                        view.child(
+                            action(format!("favorite-open-{index}"), "Ouvrir", p, offset).on_click(
+                                cx.listener(move |_, _, _, cx| {
+                                    cx.emit(IntegrationsEvent::OpenLocalFavorite(path.clone()))
+                                }),
+                            ),
+                        )
+                    })
+                    .child(
+                        link_action(format!("favorite-remove-{index}"), "Retirer", p, offset)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.profile.favorites.retain(|favorite| favorite != &value);
+                                cx.emit(IntegrationsEvent::FavoritesChanged(
+                                    this.profile.favorites.clone(),
+                                ));
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        content.child(
+            favorites.child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(12.))
+                    .mt(px(4.))
+                    .child(field(
+                        &self.favorite,
+                        "profile-favorite",
+                        "Chemin local ou URL d’un dépôt",
+                        p,
+                        offset,
+                    ))
+                    .child(action("favorite-add", "Ajouter", p, offset).on_click(
+                        cx.listener(|this, _, window, cx| this.add_favorite(window, cx)),
+                    )),
+            ),
+        )
+    }
+
+    fn ssh_content(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let mut choices = div().flex().gap(px(10.));
+        for (id, label, choice) in [
+            ("ssh-agent", "Agent SSH", SshChoice::Agent),
+            ("ssh-disabled", "Désactivé", SshChoice::Disabled),
+        ] {
+            choices = choices.child(
+                action(id, label, p, offset)
+                    .when(self.profile.ssh == choice, |button| {
+                        button
+                            .bg(rgb(p.accent_soft))
+                            .border_color(rgb(p.accent_border))
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.ssh_choice(choice.clone(), cx)),
+                    ),
+            );
+        }
+        let choice_label = match &self.profile.ssh {
+            SshChoice::Agent => "Agent SSH du système",
+            SshChoice::Disabled => "SSH désactivé",
+            SshChoice::KeyFile { .. } => "Clé privée existante",
+        };
+        let mut content = div().flex().flex_col().gap(px(24.))
+            .child(section_header("SSH", "Choisissez l’agent ou la clé à utiliser pour ce profil.", p, offset))
+            .child(card(p).gap(px(16.)).child(div().flex().items_center().gap(px(12.))
+                .child(icon(IconName::ShieldCheck, 22., p.accent))
+                .child(div().child(subtitle(choice_label, offset)).child(note(&format!("Profil {}", self.profile.name), p))))
+                .child(choices)
+                .child(div().pt(px(16.)).border_t_1().border_color(rgb(p.border)).flex().items_end().gap(px(12.))
+                    .child(field(&self.key_path, "ssh-key-path", "Chemin absolu d’une clé privée existante", p, offset))
+                    .child(action("ssh-key-browse", "Parcourir…", p, offset).disabled(self.pending.is_some() || self.picking_path)
+                        .on_click(cx.listener(|this, _, window, cx| this.pick_path(PathPickerTarget::SshKey, window, cx))))
+                    .child(action("ssh-key-save", "Utiliser cette clé", p, offset).on_click(cx.listener(|this, _, _, cx| {
+                        let value = this.key_path.read(cx).value().trim().to_string(); let path = PathBuf::from(&value);
+                        if path.is_absolute() && !value.chars().any(char::is_control) { this.error = None; this.ssh_choice(SshChoice::KeyFile { path }, cx); }
+                        else { this.error = Some("Indiquez un chemin absolu de clé SSH.".into()); cx.notify(); }
+                    })))))
+            .child(card(p).gap(px(14.)).child(subtitle("Vérifier un accès SSH", offset))
+                .child(note("Consulte les branches et tags du serveur sans télécharger les objets Git.", p))
+                .child(field(&self.ssh_remote, "ssh-remote", "URL SSH du dépôt", p, offset))
+                .child(note("Utilisez le nom réel du serveur, déjà reconnu dans known_hosts. Les alias et hooks de votre configuration SSH ne sont pas utilisés.", p))
+                .child(div().flex().child(primary_action("ssh-read-references", "Consulter les références", p, offset).disabled(self.pending.is_some()).on_click(cx.listener(|this, _, _, cx| this.read_ssh(cx))))));
+        for reference in &self.ssh_references {
+            content = content.child(note(reference, p));
+        }
+        content
+    }
+
+    fn provider_rail(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let mut rail = div()
+            .w(px(218.))
+            .flex_none()
+            .h_full()
+            .bg(rgb(p.panel))
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .py(px(24.))
+            .px(px(10.))
+            .child(
+                div()
+                    .px(px(12.))
+                    .mb(px(12.))
+                    .text_size(px(10. + self.offset))
+                    .text_color(rgb(p.muted))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("HÉBERGEMENT GIT"),
+            );
+        for (index, edition) in ProviderEdition::ALL.into_iter().enumerate() {
+            let count = self
+                .profile
+                .accounts
+                .iter()
+                .filter(|account| edition.matches(account))
+                .count();
+            let selected = self.edition == edition;
+            rail = rail.child(
+                Button::new(SharedString::from(format!("provider-{index}")))
+                    .w_full()
+                    .min_w_0()
+                    .min_h(px(48.))
+                    .px(px(12.))
+                    .py(px(10.))
+                    .gap(px(10.))
+                    .justify_start()
+                    .rounded(px(6.))
+                    .text_color(rgb(if selected { p.text } else { p.muted }))
+                    .text_size(px(12. + self.offset))
+                    .bg(rgb(if selected { p.selection } else { p.panel }))
+                    .cursor_pointer()
+                    .accessibility_label(edition.label())
+                    .hover(move |style| style.bg(rgb(p.hover)))
+                    .focus_visible(move |style| style.bg(rgb(p.selection)))
+                    .disabled(self.pending == Some(PendingOperation::Disconnect))
+                    .child(provider_mark(edition, p, 24.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_left()
+                            .child(edition.label()),
+                    )
+                    .when(count > 0, |view| {
+                        view.child(div().size(px(7.)).rounded_full().bg(rgb(p.success)))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_provider(edition, window, cx)
+                    })),
+            );
+        }
+        rail.child(
+            div()
+                .mt(px(24.))
+                .px(px(12.))
+                .border_t_1()
+                .border_color(rgb(p.border))
+                .pt(px(16.))
+                .child(note("Comptes du profil", p).text_size(px(10. + self.offset)))
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(self.profile.name.clone()),
+                ),
+        )
+    }
+
+    fn integrations_content(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let accounts: Vec<_> = self
+            .profile
+            .accounts
+            .iter()
+            .filter(|account| self.edition.matches(account))
+            .collect();
+        let mut content = div().flex().flex_col().gap(px(24.)).child(section_header(
+            self.edition.label(),
+            "Gérez vos connexions et retrouvez les dépôts depuis l’accueil.",
+            p,
+            offset,
+        ));
+        for account in &accounts {
+            let remove_id = account.id.clone();
+            let refresh_id = account.id.clone();
+            let cached = self.identities.get(&account.id);
+            let display_name = cached
+                .map(|identity| identity.display_name.as_str())
+                .unwrap_or(&account.label);
+            let identity = cached
+                .map(|identity| identity.username.as_str())
+                .or_else(|| {
+                    account
+                        .username
+                        .as_deref()
+                        .filter(|_| account.provider != Provider::BitbucketCloud)
+                });
+            let method = match account.authentication {
+                Authentication::GitLabOAuth { .. } => "Connexion par navigateur",
+                Authentication::PersonalToken => "Token personnel",
+            };
+            content = content.child(
+                card(p)
+                    .gap(px(18.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(16.))
+                            .child(avatar(identity.unwrap_or(display_name), p, 48.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(5.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(7.))
+                                            .text_color(rgb(p.success))
+                                            .child(icon(IconName::CircleCheck, 14., p.success))
+                                            .child("Compte connecté"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(16. + offset))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(display_name.to_string()),
+                                    )
+                                    .when_some(identity, |view, name| {
+                                        view.child(note(&format!("@{name}"), p))
+                                    })
+                                    .child(
+                                        note(&account.server_url, p).text_size(px(11. + offset)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .flex_wrap()
+                            .gap(px(14.))
+                            .pt(px(14.))
+                            .border_t_1()
+                            .border_color(rgb(p.border))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .text_color(rgb(p.muted))
+                                    .text_size(px(11. + offset))
+                                    .child(icon(IconName::ShieldCheck, 14., p.muted))
+                                    .child(method),
+                            )
+                            .child(
+                                link_action(
+                                    format!("account-refresh-{refresh_id}"),
+                                    "Actualiser le compte",
+                                    p,
+                                    offset,
+                                )
+                                .disabled(self.pending.is_some())
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.refresh_identity(refresh_id.clone(), cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                action(format!("disconnect-{remove_id}"), "Déconnecter", p, offset)
+                                    .disabled(self.pending.is_some())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.disconnect(remove_id.clone(), cx)
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        if !accounts.is_empty() && !self.adding_account {
+            return content.child(
+                div().flex().child(
+                    link_action(
+                        "account-add-another",
+                        "Connecter un autre compte",
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.adding_account = true;
+                        this.message = None;
+                        this.error = None;
+                        cx.notify();
+                    })),
+                ),
+            );
+        }
+        let mut form = card(p)
+            .gap(px(18.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(subtitle(
+                        if accounts.is_empty() {
+                            "Connecter votre compte"
+                        } else {
+                            "Ajouter un compte"
+                        },
+                        offset,
+                    ))
+                    .when(!accounts.is_empty(), |view| {
+                        view.child(
+                            link_action("account-add-cancel", "Annuler", p, offset).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.cancel();
+                                    this.adding_account = false;
+                                    this.token
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    this.message = None;
+                                    this.error = None;
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                    }),
+            )
+            .child(field(
+                &self.label,
+                "account-label",
+                "Nom du compte · facultatif",
+                p,
+                offset,
+            ));
+        if self.edition.custom_server() {
+            form = form.child(field(
+                &self.server,
+                "account-server",
+                "URL du serveur",
+                p,
+                offset,
+            ));
+        } else if self.edition == ProviderEdition::BitbucketCloud {
+            form = form.child(field(
+                &self.server,
+                "account-server",
+                "Workspace · https://bitbucket.org/votre-workspace",
+                p,
+                offset,
+            ));
+        }
+        if self.edition.provider() == Provider::BitbucketCloud {
+            form = form.child(field(
+                &self.username,
+                "account-username",
+                "Adresse e-mail Atlassian · pour un API token",
+                p,
+                offset,
+            ));
+        }
+        if self.edition.provider() == Provider::GitLab && self.gitlab_browser {
+            form = form.child(note("Autorisez Mangrove dans votre navigateur. La connexion est conservée dans le coffre sécurisé du système.", p))
+                .child(div().flex().child(primary_action("gitlab-browser-connect", "Se connecter avec GitLab", p, offset)
+                    .disabled(self.pending.is_some()).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx)))))
+                .child(div().flex().flex_wrap().gap(px(8.))
+                    .child(link_action("gitlab-application-config", if self.gitlab_config_open { "Masquer la configuration OAuth" } else { "Configuration OAuth" }, p, offset)
+                        .disabled(self.pending.is_some()).on_click(cx.listener(|this, _, _, cx| { this.gitlab_config_open = !this.gitlab_config_open; cx.notify(); })))
+                    .child(link_action("gitlab-personal-token", "Utiliser un token personnel", p, offset).disabled(self.pending.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| this.set_gitlab_browser(false, window, cx)))));
+            if self.gitlab_config_open {
+                form = form.child(div().flex().flex_col().gap(px(12.)).pt(px(16.)).border_t_1().border_color(rgb(p.border))
+                    .child(field(&self.client_id, "gitlab-client-id", "Application ID public", p, offset))
+                    .child(note("Créez une application Mangrove non confidentielle dans GitLab, avec l’autorisation read_api. Aucun secret d’application n’est nécessaire.", p))
+                    .child(div().flex().child(action("gitlab-create-application", "Créer l’application dans GitLab", p, offset)
+                        .disabled(self.pending.is_some()).on_click(cx.listener(|this, _, _, cx| this.open_gitlab_application_settings(cx)))))
+                    .child(note(&format!("URL de redirection : {}", oauth::REDIRECT_URI), p).text_size(px(11. + offset))));
+            }
+        } else {
+            let permissions = match self.edition.provider() {
+                Provider::GitLab => "GitLab : autorisation read_api.",
+                Provider::GitHub => {
+                    "GitHub : accès aux dépôts, pull requests et checks en lecture."
+                }
+                _ => "Bitbucket : accès aux dépôts, pull requests et statuts CI en lecture.",
+            };
+            form = form
+                .child(field(
+                    &self.token,
+                    "account-token",
+                    "Token personnel",
+                    p,
+                    offset,
+                ))
+                .child(note(permissions, p))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap(px(12.))
+                        .child(
+                            primary_action("account-connect", "Connecter le compte", p, offset)
+                                .disabled(self.pending.is_some())
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.connect(window, cx)),
+                                ),
+                        )
+                        .when(self.edition.provider() == Provider::GitLab, |view| {
+                            view.child(
+                                link_action(
+                                    "gitlab-browser-mode",
+                                    "Connexion par navigateur",
+                                    p,
+                                    offset,
+                                )
+                                .disabled(self.pending.is_some())
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.set_gitlab_browser(true, window, cx),
+                                )),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .text_size(px(11. + offset))
+                        .text_color(rgb(p.muted))
+                        .child(icon(IconName::ShieldCheck, 14., p.muted))
+                        .child("Identifiants enregistrés dans le coffre du système"),
+                );
+        }
+        content.child(form)
+    }
+
+    fn accounts_rail(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let mut rail = div().w_full().p(px(12.)).child(
+            div()
+                .px(px(8.))
+                .py(px(12.))
+                .text_size(px(10. + self.offset))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(p.muted))
+                .child("COMPTES CONNECTÉS"),
+        );
+        rail = rail.child(
+            Button::new("browse-direct-url")
+                .w_full()
+                .min_w_0()
+                .px(px(10.))
+                .py(px(12.))
+                .gap(px(10.))
+                .rounded(px(6.))
+                .justify_start()
+                .bg(rgb(if self.direct_clone {
+                    p.selection
+                } else {
+                    p.panel
+                }))
+                .text_color(rgb(p.text))
+                .cursor_pointer()
+                .accessibility_label("Cloner avec une URL")
+                .disabled(self.direct_clone)
+                .hover(move |style| style.bg(rgb(p.hover)))
+                .focus_visible(move |style| style.bg(rgb(p.selection)))
+                .child(icon(IconName::Link, 18., p.muted))
+                .child("URL d’un dépôt")
+                .on_click(cx.listener(|this, _, window, cx| this.select_direct_clone(window, cx))),
+        );
+        for account in &self.profile.accounts {
+            let id = account.id.clone();
+            let edition = ProviderEdition::ALL
+                .into_iter()
+                .find(|edition| edition.matches(account))
+                .unwrap_or(ProviderEdition::GitLab);
+            rail = rail.child(
+                Button::new(SharedString::from(format!("browse-account-{id}")))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(10.))
+                    .py(px(12.))
+                    .gap(px(10.))
+                    .rounded(px(6.))
+                    .justify_start()
+                    .bg(rgb(if self.selected_account.as_ref() == Some(&id) {
+                        p.selection
+                    } else {
+                        p.panel
+                    }))
+                    .cursor_pointer()
+                    .accessibility_label(format!("Parcourir les dépôts de {}", account.label))
+                    .disabled(self.selected_account.as_ref() == Some(&id))
+                    .hover(move |style| style.bg(rgb(p.hover)))
+                    .focus_visible(move |style| style.bg(rgb(p.selection)))
+                    .child(provider_mark(edition, p, 28.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_left()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
+                                    .child(account.label.clone()),
+                            )
+                            .child(note(edition.label(), p).text_size(px(10. + self.offset))),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.select_account(id.clone(), cx)),
+                    ),
+            );
+        }
+        let rail = rail.child(
+            div().mt(px(18.)).flex().child(
+                link_action(
+                    "browse-manage-connections",
+                    "Gérer les connexions",
+                    p,
+                    self.offset,
+                )
+                .on_click(
+                    cx.listener(|_, _, _, cx| cx.emit(IntegrationsEvent::OpenIntegrationSettings)),
+                ),
+            ),
+        );
+        div()
+            .relative()
+            .w(px(228.))
+            .flex_none()
+            .h_full()
+            .bg(rgb(p.panel))
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .child(
+                div()
+                    .id("accounts-rail-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.rail_scroll)
+                    .child(rail),
+            )
+            .child(scrollbar_theme(
+                Scrollbar::vertical(&self.rail_scroll).id("accounts-rail-scrollbar"),
+            ))
+    }
+
+    fn repositories_content(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .gap(px(20.))
+            .child(self.clone_content(self.selected_repository.as_ref(), cx));
+        if self.direct_clone || self.profile.accounts.is_empty() {
+            return content.when(self.profile.accounts.is_empty(), |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(note(
+                            "Vous pouvez aussi parcourir les dépôts d’un compte connecté.",
+                            p,
+                        ))
+                        .child(
+                            link_action("browse-connect-account", "Connecter un compte", p, offset)
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(IntegrationsEvent::OpenIntegrationSettings)
+                                })),
+                        ),
+                )
+            });
+        }
+        if let Some(repository) = &self.selected_repository {
+            let favorite = repository
+                .web_url
+                .clone()
+                .unwrap_or_else(|| repository.full_name.clone());
+            content = content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(title(&format!("PR/MR · {}", repository.full_name)))
+                    .child(
+                        link_action(
+                            "selected-repository-favorite",
+                            if self.profile.favorites.contains(&favorite) {
+                                "Retirer des favoris"
+                            } else {
+                                "Ajouter aux favoris"
+                            },
+                            p,
+                            offset,
+                        )
+                        .disabled(self.pending.is_some() || self.picking_path)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(index) = this
+                                .profile
+                                .favorites
+                                .iter()
+                                .position(|value| value == &favorite)
+                            {
+                                this.profile.favorites.remove(index);
+                            } else if this.profile.favorites.len() < MAX_ROWS {
+                                this.profile.favorites.push(favorite.clone());
+                            }
+                            cx.emit(IntegrationsEvent::FavoritesChanged(
+                                this.profile.favorites.clone(),
+                            ));
+                            cx.notify();
+                        })),
+                    ),
+            );
+            let selected = repository.clone();
+            content = content.child(
+                div().flex().child(
+                    action(
+                        "changes-load",
+                        if self.changes_loaded {
+                            "Actualiser les PR/MR"
+                        } else {
+                            "Consulter les PR/MR"
+                        },
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.read(ReadRequest::Changes(selected.clone(), None), cx)
+                    })),
+                ),
+            );
+            if self.changes_loaded && self.changes.is_empty() && self.pending.is_none() {
+                content = content.child(note("Aucune PR/MR ouverte pour ce dépôt.", p));
+            }
+            for (index, change) in self.changes.iter().enumerate() {
+                let change = change.clone();
+                content = content.child(
+                    action(
+                        format!("change-{index}"),
+                        &format!("#{} · {} · {}", change.id, change.title, change.state),
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending == Some(PendingOperation::Clone))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.select_change(change.clone(), cx)),
+                    ),
+                );
+            }
+            if let Some(cursor) = self.changes_next.clone() {
+                let repository = repository.clone();
+                content = content.child(
+                    action("changes-next", "Page suivante des PR/MR", p, offset)
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.read(
+                                ReadRequest::Changes(repository.clone(), Some(cursor.clone())),
+                                cx,
+                            )
+                        })),
+                );
+            }
+        }
+        if let (Some(repository), Some(change)) = (&self.selected_repository, &self.selected_change)
+        {
+            content = content
+                .child(title(&change.title))
+                .child(note(&change.description, p))
+                .child(title("Discussions"));
+            for discussion in &self.discussions {
+                for comment in discussion.comments.iter().take(MAX_ROWS) {
+                    content = content.child(
+                        div()
+                            .border_l_2()
+                            .border_color(rgb(p.border))
+                            .pl(px(12.))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(comment.author.clone()),
+                            )
+                            .child(note(&comment.body, p)),
+                    );
+                }
+            }
+            if self.discussions.is_empty() && self.pending.is_none() {
+                content = content.child(note("Aucune discussion chargée.", p));
+            }
+            if let Some(cursor) = self.discussions_next.clone() {
+                let repository = repository.clone();
+                let change = change.clone();
+                content = content.child(
+                    action(
+                        "discussions-next",
+                        "Page suivante des discussions",
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.read(
+                            ReadRequest::Discussions(
+                                repository.clone(),
+                                change.clone(),
+                                Some(cursor.clone()),
+                            ),
+                            cx,
+                        )
+                    })),
+                );
+            }
+            content = content.child(title("Résultats CI"));
+            if let Some(sha) = change.head_sha.clone() {
+                let repository = repository.clone();
+                content = content.child(
+                    action("statuses-load", "Consulter les statuts CI", p, offset)
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.read(
+                                ReadRequest::Statuses(repository.clone(), sha.clone(), None),
+                                cx,
+                            )
+                        })),
+                );
+            } else {
+                content = content.child(note("Révision source non fournie par cet hébergeur.", p));
+            }
+            for status in &self.statuses {
+                content = content.child(
+                    div()
+                        .child(format!("{} · {}", status.name, status.state))
+                        .child(note(&status.description, p)),
+                );
+            }
+            if let (Some(cursor), Some(sha)) = (self.statuses_next.clone(), change.head_sha.clone())
+            {
+                let repository = repository.clone();
+                content = content.child(
+                    action("statuses-next", "Page suivante des statuts CI", p, offset)
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.read(
+                                ReadRequest::Statuses(
+                                    repository.clone(),
+                                    sha.clone(),
+                                    Some(cursor.clone()),
+                                ),
+                                cx,
+                            )
+                        })),
+                );
+            }
+        }
+        content
+    }
+}
+
+impl Render for IntegrationsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_repository_select(window, cx);
+        let p = self.palette;
+        let content = match self.section {
+            IntegrationsSection::Profiles => self.profiles_content(cx),
+            IntegrationsSection::Ssh => self.ssh_content(cx),
+            IntegrationsSection::Integrations => self.integrations_content(cx),
+            IntegrationsSection::Repositories => self.repositories_content(cx),
+        };
+        div()
+            .id("integrations-view")
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .bg(rgb(p.bg))
+            .text_color(rgb(p.text))
+            .text_size(px(12. + self.offset))
+            .when(self.section == IntegrationsSection::Integrations, |view| {
+                view.child(self.provider_rail(cx))
+            })
+            .when(self.section == IntegrationsSection::Repositories, |view| {
+                view.child(self.accounts_rail(cx))
+            })
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .h_full()
+                    .child(
+                        div()
+                            .id("integrations-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .px(px(28.))
+                            .py(px(28.))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(760.))
+                                    .when_some(self.message.clone(), |view, message| {
+                                        view.child(
+                                            div()
+                                                .mb(px(20.))
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .text_color(rgb(p.muted))
+                                                .when(self.pending.is_some(), |view| {
+                                                    view.child(icon(
+                                                        IconName::LoaderCircle,
+                                                        16.,
+                                                        p.accent,
+                                                    ))
+                                                })
+                                                .child(note(&message, p)),
+                                        )
+                                    })
+                                    .when_some(self.error.clone(), |view, error| {
+                                        view.child(
+                                            div()
+                                                .mb(px(20.))
+                                                .p(px(14.))
+                                                .border_1()
+                                                .border_color(rgb(p.danger).opacity(0.4))
+                                                .rounded(px(6.))
+                                                .bg(rgb(p.danger).opacity(0.07))
+                                                .child(note(&error, p).text_color(rgb(p.danger))),
+                                        )
+                                    })
+                                    .when(
+                                        self.pending.is_some_and(|operation| {
+                                            operation != PendingOperation::Disconnect
+                                        }),
+                                        |view| {
+                                            view.child(
+                                                div().flex().mb(px(20.)).child(
+                                                    action(
+                                                        "remote-cancel",
+                                                        "Annuler",
+                                                        p,
+                                                        self.offset,
+                                                    )
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        let cloning = this.pending == Some(PendingOperation::Clone);
+                                                        this.cancel();
+                                                        this.message = cloning.then(|| "Clonage annulé. Un dossier incomplet peut subsister ; choisissez un nouveau nom avant de réessayer.".into());
+                                                        cx.notify();
+                                                    })),
+                                                ),
+                                            )
+                                        },
+                                    )
+                                    .child(content),
+                            ),
+                    )
+                    .child(scrollbar_theme(
+                        Scrollbar::vertical(&self.scroll).id("integrations-scrollbar"),
+                    )),
+            )
+    }
+}
+
+fn section_header(label: &str, description: &str, p: Palette, offset: f32) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .text_size(px(23. + offset))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label.to_string()),
+        )
+        .child(note(description, p))
+}
+
+fn subtitle(label: &str, offset: f32) -> Div {
+    div()
+        .text_size(px(15. + offset))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(label.to_string())
+}
+
+fn title(label: &str) -> Div {
+    subtitle(label, 0.)
+}
+
+fn card(p: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .w_full()
+        .p(px(22.))
+        .border_1()
+        .border_color(rgb(p.border))
+        .rounded(px(10.))
+        .bg(rgb(p.panel))
+}
+
+fn badge(label: &str, color: u32, background: u32) -> Div {
+    div()
+        .flex_none()
+        .px(px(8.))
+        .py(px(3.))
+        .rounded(px(4.))
+        .text_size(px(10.))
+        .text_color(rgb(color))
+        .bg(rgb(background))
+        .child(label.to_string())
+}
+
+fn avatar(label: &str, p: Palette, size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(p.accent_soft))
+        .text_color(rgb(p.accent))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(size * 0.34))
+        .child(initials(label))
+}
+
+fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(rgb(p.border))
+        .text_color(rgb(p.muted))
+        .text_size(px(9.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(match edition.provider() {
+            Provider::GitHub => icon(IconName::Github, size * 0.65, p.muted).into_any_element(),
+            Provider::GitLab => {
+                static LOGO: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+                let logo = LOGO.get_or_init(|| {
+                    Arc::new(Image::from_bytes(
+                        ImageFormat::Svg,
+                        include_bytes!("../../assets/brands/gitlab.svg").to_vec(),
+                    ))
+                });
+                img(logo.clone()).size(px(size * 0.7)).into_any_element()
+            }
+            _ => div().child(edition.glyph()).into_any_element(),
+        })
+}
+
+fn primary_action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
+    action(id, label, p, offset)
+        .bg(rgb(p.accent))
+        .border_color(rgb(p.accent))
+        .text_color(rgb(p.on_accent))
+        .font_weight(FontWeight::SEMIBOLD)
+        .hover(move |style| style.bg(rgb(p.accent).opacity(0.9)))
+}
+
+fn link_action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
+    action(id, label, p, offset)
+        .border_color(transparent_black())
+        .text_color(rgb(p.accent))
+        .px(px(4.))
+        .py(px(6.))
+}
+
+fn note(label: &str, p: Palette) -> Div {
+    div()
+        .min_w_0()
+        .whitespace_normal()
+        .line_height(relative(1.6))
+        .text_color(rgb(p.muted))
+        .child(label.to_string())
+}
+
+fn action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
+    Button::new(id.into())
+        .px(px(12.))
+        .py(px(8.))
+        .border_1()
+        .border_color(rgb(p.border))
+        .rounded(px(5.))
+        .text_size(px(12. + offset))
+        .text_color(rgb(p.text))
+        .cursor_pointer()
+        .accessibility_label(label.to_string())
+        .hover(move |style| style.bg(rgb(p.hover)))
+        .focus_visible(move |style| style.border_color(rgb(p.accent)))
+        .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_default()))
+        .child(div().min_w_0().whitespace_normal().child(label.to_string()))
+}
+
+fn clone_row(label: &str, p: Palette, offset: f32, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(18.))
+        .child(
+            div()
+                .w(px(132.))
+                .flex_none()
+                .pt(px(8.))
+                .text_size(px(12. + offset))
+                .text_color(rgb(p.muted))
+                .whitespace_normal()
+                .child(label.to_string()),
+        )
+        .child(div().flex_1().min_w_0().child(control))
+}
+
+fn input_control(
+    state: &Entity<InputState>,
+    id: &'static str,
+    label: &'static str,
+    p: Palette,
+    offset: f32,
+) -> Input {
+    Input::new(state)
+        .id(id)
+        .aria_label(label)
+        .appearance(false)
+        .with_size(px(36.))
+        .w_full()
+        .min_w_0()
+        .px(px(12.))
+        .py_0()
+        .border_1()
+        .border_color(rgb(p.border))
+        .rounded(px(4.))
+        .bg(rgb(p.bg))
+        .text_color(rgb(p.text))
+        .text_size(px(12. + offset))
+}
+
+fn field(
+    state: &Entity<InputState>,
+    id: &'static str,
+    label: &'static str,
+    p: Palette,
+    offset: f32,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(note(label, p))
+        .child(input_control(state, id, label, p, offset))
+}

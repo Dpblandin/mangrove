@@ -1,10 +1,15 @@
-use crate::theme::{Palette, scrollbar_theme};
+use crate::theme::{Palette, icon, scrollbar_theme};
+use gpui_kit::assets::IconName;
 use gpui_kit::{
     base::Button,
     component::{
         Sizable,
-        input::{Input, InputState},
+        input::{Input, InputEvent, InputState},
         scroll::Scrollbar,
+        searchable_list::{
+            SearchableGroup, SearchableListDelegate, SearchableListItem, SearchableVec,
+        },
+        select::{Select, SelectEvent, SelectState},
     },
     prelude::*,
     *,
@@ -14,15 +19,19 @@ use mangrove_remote::{
     Profile, ProfileSession, Provider, SecretToken, SessionTicket,
     oauth::{self, GitLabOAuth, OAuthCredentials},
     providers::{
-        ChangeRequest, CiStatus, Discussion, Page, PageCursor, ProviderClient, Repository,
+        AccountIdentity, ChangeRequest, CiStatus, Discussion, Page, PageCursor, ProviderClient,
+        Repository,
     },
     ssh::SshChoice,
 };
 use std::{
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+mod render;
 
 const MAX_ROWS: usize = 250;
 
@@ -43,17 +52,156 @@ pub enum IntegrationsEvent {
     FavoritesChanged(Vec<String>),
     SshChanged(SshChoice),
     OpenLocalFavorite(String),
+    OpenIntegrationSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationsSection {
     Profiles,
+    Ssh,
     Integrations,
+    Repositories,
+}
+
+/// Cloud and enterprise editions have different setup fields, while sharing
+/// their provider's transport and credential handling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderEdition {
+    GitHub,
+    GitHubEnterprise,
+    GitLab,
+    GitLabSelfManaged,
+    BitbucketCloud,
+    BitbucketDataCenter,
+}
+
+impl ProviderEdition {
+    const ALL: [Self; 6] = [
+        Self::GitHub,
+        Self::GitHubEnterprise,
+        Self::GitLab,
+        Self::GitLabSelfManaged,
+        Self::BitbucketCloud,
+        Self::BitbucketDataCenter,
+    ];
+
+    fn provider(self) -> Provider {
+        match self {
+            Self::GitHub | Self::GitHubEnterprise => Provider::GitHub,
+            Self::GitLab | Self::GitLabSelfManaged => Provider::GitLab,
+            Self::BitbucketCloud => Provider::BitbucketCloud,
+            Self::BitbucketDataCenter => Provider::BitbucketServer,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub.com",
+            Self::GitHubEnterprise => "GitHub Enterprise",
+            Self::GitLab => "GitLab.com",
+            Self::GitLabSelfManaged => "GitLab auto-hébergé",
+            Self::BitbucketCloud => "Bitbucket Cloud",
+            Self::BitbucketDataCenter => "Bitbucket Data Center",
+        }
+    }
+
+    fn glyph(self) -> &'static str {
+        match self.provider() {
+            Provider::GitHub => "GH",
+            Provider::GitLab => "GL",
+            Provider::BitbucketCloud | Provider::BitbucketServer => "BB",
+        }
+    }
+
+    fn server(self) -> &'static str {
+        match self {
+            Self::GitHub => "https://github.com",
+            Self::GitLab => "https://gitlab.com",
+            Self::BitbucketCloud => "https://bitbucket.org/",
+            _ => "",
+        }
+    }
+
+    fn custom_server(self) -> bool {
+        matches!(
+            self,
+            Self::GitHubEnterprise | Self::GitLabSelfManaged | Self::BitbucketDataCenter
+        )
+    }
+
+    fn matches(self, account: &Account) -> bool {
+        if self.provider() != account.provider {
+            return false;
+        }
+        let cloud = match account.provider {
+            Provider::GitHub => matches!(
+                account.server_url.trim_end_matches('/'),
+                "https://github.com" | "https://api.github.com"
+            ),
+            Provider::GitLab => account.server_url.trim_end_matches('/') == "https://gitlab.com",
+            _ => true,
+        };
+        match self {
+            Self::GitHub | Self::GitLab => cloud,
+            Self::GitHubEnterprise | Self::GitLabSelfManaged => !cloud,
+            _ => true,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RepositoryOption {
+    id: String,
+    full_name: String,
+}
+
+impl SearchableListItem for RepositoryOption {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.full_name.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(gpui_kit::component::Icon::new(IconName::FolderGit2).with_size(px(14.)))
+            .child(div().min_w_0().truncate().child(self.full_name.clone()))
+    }
+}
+
+type RepositorySelect = SelectState<SearchableVec<SearchableGroup<RepositoryOption>>>;
+
+fn repository_option_groups(repositories: &[Repository]) -> Vec<SearchableGroup<RepositoryOption>> {
+    let mut groups = BTreeMap::<String, Vec<RepositoryOption>>::new();
+    for repository in repositories {
+        let namespace = repository
+            .full_name
+            .rsplit_once('/')
+            .map_or("Dépôts", |(namespace, _)| namespace);
+        groups
+            .entry(namespace.to_string())
+            .or_default()
+            .push(RepositoryOption {
+                id: repository.id.clone(),
+                full_name: repository.full_name.clone(),
+            });
+    }
+    groups
+        .into_iter()
+        .map(|(namespace, items)| SearchableGroup::new(namespace).items(items))
+        .collect()
 }
 
 #[derive(Clone)]
 enum ReadRequest {
-    Repositories(Option<PageCursor>),
+    Repositories(Option<PageCursor>, usize),
     Changes(Repository, Option<PageCursor>),
     Discussions(Repository, ChangeRequest, Option<PageCursor>),
     Statuses(Repository, String, Option<PageCursor>),
@@ -63,7 +211,16 @@ enum ReadRequest {
 enum PendingOperation {
     Connect,
     Disconnect,
+    Identity,
+    RepositoryRead,
     Read,
+    Clone,
+}
+
+#[derive(Clone, Copy)]
+enum PathPickerTarget {
+    CloneParent,
+    SshKey,
 }
 
 enum ConnectionRequest {
@@ -123,6 +280,8 @@ pub struct IntegrationsView {
     palette: Palette,
     offset: f32,
     scroll: ScrollHandle,
+    rail_scroll: ScrollHandle,
+    identities: HashMap<String, AccountIdentity>,
     profile_name: Entity<InputState>,
     label: Entity<InputState>,
     server: Entity<InputState>,
@@ -135,7 +294,23 @@ pub struct IntegrationsView {
     favorite: Entity<InputState>,
     ssh_remote: Entity<InputState>,
     ssh_references: Vec<String>,
-    provider: Provider,
+    edition: ProviderEdition,
+    adding_account: bool,
+    repository_select: Entity<RepositorySelect>,
+    repository_select_subscription: Option<Subscription>,
+    repository_select_scope: u64,
+    repository_select_dirty: bool,
+    clone_url: Entity<InputState>,
+    direct_clone: bool,
+    clone_parent: Entity<InputState>,
+    clone_name: Entity<InputState>,
+    generated_clone_name: String,
+    clone_ssh: bool,
+    picking_path: bool,
+    picker_task: Option<Task<()>>,
+    repositories_history: Vec<Option<PageCursor>>,
+    repositories_page: usize,
+    _subscriptions: Vec<Subscription>,
     session: Arc<ProfileSession>,
     vault: Arc<OsCredentialVault>,
     generation: u64,
@@ -145,6 +320,7 @@ pub struct IntegrationsView {
     selected_change: Option<ChangeRequest>,
     repositories: Vec<Repository>,
     changes: Vec<ChangeRequest>,
+    changes_loaded: bool,
     discussions: Vec<Discussion>,
     statuses: Vec<CiStatus>,
     repositories_next: Option<PageCursor>,
@@ -184,6 +360,53 @@ impl IntegrationsView {
         }
         let client_id = configured_gitlab_client_id(&profile);
         let gitlab_config_open = client_id.is_empty();
+        let repository_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(Vec::<SearchableGroup<RepositoryOption>>::new()),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let clone_url = text_input(
+            "https://serveur/groupe/depot.git ou git@serveur:groupe/depot.git",
+            window,
+            cx,
+        );
+        let clone_name = text_input("Nom du dossier à créer", window, cx);
+        let clone_parent = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Choisir un dossier")
+                .default_value(
+                    dirs::home_dir()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+        });
+        let mut subscriptions = vec![];
+        subscriptions.push(
+            cx.subscribe_in(&clone_url, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let current = this.clone_name.read(cx).value();
+                    if current.is_empty() || current.as_ref() == this.generated_clone_name {
+                        let generated =
+                            clone_directory_from_remote(this.clone_url.read(cx).value().trim());
+                        this.generated_clone_name = generated.clone();
+                        this.clone_name
+                            .update(cx, |input, cx| input.set_value(generated, window, cx));
+                    }
+                    cx.notify();
+                }
+            }),
+        );
+        for input in [&clone_name, &clone_parent] {
+            subscriptions.push(cx.subscribe(input, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
         Self {
             profiles: vec![profile.clone()],
             session: Arc::new(ProfileSession::new(&profile.id)),
@@ -192,6 +415,8 @@ impl IntegrationsView {
             palette,
             offset,
             scroll: ScrollHandle::default(),
+            rail_scroll: ScrollHandle::default(),
+            identities: HashMap::new(),
             profile_name: text_input("Nom du nouveau profil", window, cx),
             label: text_input("Nom du compte", window, cx),
             server: cx.new(|cx| InputState::new(window, cx).default_value("https://gitlab.com")),
@@ -212,7 +437,23 @@ impl IntegrationsView {
             favorite: text_input("Chemin local ou URL d’un dépôt", window, cx),
             ssh_remote: text_input("ssh://git@serveur/groupe/depot.git", window, cx),
             ssh_references: Vec::new(),
-            provider: Provider::GitLab,
+            edition: ProviderEdition::GitLab,
+            adding_account: false,
+            repository_select,
+            repository_select_subscription: None,
+            repository_select_scope: 0,
+            repository_select_dirty: true,
+            clone_url,
+            direct_clone: false,
+            clone_parent,
+            clone_name,
+            generated_clone_name: "depot".into(),
+            clone_ssh: false,
+            picking_path: false,
+            picker_task: None,
+            repositories_history: vec![None],
+            repositories_page: 0,
+            _subscriptions: subscriptions,
             vault: Arc::new(OsCredentialVault::new()),
             generation: 0,
             task: None,
@@ -221,6 +462,7 @@ impl IntegrationsView {
             selected_change: None,
             repositories: Vec::new(),
             changes: Vec::new(),
+            changes_loaded: false,
             discussions: Vec::new(),
             statuses: Vec::new(),
             repositories_next: None,
@@ -239,8 +481,50 @@ impl IntegrationsView {
     }
 
     pub fn set_section(&mut self, section: IntegrationsSection, cx: &mut Context<Self>) {
-        self.section = section;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        if self.section != section {
+            self.cancel();
+            self.clear_reads();
+            self.message = None;
+            self.error = None;
+            self.section = section;
+        }
         cx.notify();
+    }
+
+    pub fn open_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(IntegrationsSection::Repositories, cx);
+        let account_id = self
+            .selected_account
+            .clone()
+            .filter(|id| self.profile.accounts.iter().any(|a| &a.id == id))
+            .or_else(|| {
+                self.profile
+                    .accounts
+                    .first()
+                    .map(|account| account.id.clone())
+            });
+        if let Some(account_id) = account_id {
+            self.select_account(account_id, cx);
+        } else {
+            self.select_direct_clone(window, cx);
+        }
+    }
+
+    pub fn close_repositories(&mut self, cx: &mut Context<Self>) {
+        self.set_section(IntegrationsSection::Integrations, cx);
+    }
+
+    pub fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel();
+        self.token
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.message = None;
+        cx.notify();
+    }
+
+    pub fn choosing_path(&self) -> bool {
+        self.picking_path
     }
 
     pub fn set_theme(&mut self, palette: Palette, offset: f32, cx: &mut Context<Self>) {
@@ -254,6 +538,7 @@ impl IntegrationsView {
         let accounts_changed = self.profile.accounts != profile.accounts;
         let ssh_changed = self.profile.ssh != profile.ssh;
         if switched || accounts_changed || ssh_changed {
+            self.identities.clear();
             self.session.switch(&profile.id);
             self.cancel();
             self.clear_reads();
@@ -270,10 +555,24 @@ impl IntegrationsView {
                 &self.favorite,
                 &self.ssh_remote,
                 &self.profile_name,
+                &self.clone_name,
+                &self.clone_url,
             ] {
                 input.update(cx, |state, cx| state.set_value("", window, cx));
             }
-            self.provider = Provider::GitLab;
+            self.edition = ProviderEdition::GitLab;
+            self.adding_account = false;
+            self.direct_clone = false;
+            self.clone_ssh = false;
+            self.clone_parent.update(cx, |input, cx| {
+                input.set_value(
+                    dirs::home_dir()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    window,
+                    cx,
+                )
+            });
             self.gitlab_browser = true;
             let client_id = configured_gitlab_client_id(&profile);
             self.gitlab_config_open = client_id.is_empty();
@@ -322,18 +621,24 @@ impl IntegrationsView {
         self.session.invalidate();
         self.task = None;
         self.pending = None;
+        self.picker_task = None;
+        self.picking_path = false;
     }
 
     fn clear_reads(&mut self) {
+        self.invalidate_repository_select();
         self.ssh_references.clear();
         self.repositories.clear();
         self.repositories_next = None;
+        self.repositories_page = 0;
+        self.repositories_history = vec![None];
         self.clear_changes();
     }
 
     fn clear_changes(&mut self) {
         self.selected_repository = None;
         self.changes.clear();
+        self.changes_loaded = false;
         self.changes_next = None;
         self.clear_details();
     }
@@ -346,19 +651,33 @@ impl IntegrationsView {
         self.statuses_next = None;
     }
 
-    fn select_provider(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
-        self.provider = provider;
+    fn select_provider(
+        &mut self,
+        edition: ProviderEdition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel();
+        self.clear_reads();
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.edition = edition;
+        self.adding_account = false;
         self.gitlab_browser = true;
-        let url = match self.provider {
-            Provider::GitLab => "https://gitlab.com",
-            Provider::GitHub => "https://github.com",
-            Provider::BitbucketCloud => "https://bitbucket.org/<workspace>",
-            Provider::BitbucketServer => "https://bitbucket.example.com",
+        self.server.update(cx, |input, cx| {
+            input.set_value(edition.server(), window, cx)
+        });
+        for input in [&self.label, &self.username, &self.token] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        let client_id = if edition == ProviderEdition::GitLab {
+            configured_gitlab_client_id(&self.profile)
+        } else {
+            String::new()
         };
-        self.server
-            .update(cx, |input, cx| input.set_value(url, window, cx));
-        self.token
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.gitlab_config_open = client_id.is_empty();
+        self.client_id
+            .update(cx, |input, cx| input.set_value(client_id, window, cx));
+        self.message = None;
         self.error = None;
         cx.notify();
     }
@@ -396,7 +715,8 @@ impl IntegrationsView {
             cx.notify();
             return;
         }
-        let browser = self.provider == Provider::GitLab && self.gitlab_browser;
+        let provider = self.edition.provider();
+        let browser = provider == Provider::GitLab && self.gitlab_browser;
         let (request, authentication) = if browser {
             let client_id = self.client_id.read(cx).value().trim().to_string();
             if client_id.is_empty() {
@@ -431,18 +751,19 @@ impl IntegrationsView {
             )
         };
         let label = self.label.read(cx).value().trim().to_string();
+        let default_label = label.is_empty();
         let server_url = self.server.read(cx).value().trim().to_string();
         let username = self.username.read(cx).value().trim().to_string();
         let account = Account {
             id: fresh_account_id(),
             label: if label.is_empty() {
-                provider_label(self.provider).to_string()
+                provider_label(provider).to_string()
             } else {
                 label
             },
-            provider: self.provider,
+            provider,
             server_url,
-            username: (self.provider == Provider::BitbucketCloud && !username.is_empty())
+            username: (provider == Provider::BitbucketCloud && !username.is_empty())
                 .then_some(username),
             authentication,
         };
@@ -513,7 +834,7 @@ impl IntegrationsView {
                         }
                     };
                     let client = credentials.provider_client(worker_account.clone())?;
-                    let page = client.repositories(None, &worker_ticket.cancellation)?;
+                    let identity = client.account_identity(&worker_ticket.cancellation)?;
                     if !session.is_current(&worker_ticket) {
                         return Err(mangrove_remote::RemoteError::Cancelled);
                     }
@@ -526,7 +847,7 @@ impl IntegrationsView {
                         vault.delete(&worker_ticket.profile_id, &worker_account.id)?;
                         return Err(mangrove_remote::RemoteError::Cancelled);
                     }
-                    Ok(page)
+                    Ok(identity)
                 })
                 .await;
             let accepted = this
@@ -536,12 +857,18 @@ impl IntegrationsView {
                     }
                     view.pending = None;
                     match result {
-                        Ok(page) => {
+                        Ok(identity) => {
+                            let mut account = account.clone();
+                            if let Some(identity) = identity {
+                                account.username = Some(identity.username);
+                                if default_label {
+                                    account.label = identity.display_name;
+                                }
+                            }
                             view.selected_account = Some(account.id.clone());
                             view.profile.accounts.push(account.clone());
-                            view.repositories = bounded(page.items);
-                            view.repositories_next = page.next;
-                            view.clear_changes();
+                            view.clear_reads();
+                            view.adding_account = false;
                             view.message = Some(
                                 "Compte connecté. Les lectures distantes sont disponibles.".into(),
                             );
@@ -583,10 +910,71 @@ impl IntegrationsView {
     }
 
     fn select_account(&mut self, id: String, cx: &mut Context<Self>) {
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.direct_clone = false;
         self.cancel();
         self.clear_reads();
         self.selected_account = Some(id);
-        self.read(ReadRequest::Repositories(None), cx);
+        if self.section == IntegrationsSection::Repositories {
+            self.read(ReadRequest::Repositories(None, 0), cx);
+        }
+    }
+
+    fn refresh_identity(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(account) = self
+            .profile
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.cancel();
+        let generation = self.generation;
+        let ticket = self.session.ticket(&account.id);
+        let worker_ticket = ticket.clone();
+        let vault = self.vault.clone();
+        self.pending = Some(PendingOperation::Identity);
+        self.message = Some("Vérification du compte…".into());
+        self.error = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = oauth::account_client(
+                        vault.as_ref(),
+                        &worker_ticket.profile_id,
+                        &account,
+                        &worker_ticket.cancellation,
+                    )?;
+                    client.account_identity(&worker_ticket.cancellation)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if !view.accepts(&ticket, generation) {
+                    return;
+                }
+                view.pending = None;
+                match result {
+                    Ok(identity) => {
+                        if let Some(identity) = identity {
+                            view.identities.insert(ticket.account_id.clone(), identity);
+                        }
+                        view.message = Some("Compte vérifié.".into());
+                    }
+                    Err(error) => {
+                        view.message = None;
+                        view.error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn disconnect(&mut self, id: String, cx: &mut Context<Self>) {
@@ -637,6 +1025,9 @@ impl IntegrationsView {
     }
 
     fn read(&mut self, request: ReadRequest, cx: &mut Context<Self>) {
+        if self.section != IntegrationsSection::Repositories {
+            return;
+        }
         let Some(account) = self
             .profile
             .accounts
@@ -646,14 +1037,23 @@ impl IntegrationsView {
         else {
             return;
         };
+        let page_request = match &request {
+            ReadRequest::Repositories(cursor, page) => Some((cursor.clone(), *page)),
+            _ => None,
+        };
         self.cancel();
-        self.pending = Some(PendingOperation::Read);
+        self.pending = Some(if page_request.is_some() {
+            PendingOperation::RepositoryRead
+        } else {
+            PendingOperation::Read
+        });
         self.error = None;
         self.message = Some("Lecture distante en cours…".into());
         let ticket = self.session.ticket(&account.id);
         let worker_ticket = ticket.clone();
         let generation = self.generation;
         let vault = self.vault.clone();
+        self.scroll.set_offset(point(px(0.), px(0.)));
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -675,12 +1075,19 @@ impl IntegrationsView {
                 view.message = None;
                 match result {
                     Ok(ReadResponse::Repositories(page)) => {
+                        if let Some((cursor, number)) = page_request {
+                            view.repositories_page = number;
+                            view.repositories_history.truncate(number);
+                            view.repositories_history.push(cursor);
+                        }
                         view.repositories = bounded(page.items);
                         view.repositories_next = page.next;
                         view.clear_changes();
+                        view.invalidate_repository_select();
                     }
                     Ok(ReadResponse::Changes(page)) => {
                         view.changes = bounded(page.items);
+                        view.changes_loaded = true;
                         view.changes_next = page.next;
                         view.clear_details();
                     }
@@ -702,10 +1109,105 @@ impl IntegrationsView {
         cx.notify();
     }
 
-    fn select_repository(&mut self, repository: Repository, cx: &mut Context<Self>) {
+    fn invalidate_repository_select(&mut self) {
+        self.repository_select_scope = self.repository_select_scope.wrapping_add(1);
+        self.repository_select_dirty = true;
+    }
+
+    fn can_select_repository(&self) -> bool {
+        !self.picking_path && matches!(self.pending, None | Some(PendingOperation::Read))
+    }
+
+    fn sync_repository_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.repository_select_dirty {
+            return;
+        }
+        self.repository_select_dirty = false;
+        // Kit's set_items retains its query and deferred selection indices.
+        // A new entity and subscription close the old menu at a page boundary.
+        self.repository_select_subscription = None;
+        if !self.direct_clone && self.selected_repository.is_none() {
+            self.generated_clone_name.clear();
+            self.clone_name
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        let groups = repository_option_groups(&self.repositories);
+        let options = SearchableVec::new(groups);
+        let selected_index = self
+            .selected_repository
+            .as_ref()
+            .and_then(|repository| options.position(&repository.id));
+        let select =
+            cx.new(|cx| SelectState::new(options, selected_index, window, cx).searchable(true));
+        let scope = self.repository_select_scope;
+        self.repository_select_subscription =
+            Some(
+                cx.subscribe_in(&select, window, move |this, source, event, window, cx| {
+                    if scope != this.repository_select_scope
+                        || source.entity_id() != this.repository_select.entity_id()
+                        || this.section != IntegrationsSection::Repositories
+                        || this.direct_clone
+                    {
+                        return;
+                    }
+                    if !this.can_select_repository() {
+                        this.invalidate_repository_select();
+                        cx.notify();
+                        return;
+                    }
+                    match event {
+                        SelectEvent::Confirm(Some(id)) => {
+                            if this
+                                .selected_repository
+                                .as_ref()
+                                .is_some_and(|repository| &repository.id == id)
+                            {
+                                return;
+                            }
+                            if let Some(repository) = this
+                                .repositories
+                                .iter()
+                                .find(|repository| &repository.id == id)
+                                .cloned()
+                            {
+                                this.select_repository(repository, window, cx);
+                            }
+                        }
+                        SelectEvent::Confirm(None) => {
+                            this.cancel();
+                            this.clear_changes();
+                            this.generated_clone_name.clear();
+                            this.clone_name
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                            this.message = None;
+                            this.error = None;
+                            cx.notify();
+                        }
+                    }
+                }),
+            );
+        self.repository_select = select;
+    }
+
+    fn select_repository(
+        &mut self,
+        repository: Repository,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel();
+        self.message = None;
+        self.error = None;
+        self.clone_ssh =
+            repository.ssh_clone_url.is_some() && self.profile.ssh != SshChoice::Disabled;
+        self.generated_clone_name = clone_directory_name(&repository.name);
+        self.clone_name.update(cx, |input, cx| {
+            input.set_value(self.generated_clone_name.clone(), window, cx)
+        });
         self.clear_changes();
-        self.selected_repository = Some(repository.clone());
-        self.read(ReadRequest::Changes(repository, None), cx);
+        self.selected_repository = Some(repository);
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
     }
 
     fn select_change(&mut self, change: ChangeRequest, cx: &mut Context<Self>) {
@@ -715,6 +1217,147 @@ impl IntegrationsView {
         self.clear_details();
         self.selected_change = Some(change.clone());
         self.read(ReadRequest::Discussions(repository, change, None), cx);
+    }
+
+    fn pick_path(&mut self, target: PathPickerTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.picking_path {
+            return;
+        }
+        let picker = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_title(match target {
+                PathPickerTarget::CloneParent => "Choisir le dossier parent du clone",
+                PathPickerTarget::SshKey => "Choisir une clé privée SSH existante",
+            });
+        let generation = self.generation;
+        let profile_id = self.profile.id.clone();
+        self.picking_path = true;
+        self.picker_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let selection = match target {
+                PathPickerTarget::CloneParent => picker.pick_folder().await,
+                PathPickerTarget::SshKey => picker.pick_file().await,
+            };
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |view, cx| {
+                    if view.generation != generation || view.profile.id != profile_id {
+                        return;
+                    }
+                    view.picking_path = false;
+                    view.picker_task = None;
+                    if let Some(selection) = selection {
+                        let input = match target {
+                            PathPickerTarget::CloneParent => &view.clone_parent,
+                            PathPickerTarget::SshKey => &view.key_path,
+                        };
+                        input.update(cx, |input, cx| {
+                            input.set_value(
+                                selection.path().to_string_lossy().into_owned(),
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                    cx.notify();
+                });
+            });
+        }));
+        cx.notify();
+    }
+
+    fn clone_selected(&mut self, cx: &mut Context<Self>) {
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        if self.pending.is_some() || self.picking_path {
+            return;
+        }
+        let remote = self.clone_remote(cx);
+        let Some(remote) = remote else {
+            return;
+        };
+        let parent = PathBuf::from(self.clone_parent.read(cx).value().trim());
+        let name = self.clone_name.read(cx).value().trim().to_string();
+        if !parent.is_absolute() || !valid_clone_directory_name(&name) {
+            self.error =
+                Some("Choisissez un dossier parent absolu et un nom de dossier simple.".into());
+            cx.notify();
+            return;
+        }
+        let destination = parent.join(name);
+        let ssh = self.profile.ssh.clone();
+        let account_id = self
+            .selected_account
+            .clone()
+            .unwrap_or_else(|| "direct-clone".into());
+        self.cancel();
+        let generation = self.generation;
+        let ticket = self.session.ticket(&account_id);
+        let worker_ticket = ticket.clone();
+        self.pending = Some(PendingOperation::Clone);
+        self.message = Some(format!("Clonage vers {}…", destination.display()));
+        self.error = None;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    mangrove_remote::clone_repository(
+                        &remote,
+                        &destination,
+                        &ssh,
+                        &worker_ticket.cancellation,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if !view.accepts(&ticket, generation) {
+                    return;
+                }
+                view.pending = None;
+                match result {
+                    Ok(path) => {
+                        view.message = None;
+                        cx.emit(IntegrationsEvent::OpenLocalFavorite(
+                            path.to_string_lossy().into_owned(),
+                        ));
+                    }
+                    Err(error) => {
+                        view.message = None;
+                        view.error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn select_direct_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.cancel();
+        self.clear_reads();
+        self.direct_clone = true;
+        self.selected_account = None;
+        self.generated_clone_name =
+            clone_directory_from_remote(self.clone_url.read(cx).value().trim());
+        self.clone_name.update(cx, |input, cx| {
+            input.set_value(self.generated_clone_name.clone(), window, cx)
+        });
+        self.message = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    fn clone_remote(&self, cx: &App) -> Option<String> {
+        if self.direct_clone {
+            let url = self.clone_url.read(cx).value().trim().to_string();
+            (!url.is_empty()).then_some(url)
+        } else {
+            self.selected_repository.as_ref().and_then(|repository| {
+                if self.clone_ssh {
+                    repository.ssh_clone_url.clone()
+                } else {
+                    repository.clone_url.clone()
+                }
+            })
+        }
     }
 
     fn add_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -790,533 +1433,6 @@ impl IntegrationsView {
         }));
         cx.notify();
     }
-
-    fn profiles_content(&self, cx: &mut Context<Self>) -> Div {
-        let p = self.palette;
-        let offset = self.offset;
-        let mut content = div().flex().flex_col().gap(px(16.))
-            .child(title("Profils"))
-            .child(note("Les comptes, favoris et le choix SSH sont propres à chaque profil. Le changement de profil annule ses lectures distantes.", p));
-        for profile in &self.profiles {
-            let id = profile.id.clone();
-            content = content.child(
-                action(format!("profile-{id}"), &profile.name, p, offset)
-                    .when(profile.id == self.profile.id, |button| {
-                        button.bg(rgb(p.selection))
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
-                    })),
-            );
-        }
-        content = content.child(
-            div()
-                .flex()
-                .gap(px(8.))
-                .child(field(
-                    &self.profile_name,
-                    "profile-name",
-                    "Nom du profil",
-                    p,
-                    offset,
-                ))
-                .child(
-                    action("profile-create", "Créer un profil", p, offset).on_click(cx.listener(
-                        |this, _, window, cx| {
-                            let name = this.profile_name.read(cx).value().trim().to_string();
-                            if !name.is_empty() {
-                                this.profile_name
-                                    .update(cx, |input, cx| input.set_value("", window, cx));
-                                cx.emit(IntegrationsEvent::ProfileCreated(name));
-                            }
-                        },
-                    )),
-                ),
-        );
-        content = content.child(title("Favoris du profil"));
-        for (index, favorite) in self.profile.favorites.iter().take(MAX_ROWS).enumerate() {
-            let value = favorite.clone();
-            content =
-                content.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .child(value.clone()),
-                        )
-                        .when(PathBuf::from(favorite).is_absolute(), |view| {
-                            let path = favorite.clone();
-                            view.child(
-                                action(format!("favorite-open-{index}"), "Ouvrir", p, offset)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(IntegrationsEvent::OpenLocalFavorite(path.clone()))
-                                    })),
-                            )
-                        })
-                        .child(
-                            action(format!("favorite-remove-{index}"), "Retirer", p, offset)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.profile.favorites.retain(|favorite| favorite != &value);
-                                    cx.emit(IntegrationsEvent::FavoritesChanged(
-                                        this.profile.favorites.clone(),
-                                    ));
-                                    cx.notify();
-                                })),
-                        ),
-                );
-        }
-        content = content.child(
-            div()
-                .flex()
-                .gap(px(8.))
-                .child(field(
-                    &self.favorite,
-                    "profile-favorite",
-                    "Chemin local ou URL d’un dépôt",
-                    p,
-                    offset,
-                ))
-                .child(
-                    action("favorite-add", "Ajouter aux favoris", p, offset)
-                        .on_click(cx.listener(|this, _, window, cx| this.add_favorite(window, cx))),
-                ),
-        );
-        content = content.child(title("SSH"))
-            .child(note("Réutilise votre agent ou une clé existante. Lecture des références uniquement : aucun clone ni téléchargement d’objet.", p));
-        for (id, label, choice) in [
-            ("ssh-agent", "Agent SSH", SshChoice::Agent),
-            ("ssh-disabled", "Désactivé", SshChoice::Disabled),
-        ] {
-            let selected = self.profile.ssh == choice;
-            content = content.child(
-                action(id, label, p, offset)
-                    .when(selected, |button| button.bg(rgb(p.selection)))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.ssh_choice(choice.clone(), cx)),
-                    ),
-            );
-        }
-        content = content.child(
-            div()
-                .flex()
-                .gap(px(8.))
-                .child(field(
-                    &self.key_path,
-                    "ssh-key-path",
-                    "Chemin absolu de la clé SSH existante",
-                    p,
-                    offset,
-                ))
-                .child(
-                    action("ssh-key-save", "Utiliser cette clé", p, offset).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let value = this.key_path.read(cx).value().trim().to_string();
-                            let path = PathBuf::from(&value);
-                            if path.is_absolute() && !value.chars().any(char::is_control) {
-                                this.error = None;
-                                this.ssh_choice(SshChoice::KeyFile { path }, cx);
-                            } else {
-                                this.error = Some("Indiquez un chemin absolu de clé SSH.".into());
-                                cx.notify();
-                            }
-                        },
-                    )),
-                ),
-        );
-        content = content.child(field(&self.ssh_remote, "ssh-remote", "URL SSH du dépôt à consulter", p, offset))
-            .child(note("Indiquez le vrai nom du serveur ; les alias et hooks de votre configuration SSH ne sont pas utilisés. Le serveur doit déjà être reconnu dans known_hosts.", p))
-            .child(action("ssh-read-references", "Consulter les références SSH", p, offset).disabled(self.pending.is_some())
-                .on_click(cx.listener(|this, _, _, cx| this.read_ssh(cx))));
-        for reference in &self.ssh_references {
-            content = content.child(note(reference, p));
-        }
-        content
-    }
-
-    fn integrations_content(&self, cx: &mut Context<Self>) -> Div {
-        let p = self.palette;
-        let offset = self.offset;
-        let mut content = div().flex().flex_col().gap(px(16.))
-            .child(title("Intégrations"))
-            .child(note(&format!("Profil actif : {}. Consultation des dépôts, PR/MR, discussions et CI en lecture seule.", self.profile.name), p));
-        for account in &self.profile.accounts {
-            let id = account.id.clone();
-            let remove_id = id.clone();
-            content = content
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            action(
-                                format!("account-{id}"),
-                                &format!(
-                                    "{} · {}",
-                                    account.label,
-                                    provider_label(account.provider)
-                                ),
-                                p,
-                                offset,
-                            )
-                            .flex_1()
-                            .min_w_0()
-                            .when(self.selected_account.as_ref() == Some(&id), |button| {
-                                button.bg(rgb(p.selection))
-                            })
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| this.select_account(id.clone(), cx),
-                            )),
-                        )
-                        .child(
-                            action(format!("disconnect-{remove_id}"), "Déconnecter", p, offset)
-                                .disabled(self.pending.is_some())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.disconnect(remove_id.clone(), cx)
-                                })),
-                        ),
-                )
-                .child(note(&account.server_url, p));
-        }
-        content = content.child(title("Connecter un compte"));
-        let mut providers = div().flex().flex_wrap().gap(px(8.));
-        for provider in [
-            Provider::GitLab,
-            Provider::GitHub,
-            Provider::BitbucketCloud,
-            Provider::BitbucketServer,
-        ] {
-            providers = providers.child(
-                action(
-                    format!("provider-{}", provider_label(provider)),
-                    provider_label(provider),
-                    p,
-                    offset,
-                )
-                .disabled(self.pending.is_some())
-                .when(self.provider == provider, |button| {
-                    button.bg(rgb(p.selection))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_provider(provider, window, cx)
-                })),
-            );
-        }
-        content = content.child(providers)
-            .child(field(&self.label, "account-label", "Nom du compte (facultatif)", p, offset))
-            .child(field(&self.server, "account-server", "URL du serveur", p, offset))
-            .when(self.provider == Provider::BitbucketCloud, |view| view.child(note("Bitbucket Cloud : indiquez https://bitbucket.org/votre-workspace. Pour un API token, saisissez aussi votre adresse e-mail ; les access tokens utilisent Bearer sans nom d’utilisateur.", p)))
-            .when(self.provider == Provider::BitbucketCloud, |view| view.child(field(&self.username, "account-username", "Adresse e-mail Atlassian", p, offset)));
-        if self.provider == Provider::GitLab && self.gitlab_browser {
-            content = content
-                .child(action("gitlab-browser-connect", "Se connecter avec GitLab", p, offset)
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))
-                .child(note("L’autorisation s’effectue dans votre navigateur. Mangrove conserve la connexion dans le coffre sécurisé du système.", p))
-                .child(action("gitlab-application-config", if self.gitlab_config_open { "Masquer la configuration" } else { "Configurer l’application GitLab" }, p, offset)
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.gitlab_config_open = !this.gitlab_config_open;
-                        cx.notify();
-                    })))
-                .when(self.gitlab_config_open, |view| {
-                    view.child(field(&self.client_id, "gitlab-client-id", "Application ID public", p, offset))
-                        .child(note("Cet ID est fourni lorsque vous créez une application Mangrove dans GitLab. Il peut être partagé ; aucun secret d’application n’est nécessaire.", p))
-                        .child(action("gitlab-create-application", "Créer une application GitLab", p, offset)
-                            .disabled(self.pending.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.open_gitlab_application_settings(cx))))
-                        .child(note(&format!("Dans GitLab : nom Mangrove, option Confidential décochée, autorisation read_api et URL de redirection {}.", oauth::REDIRECT_URI), p))
-                })
-                .child(action("gitlab-personal-token", "Utiliser un token personnel", p, offset)
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| this.set_gitlab_browser(false, window, cx))));
-        } else {
-            content = content
-                .child(field(&self.token, "account-token", "Token personnel", p, offset))
-                .child(note("Le token est effacé du champ après validation et conservé dans le coffre sécurisé du système. GitLab : read_api. GitHub : dépôts, PR et checks en lecture. Bitbucket : dépôts, PR et statuts CI en lecture.", p))
-                .child(action("account-connect", "Connecter avec le token", p, offset)
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))
-                .when(self.provider == Provider::GitLab, |view| {
-                    view.child(action("gitlab-browser-mode", "Se connecter par navigateur", p, offset)
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| this.set_gitlab_browser(true, window, cx))))
-                });
-        }
-        if self.selected_account.is_some() {
-            content = content.child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .child(title("Dépôts accessibles"))
-                    .child(
-                        action("repositories-reload", "Actualiser", p, offset)
-                            .disabled(self.pending.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.read(ReadRequest::Repositories(None), cx)
-                            })),
-                    ),
-            );
-            if self.repositories.is_empty() && self.pending.is_none() {
-                content = content.child(note("Aucun dépôt chargé.", p));
-            }
-            for (index, repository) in self.repositories.iter().enumerate() {
-                let repository = repository.clone();
-                let favorite = repository
-                    .web_url
-                    .clone()
-                    .unwrap_or_else(|| repository.full_name.clone());
-                content = content.child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            action(
-                                format!("repository-{index}"),
-                                &repository.full_name,
-                                p,
-                                offset,
-                            )
-                            .flex_1()
-                            .min_w_0()
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.select_repository(repository.clone(), cx)
-                                },
-                            )),
-                        )
-                        .child(
-                            action(
-                                format!("remote-favorite-{index}"),
-                                if self.profile.favorites.contains(&favorite) {
-                                    "Favori"
-                                } else {
-                                    "Ajouter aux favoris"
-                                },
-                                p,
-                                offset,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if let Some(index) = this
-                                        .profile
-                                        .favorites
-                                        .iter()
-                                        .position(|value| value == &favorite)
-                                    {
-                                        this.profile.favorites.remove(index);
-                                    } else if this.profile.favorites.len() < MAX_ROWS {
-                                        this.profile.favorites.push(favorite.clone());
-                                    }
-                                    cx.emit(IntegrationsEvent::FavoritesChanged(
-                                        this.profile.favorites.clone(),
-                                    ));
-                                    cx.notify();
-                                },
-                            )),
-                        ),
-                );
-            }
-            if let Some(cursor) = self.repositories_next.clone() {
-                content = content.child(
-                    action("repositories-next", "Page suivante des dépôts", p, offset)
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.read(ReadRequest::Repositories(Some(cursor.clone())), cx)
-                        })),
-                );
-            }
-        }
-        if let Some(repository) = &self.selected_repository {
-            content = content.child(title(&format!("PR/MR · {}", repository.full_name)));
-            if self.changes.is_empty() && self.pending.is_none() {
-                content = content.child(note("Aucune PR/MR chargée.", p));
-            }
-            for (index, change) in self.changes.iter().enumerate() {
-                let change = change.clone();
-                content = content.child(
-                    action(
-                        format!("change-{index}"),
-                        &format!("#{} · {} · {}", change.id, change.title, change.state),
-                        p,
-                        offset,
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_change(change.clone(), cx)),
-                    ),
-                );
-            }
-            if let Some(cursor) = self.changes_next.clone() {
-                let repository = repository.clone();
-                content = content.child(
-                    action("changes-next", "Page suivante des PR/MR", p, offset)
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.read(
-                                ReadRequest::Changes(repository.clone(), Some(cursor.clone())),
-                                cx,
-                            )
-                        })),
-                );
-            }
-        }
-        if let (Some(repository), Some(change)) = (&self.selected_repository, &self.selected_change)
-        {
-            content = content
-                .child(title(&change.title))
-                .child(note(&change.description, p))
-                .child(title("Discussions"));
-            for discussion in &self.discussions {
-                for comment in discussion.comments.iter().take(MAX_ROWS) {
-                    content = content.child(
-                        div()
-                            .border_l_2()
-                            .border_color(rgb(p.border))
-                            .pl(px(12.))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(comment.author.clone()),
-                            )
-                            .child(note(&comment.body, p)),
-                    );
-                }
-            }
-            if self.discussions.is_empty() && self.pending.is_none() {
-                content = content.child(note("Aucune discussion chargée.", p));
-            }
-            if let Some(cursor) = self.discussions_next.clone() {
-                let repository = repository.clone();
-                let change = change.clone();
-                content = content.child(
-                    action(
-                        "discussions-next",
-                        "Page suivante des discussions",
-                        p,
-                        offset,
-                    )
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.read(
-                            ReadRequest::Discussions(
-                                repository.clone(),
-                                change.clone(),
-                                Some(cursor.clone()),
-                            ),
-                            cx,
-                        )
-                    })),
-                );
-            }
-            content = content.child(title("Résultats CI"));
-            if let Some(sha) = change.head_sha.clone() {
-                let repository = repository.clone();
-                content = content.child(
-                    action("statuses-load", "Consulter les statuts CI", p, offset)
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.read(
-                                ReadRequest::Statuses(repository.clone(), sha.clone(), None),
-                                cx,
-                            )
-                        })),
-                );
-            } else {
-                content = content.child(note("Révision source non fournie par cet hébergeur.", p));
-            }
-            for status in &self.statuses {
-                content = content.child(
-                    div()
-                        .child(format!("{} · {}", status.name, status.state))
-                        .child(note(&status.description, p)),
-                );
-            }
-            if let (Some(cursor), Some(sha)) = (self.statuses_next.clone(), change.head_sha.clone())
-            {
-                let repository = repository.clone();
-                content = content.child(
-                    action("statuses-next", "Page suivante des statuts CI", p, offset)
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.read(
-                                ReadRequest::Statuses(
-                                    repository.clone(),
-                                    sha.clone(),
-                                    Some(cursor.clone()),
-                                ),
-                                cx,
-                            )
-                        })),
-                );
-            }
-        }
-        content
-    }
-}
-
-impl Render for IntegrationsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = self.palette;
-        let content = match self.section {
-            IntegrationsSection::Profiles => self.profiles_content(cx),
-            IntegrationsSection::Integrations => self.integrations_content(cx),
-        };
-        div()
-            .id("integrations-view")
-            .relative()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .bg(rgb(p.bg))
-            .text_color(rgb(p.text))
-            .text_size(px(12. + self.offset))
-            .child(
-                div()
-                    .id("integrations-scroll")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .px(px(40.))
-                    .py(px(36.))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(900.))
-                            .child(content)
-                            .when_some(self.message.clone(), |view, message| {
-                                view.child(note(&message, p).mt(px(16.)))
-                            })
-                            .when_some(self.error.clone(), |view, error| {
-                                view.child(note(&error, p).mt(px(16.)).text_color(rgb(p.danger)))
-                            })
-                            .when(
-                                self.pending.is_some_and(|operation| {
-                                    operation != PendingOperation::Disconnect
-                                }),
-                                |view| {
-                                    view.child(
-                                        action("remote-cancel", "Annuler", p, self.offset)
-                                            .mt(px(12.))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cancel();
-                                                this.message = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                },
-                            ),
-                    ),
-            )
-            .child(scrollbar_theme(
-                Scrollbar::vertical(&self.scroll).id("integrations-scrollbar"),
-            ))
-    }
 }
 
 struct DisconnectCompletion {
@@ -1347,7 +1463,7 @@ fn perform_read<T: mangrove_remote::Transport>(
     cancel: &CancellationToken,
 ) -> Result<ReadResponse, mangrove_remote::RemoteError> {
     match request {
-        ReadRequest::Repositories(cursor) => client
+        ReadRequest::Repositories(cursor, _) => client
             .repositories(cursor.as_ref(), cancel)
             .map(ReadResponse::Repositories),
         ReadRequest::Changes(repository, cursor) => client
@@ -1418,69 +1534,44 @@ fn provider_label(provider: Provider) -> &'static str {
     }
 }
 
-fn title(label: &str) -> Div {
-    div()
-        .text_size(px(20.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(label.to_string())
+fn valid_clone_directory_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0');
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= 255
+        && !reserved
+        && !name.ends_with(['.', ' '])
+        && !name.contains(['/', '\\', '<', '>', ':', '"', '|', '?', '*'])
+        && !name.chars().any(char::is_control)
 }
 
-fn note(label: &str, p: Palette) -> Div {
-    div()
-        .min_w_0()
-        .whitespace_normal()
-        .line_height(relative(1.6))
-        .text_color(rgb(p.muted))
-        .child(label.to_string())
+fn clone_directory_from_remote(remote: &str) -> String {
+    clone_directory_name(
+        remote
+            .trim_end_matches('/')
+            .rsplit(['/', ':'])
+            .next()
+            .unwrap_or_default(),
+    )
 }
 
-fn action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
-    Button::new(id.into())
-        .px(px(12.))
-        .py(px(8.))
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(px(5.))
-        .text_size(px(12. + offset))
-        .text_color(rgb(p.text))
-        .cursor_pointer()
-        .accessibility_label(label.to_string())
-        .hover(move |style| style.bg(rgb(p.hover)))
-        .focus_visible(move |style| style.border_color(rgb(p.accent)))
-        .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_default()))
-        .child(div().min_w_0().whitespace_normal().child(label.to_string()))
-}
-
-fn field(
-    state: &Entity<InputState>,
-    id: &'static str,
-    label: &'static str,
-    p: Palette,
-    offset: f32,
-) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(note(label, p))
-        .child(
-            Input::new(state)
-                .id(id)
-                .aria_label(label)
-                .appearance(false)
-                .with_size(px(36.))
-                .w_full()
-                .px(px(12.))
-                .py_0()
-                .border_1()
-                .border_color(rgb(p.border))
-                .rounded(px(4.))
-                .bg(rgb(p.bg))
-                .text_color(rgb(p.text))
-                .text_size(px(12. + offset)),
-        )
+fn clone_directory_name(name: &str) -> String {
+    let candidate = name.strip_suffix(".git").unwrap_or(name);
+    if valid_clone_directory_name(candidate) {
+        candidate.to_string()
+    } else {
+        "depot".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -1492,6 +1583,84 @@ mod tests {
     use mangrove_remote::{
         Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
     };
+
+    #[test]
+    fn repository_options_keep_full_names_and_stable_ids_in_namespace_groups() {
+        use gpui_kit::component::searchable_list::SearchableListItem;
+        let repository = |id: &str, full_name: &str| mangrove_remote::providers::Repository {
+            id: id.into(),
+            name: "api".into(),
+            full_name: full_name.into(),
+            web_url: None,
+            clone_url: None,
+            ssh_clone_url: None,
+        };
+        let groups = super::repository_option_groups(&[
+            repository("2", "other/api"),
+            repository("1", "Team/Services/api"),
+            repository("3", "Team/Services/worker"),
+        ]);
+        let team = groups
+            .iter()
+            .find(|group| group.title.as_ref() == "Team/Services")
+            .unwrap();
+        assert_eq!(team.items.len(), 2);
+        assert_eq!(team.items[0].value(), "1");
+        assert_eq!(team.items[0].title().as_ref(), "Team/Services/api");
+        assert!(team.items[0].matches("TEAM/SERVICES/API"));
+        assert!(!team.items[0].matches("other/api"));
+        let other = groups
+            .iter()
+            .find(|group| group.title.as_ref() == "other")
+            .unwrap();
+        assert_eq!(other.items[0].value(), "2");
+    }
+
+    #[test]
+    fn clone_destination_names_cannot_escape_the_selected_parent() {
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "folder/other",
+            "folder\\other",
+            "/tmp/other",
+            "C:\\other",
+            "line\nfeed",
+            "CON",
+            "nul.txt",
+            "COM1",
+            "trailing.",
+            "trailing ",
+        ] {
+            assert!(!super::valid_clone_directory_name(invalid), "{invalid:?}");
+        }
+        for valid in [
+            "Hello-World",
+            "mon dépôt",
+            "équipe",
+            "repo.git",
+            ".hidden-repo",
+            "company-service-9",
+        ] {
+            assert!(super::valid_clone_directory_name(valid), "{valid:?}");
+        }
+        assert_eq!(
+            super::clone_directory_name("Hello-World.git"),
+            "Hello-World"
+        );
+        assert_eq!(super::clone_directory_name("../../outside"), "depot");
+        assert_eq!(super::clone_directory_name("repo.git.git"), "repo.git");
+        assert_eq!(
+            super::clone_directory_from_remote("https://github.com/octocat/Hello-World.git"),
+            "Hello-World"
+        );
+        assert_eq!(
+            super::clone_directory_from_remote("git@example.com:group/repository.git"),
+            "repository"
+        );
+    }
 
     #[test]
     fn gitlab_application_id_prefill_uses_the_active_profile_and_instance() {

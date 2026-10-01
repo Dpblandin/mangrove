@@ -92,7 +92,7 @@ La connexion navigateur GitLab utilise un module OAuth séparé : PKCE S256, ét
 
 SSH consulte explicitement les branches et tags avec `git ls-remote`, en utilisant l’agent existant ou une clé déjà présente. Il ne récupère aucun objet et ne crée aucun cache Git. Il ignore les configurations Git et SSH susceptibles de lancer des commandes ; le serveur doit déjà être approuvé dans les fichiers `known_hosts`. Voir [le transport SSH](integrations-ssh.md).
 
-L’auto-fetch historique reste une fonction distincte : il utilise Git et les credentials existants de la machine et écrit les objets et références distantes dans le dépôt local choisi. Les tokens et le choix SSH des intégrations ne lui sont pas transmis. Aucun clone n’est implémenté.
+L’auto-fetch historique reste une fonction distincte : il utilise Git et les credentials existants de la machine et écrit les objets et références distantes dans le dépôt local choisi. Les tokens et le choix SSH des intégrations ne lui sont pas transmis. Le clonage explicite est un service séparé de `mangrove-remote` : il réserve un nouveau dossier, lance Git en arrière-plan avec les credentials Git de la machine ou le choix SSH du profil, puis ouvre le résultat. Aucun token API n’est transmis à Git et aucun dossier existant n’est écrasé ou supprimé. Les paramètres ne contiennent plus la navigation des dépôts ; celle-ci est accessible depuis le nouvel onglet.
 
 ## Choix différés
 

@@ -25,6 +25,10 @@ pub enum RemoteError {
     SshUnavailable,
     SshAuthentication,
     SshHostKey,
+    CloneDestinationExists,
+    CloneDestinationInvalid,
+    CloneAuthentication,
+    CloneFailed,
 }
 
 impl fmt::Display for RemoteError {
@@ -46,6 +50,10 @@ impl fmt::Display for RemoteError {
             Self::SshUnavailable => "Git ou le transport SSH est indisponible.",
             Self::SshAuthentication => "La connexion SSH a été refusée.",
             Self::SshHostKey => "La clé du serveur SSH est absente ou différente de la clé connue.",
+            Self::CloneDestinationExists => "Ce dossier existe déjà. Choisissez un nouveau dossier pour le clonage.",
+            Self::CloneDestinationInvalid => "Choisissez un nouveau dossier dans un emplacement existant et accessible.",
+            Self::CloneAuthentication => "Git ne dispose pas des identifiants nécessaires. Configurez votre gestionnaire Git ou une clé SSH.",
+            Self::CloneFailed => "Le clonage a échoué. Vérifiez l’URL et vos accès Git. Un dossier incomplet peut subsister.",
         };
         f.write_str(text)
     }

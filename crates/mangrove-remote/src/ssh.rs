@@ -83,13 +83,24 @@ fn configure_git(command: &mut Command, directory: &Path, remote: &str, ssh: &st
         "--",
         remote,
     ]);
-    // In particular, remove GIT_CONFIG_PARAMETERS/COUNT/KEY_*/VALUE_*, traces
-    // writing files, inherited repository/object paths, and SSH overrides.
+    configure_isolated_git_environment(command);
+    command
+        .env("GIT_SSH_COMMAND", ssh)
+        .env("GIT_SSH_VARIANT", "ssh");
+}
+
+/// Remove inherited config injection, repository/object paths, traces and SSH overrides.
+pub(crate) fn remove_git_environment(command: &mut Command) {
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("GIT_") {
             command.env_remove(name);
         }
     }
+}
+
+/// Isolate explicit Git operations before callers add validated credentials or SSH choices.
+pub(crate) fn configure_isolated_git_environment(command: &mut Command) {
+    remove_git_environment(command);
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -98,14 +109,12 @@ fn configure_git(command: &mut Command, directory: &Path, remote: &str, ssh: &st
         .env("GIT_CONFIG_COUNT", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "")
-        .env("GIT_SSH_COMMAND", ssh)
-        .env("GIT_SSH_VARIANT", "ssh")
         .env("SSH_ASKPASS_REQUIRE", "never")
         .env_remove("SSH_ASKPASS")
         .env("GCM_INTERACTIVE", "never");
 }
 
-fn ssh_command(choice: &SshChoice) -> Result<String> {
+pub(crate) fn ssh_command(choice: &SshChoice) -> Result<String> {
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     // Git invokes GIT_SSH_COMMAND through its shell. Only the identity path is
     // variable, and it is passed as a single POSIX-shell-quoted argument.
@@ -160,7 +169,7 @@ fn shell_quote(value: &str) -> String {
 
 /// Reject options, local transports, URL credentials, and shell metacharacters.
 /// Only literal SSH URLs and SCP-style repository paths are accepted.
-fn validate_remote(remote: &str) -> Result<()> {
+pub(crate) fn validate_remote(remote: &str) -> Result<()> {
     if remote.is_empty()
         || remote.len() > 4096
         || !remote.is_ascii()
@@ -336,7 +345,7 @@ fn drain(
     receiver
 }
 
-fn run_command(
+pub(crate) fn run_command(
     command: &mut Command,
     timeout: Duration,
     cancel: &CancellationToken,

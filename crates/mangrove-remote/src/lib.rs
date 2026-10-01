@@ -1,4 +1,4 @@
-//! Read-only hosting and SSH services, independent of the local Git engine.
+//! Hosting, SSH discovery, and explicit cloning, independent of the local Git engine.
 //!
 //! Synchronous entry points belong on a background executor. Credentials never
 //! appear in serializable models or diagnostics. Profile switches abort network
@@ -11,6 +11,7 @@
 //! let _ = serde_json::to_string(&token);
 //! ```
 
+pub mod clone;
 mod model;
 pub mod oauth;
 mod profiles;
@@ -19,6 +20,7 @@ mod session;
 pub mod ssh;
 mod transport;
 
+pub use clone::clone_repository;
 pub use model::{Account, Authentication, Profile, Profiles, Provider, RemoteError, Result};
 pub use profiles::{CredentialVault, OsCredentialVault, ProfileStore};
 pub use providers::{
