@@ -25,7 +25,7 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Le message du commit dispose d’une zone de lecture de hauteur stable et défilable : les titres longs, descriptions et notes de fusion ne déplacent pas les métadonnées ni la liste des fichiers.
 - Aucun loader animé pendant les lectures de commits ou de diffs : le contenu précédent reste affiché jusqu’à ce que la nouvelle sélection soit prête.
 - Indexation progressive dans un cache SQLite FTS5 séparé du dépôt ; réutilisation à la prochaine ouverture.
-- Trois thèmes mémorisés : **Classique** par défaut, gris/bleu ; **Mangrove**, vert ; **Catppuccin Macchiato**.
+- Trois thèmes mémorisés dans **Paramètres → Général → Apparence** : **Classique** par défaut, gris/bleu ; **Mangrove**, vert ; **Catppuccin Macchiato**. Le choix est appliqué et enregistré immédiatement.
 - Paramètres dans une vue dédiée avec navigation par rubrique, accessibles par **Cmd + ,** sur macOS ou **Ctrl + ,** sur Windows/Linux. **Échap** ou le bouton de retour retrouve l’espace de travail précédent.
 - Auto-fetch des remotes du dépôt actif : dans **Paramètres → Général**, intervalle mémorisé de **0 à 60 minutes**, **1 minute** par défaut et **0** pour désactiver. L’historique et les références sont actualisés en conservant la recherche et la sélection. Un bouton dans la barre supérieure permet un fetch immédiat, même lorsque l’auto-fetch est désactivé. Les erreurs sont affichées sans interrompre les autres remotes ; les objets LFS ne sont pas récupérés automatiquement.
 - Fond sombre pour l’historique et les diffs ; Macchiato utilise le même fond que le panneau des détails.

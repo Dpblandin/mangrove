@@ -1,14 +1,16 @@
 use crate::{
     preferences::{MAX_AUTO_FETCH_INTERVAL, parse_auto_fetch_interval},
-    theme::{Palette, icon, scrollbar_theme},
+    theme::{Palette, ThemeId, icon, scrollbar_theme},
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     base::{Button, NumberInput, StepAction, input::MaskPattern, step_value},
     component::{
-        Sizable,
+        IndexPath, Sizable,
         input::{Escape as InputEscape, Input, InputEvent, InputState},
         scroll::Scrollbar,
+        searchable_list::SearchableVec,
+        select::{Select, SelectEvent, SelectState},
     },
     prelude::*,
     *,
@@ -17,18 +19,20 @@ use gpui_kit::{
 #[derive(Clone, Debug)]
 pub enum SettingsEvent {
     Back,
+    ThemeChanged(ThemeId),
     IntervalChanged(u32),
 }
 
 pub struct SettingsView {
     interval: u32,
     input: Entity<InputState>,
+    theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     scroll: ScrollHandle,
     palette: Palette,
     font_size_offset: f32,
     saved: bool,
     error: Option<String>,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -36,6 +40,7 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 impl SettingsView {
     pub fn new(
         interval: u32,
+        theme: ThemeId,
         palette: Palette,
         font_size_offset: f32,
         window: &mut Window,
@@ -48,7 +53,16 @@ impl SettingsView {
                 .mask_pattern(MaskPattern::None)
                 .default_value(interval.to_string())
         });
-        let subscription =
+        let initial_theme = ThemeId::ALL.iter().position(|id| *id == theme).unwrap_or(0);
+        let theme_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(ThemeId::ALL.iter().map(|id| id.label()).collect::<Vec<_>>()),
+                Some(IndexPath::new(initial_theme)),
+                window,
+                cx,
+            )
+        });
+        let input_subscription =
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
                 InputEvent::Change => {
                     this.saved = false;
@@ -58,15 +72,23 @@ impl SettingsView {
                 InputEvent::PressEnter { .. } => this.save(window, cx),
                 _ => {}
             });
+        let theme_subscription = cx.subscribe(&theme_select, |_, _, event, cx| {
+            if let SelectEvent::Confirm(Some(label)) = event
+                && let Some(theme) = ThemeId::ALL.iter().find(|id| id.label() == *label)
+            {
+                cx.emit(SettingsEvent::ThemeChanged(*theme));
+            }
+        });
         Self {
             interval,
             input,
+            theme_select,
             scroll: ScrollHandle::default(),
             palette,
             font_size_offset,
             saved: false,
             error: None,
-            _subscription: subscription,
+            _subscriptions: vec![input_subscription, theme_subscription],
         }
     }
     pub fn set_theme(&mut self, palette: Palette, font_size_offset: f32, cx: &mut Context<Self>) {
@@ -291,10 +313,53 @@ impl Render for SettingsView {
                                             .flex()
                                             .flex_col()
                                             .child(div().text_size(px(24.)).line_height(px(32.)).font_weight(FontWeight::SEMIBOLD).child("Général"))
-                                            .child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Réglez la fréquence de récupération des références distantes."))
+                                            .child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Personnalisez l’apparence et la fréquence de récupération des références distantes."))
                                             .child(
                                                 div()
                                                     .mt(px(32.))
+                                                    .w_full()
+                                                    .min_w_0()
+                                                    .p(px(24.))
+                                                    .rounded(px(12.))
+                                                    .border_1()
+                                                    .border_color(rgb(p.border))
+                                                    .bg(rgb(p.panel))
+                                                    .child(div().mb(px(24.)).text_size(px(14. + offset)).line_height(px(20. + 2. * offset)).font_weight(FontWeight::MEDIUM).child("Apparence"))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_start()
+                                                            .gap(px(20.))
+                                                            .child(div().w(px(200.)).flex_none().pt(px(8.)).text_size(px(12. + offset)).line_height(px(16. + 2. * offset)).child("Thème de l’interface"))
+                                                            .child(
+                                                                div()
+                                                                    .flex_1()
+                                                                    .min_w_0()
+                                                                    .flex()
+                                                                    .flex_col()
+                                                                    .child(
+                                                                        Select::new(&self.theme_select)
+                                                                            .w_full()
+                                                                            .max_w(px(260.))
+                                                                            .h(px(36.))
+                                                                            .px(px(12.))
+                                                                            .py(px(6.))
+                                                                            .border_1()
+                                                                            .border_color(rgb(p.border))
+                                                                            .rounded(px(4.))
+                                                                            .bg(rgb(p.bg))
+                                                                            .text_color(rgb(p.text))
+                                                                            .text_size(px(12. + offset))
+                                                                            .font_weight(FontWeight::NORMAL)
+                                                                            .accessibility_label("Thème de l’interface"),
+                                                                    )
+                                                                    .child(div().mt(px(12.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Le thème est appliqué et enregistré immédiatement.")),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt(px(24.))
                                                     .w_full()
                                                     .min_w_0()
                                                     .p(px(24.))
@@ -360,7 +425,7 @@ impl Render for SettingsView {
                                                             .min_w_0()
                                                             .flex()
                                                             .gap(px(12.))
-                                                            .child(settings_button("settings-reset", "Annuler les modifications", p, offset).disabled(!changed).on_click(cx.listener(|this, _, window, cx| {
+                                                            .child(settings_button("settings-reset", "Annuler les modifications", p, offset).hover(move |style| style.text_color(brightened(p.text)).border_color(brightened(p.border))).disabled(!changed).on_click(cx.listener(|this, _, window, cx| {
                                                                 this.set_interval(this.interval, window, cx);
                                                                 this.focus(window, cx);
                                                             })))
@@ -389,11 +454,6 @@ fn settings_button(id: &'static str, label: &'static str, p: Palette, offset: f3
         .text_color(rgb(p.text))
         .cursor_pointer()
         .accessibility_label(label)
-        .hover(move |style| {
-            style
-                .text_color(brightened(p.text))
-                .border_color(brightened(p.border))
-        })
         .focus_visible(move |style| style.border_color(rgb(p.accent)))
         .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_default()))
         .child(

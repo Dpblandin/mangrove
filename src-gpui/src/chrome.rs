@@ -9,12 +9,10 @@ use gpui_kit::{
     assets::IconName,
     base::Button as NativeButton,
     component::{
-        Disableable, IndexPath, Sizable,
+        Disableable, Sizable,
         button::*,
         input::{Input, InputEvent, InputState},
         scroll::Scrollbar,
-        searchable_list::SearchableVec,
-        select::{Select, SelectEvent, SelectState},
         tooltip::Tooltip,
     },
     prelude::*,
@@ -81,7 +79,6 @@ pub struct Chrome {
     error: Option<String>,
     recent_filter: Entity<InputState>,
     welcome_scroll: ScrollHandle,
-    theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     separator_focus: [FocusHandle; 2],
     resize: Option<Resize>,
     _subscriptions: Vec<Subscription>,
@@ -93,21 +90,10 @@ impl Chrome {
     pub fn new(preferences: Preferences, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let recent_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Rechercher un dépôt récent…"));
-        let initial_theme = ThemeId::ALL
-            .iter()
-            .position(|id| *id == preferences.theme)
-            .unwrap_or(0);
-        let theme_select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(ThemeId::ALL.iter().map(|id| id.label()).collect::<Vec<_>>()),
-                Some(IndexPath::new(initial_theme)),
-                window,
-                cx,
-            )
-        });
         let settings = cx.new(|cx| {
             SettingsView::new(
                 preferences.auto_fetch_interval,
+                preferences.theme,
                 preferences.palette(),
                 preferences.font_size_offset,
                 window,
@@ -116,16 +102,12 @@ impl Chrome {
         });
         let subscriptions = vec![
             cx.subscribe(&recent_filter, |_, _, _: &InputEvent, cx| cx.notify()),
-            cx.subscribe(&theme_select, |this, _, event, cx| {
-                if let SelectEvent::Confirm(Some(label)) = event
-                    && let Some(theme) = ThemeId::ALL.iter().find(|id| id.label() == *label)
-                {
+            cx.subscribe(&settings, |this, _, event, cx| match event {
+                SettingsEvent::Back => cx.emit(ChromeEvent::BackToWorkspace),
+                SettingsEvent::ThemeChanged(theme) => {
                     this.preferences.theme = *theme;
                     this.preferences_changed(cx);
                 }
-            }),
-            cx.subscribe(&settings, |this, _, event, cx| match event {
-                SettingsEvent::Back => cx.emit(ChromeEvent::BackToWorkspace),
                 SettingsEvent::IntervalChanged(value) => {
                     this.preferences.auto_fetch_interval = *value;
                     this.preferences_changed(cx);
@@ -151,7 +133,6 @@ impl Chrome {
             error: None,
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
-            theme_select,
             separator_focus: [cx.focus_handle(), cx.focus_handle()],
             resize: None,
             _subscriptions: subscriptions,
@@ -491,23 +472,6 @@ impl Chrome {
                     .when(self.busy_visible, |view| {
                         view.child(icon(IconName::LoaderCircle, 16., p.accent))
                     })
-                    .child(
-                        Select::new(&self.theme_select)
-                            .w(px(158.))
-                            .min_w(px(158.))
-                            .h(px(29.))
-                            .max_w(px(190.))
-                            .px(px(8.))
-                            .py(px(4.))
-                            .border_1()
-                            .border_color(rgb(p.border))
-                            .rounded(px(5.))
-                            .bg(rgb(p.surface))
-                            .text_color(rgb(p.text))
-                            .text_size(px(11. + offset))
-                            .font_weight(FontWeight::NORMAL)
-                            .accessibility_label("Thème de l’interface"),
-                    )
                     .when(self.has_remotes, |view| {
                         view.child(
                             Button::new("fetch")
@@ -601,11 +565,10 @@ impl Chrome {
         let offset = self.preferences.font_size_offset;
         div()
             .mt_auto()
-            .h(px(68.))
+            .h(px(40.))
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(10.))
             .px(px(if self.preferences.left_width < 210. {
                 14.
             } else {
@@ -613,32 +576,9 @@ impl Chrome {
             }))
             .border_t_1()
             .border_color(rgb(p.border))
-            .child(
-                div()
-                    .size(px(29.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.))
-                    .border_1()
-                    .border_color(rgb(p.border))
-                    .bg(rgb(p.surface))
-                    .child(icon(IconName::FolderGit2, 17., p.accent)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(11. + offset))
-                    .child("Espace local")
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_size(px(9. + offset))
-                            .text_color(rgb(p.muted))
-                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
-                    ),
-            )
+            .text_size(px(9. + offset))
+            .text_color(rgb(p.muted))
+            .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
             .into_any_element()
     }
     pub fn render_welcome(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
