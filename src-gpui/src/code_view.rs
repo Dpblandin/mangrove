@@ -23,7 +23,7 @@ use crate::{
     format::{commit_date, short_sha},
     preferences::Preferences,
     syntax::{self, Kind, Token},
-    theme::{MONO, Palette, SANS, icon, scrollbar_theme},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::{RowGeometry, VirtualScrollHandle},
 };
 
@@ -786,7 +786,7 @@ impl CodeView {
                 .justify_center()
                 .w(px(26.))
                 .h(px(26.))
-                .rounded(px(4.))
+                .rounded(RADIUS_SM)
                 .cursor_pointer()
                 .when(enabled, |view| {
                     view.hover(move |style| style.bg(rgb(palette.hover)))
@@ -1322,13 +1322,11 @@ impl CodeView {
                 .border_color(rgb(p.border))
                 .pr(px(if self.is_diff { 5. } else { 8. }))
                 .text_right()
-                .text_color(rgb(
-                    if matches!(row.kind.as_str(), "addition" | "deletion") {
-                        p.text
-                    } else {
-                        p.muted
-                    },
-                ))
+                .map(|gutter| match row.kind.as_str() {
+                    "addition" => gutter.bg(rgb(p.addition_gutter)).text_color(rgb(p.text)),
+                    "deletion" => gutter.bg(rgb(p.deletion_gutter)).text_color(rgb(p.text)),
+                    _ => gutter.text_color(rgb(p.muted)),
+                })
                 .child(value)
         };
         let mut line = div()
@@ -1371,7 +1369,7 @@ impl CodeView {
             .line_height(px(self.font_size * 1.7))
             .text_color(rgb(if hunk { p.accent } else { p.text }))
             .bg(rgb(match row.kind.as_str() {
-                "hunk" => p.surface,
+                "hunk" => p.hunk_bg,
                 "addition" => p.addition_bg,
                 "deletion" => p.deletion_bg,
                 _ if self.show_blame
@@ -1599,7 +1597,7 @@ impl Render for CodeView {
                                 .py(px(7.))
                                 .border_1()
                                 .border_color(rgb(p.border))
-                                .rounded(px(4.))
+                                .rounded(RADIUS_MD)
                                 .bg(rgb(p.surface))
                                 .text_color(rgb(p.text))
                                 .cursor_pointer()

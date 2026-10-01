@@ -62,7 +62,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: ThemeId::Classic,
+            theme: ThemeId::default(),
             font_size_offset: DEFAULT_FONT_SIZE_OFFSET,
             diff_font_size: DEFAULT_DIFF_FONT_SIZE,
             left_width: 226.,
@@ -160,12 +160,8 @@ impl Preferences {
     }
     fn from_value(value: Value) -> Self {
         let mut result = Self::default();
-        if let Some(theme) = value.get("theme").and_then(Value::as_str) {
-            result.theme = match theme {
-                "mangrove" => ThemeId::Mangrove,
-                "macchiato" => ThemeId::Macchiato,
-                _ => ThemeId::Classic,
-            };
+        if let Some(theme) = value.get("theme") {
+            result.theme = ThemeId::deserialize(theme).unwrap_or_default();
         }
         let number = |name| value.get(name).and_then(Value::as_f64).map(|v| v as f32);
         if let Some(v) = number("font_size_offset") {
@@ -348,6 +344,19 @@ mod tests {
             (ThemeId::Macchiato, 5., 9., 400., 280., 1)
         );
         assert_eq!(p.recent.len(), 2);
+    }
+    #[test]
+    fn every_theme_survives_a_reload_and_unknown_themes_use_the_default() {
+        for theme in ThemeId::ALL {
+            let saved = serde_json::to_value(Preferences {
+                theme,
+                ..Preferences::default()
+            })
+            .unwrap();
+            assert_eq!(Preferences::from_value(saved).theme, theme);
+        }
+        let unknown = Preferences::from_value(serde_json::json!({"theme": "solarized"}));
+        assert_eq!(unknown.theme, ThemeId::Classic);
     }
     #[test]
     fn narrow_window_preserves_preferences_and_history_minimum() {

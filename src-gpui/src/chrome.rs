@@ -4,7 +4,7 @@ use crate::{
     preferences::{Pane, Preferences, RecentRepository, profile_store},
     recent_repositories::{RecentMetadata, RecentNamesRequest},
     settings::{SettingsEvent, SettingsView},
-    theme::{Palette, ThemeId, icon, mix, scrollbar_theme},
+    theme::{Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
 };
 use gpui_kit::{
     assets::IconName,
@@ -605,7 +605,7 @@ impl Chrome {
                                     .w(px(24.))
                                     .h(px(26.))
                                     .mr(px(5.))
-                                    .rounded(px(3.))
+                                    .rounded(RADIUS_SM)
                                     .icon(icon(IconName::X, 13., p.muted))
                                     .accessibility_label(format!("Fermer {}", tab.name))
                                     .tooltip(format!("Fermer {}", tab.name))
@@ -623,7 +623,7 @@ impl Chrome {
                     .h(px(30.))
                     .ml(px(5.))
                     .mt(px(4.))
-                    .rounded(px(3.))
+                    .rounded(RADIUS_SM)
                     .icon(icon(IconName::Plus, 17., p.muted))
                     .accessibility_label("Nouvel onglet")
                     .tooltip("Nouvel onglet")
@@ -868,7 +868,7 @@ impl Chrome {
                                     .px(px(12.))
                                     .py(px(7.))
                                     .text_size(px(12. + offset))
-                                    .rounded(px(5.))
+                                    .rounded(RADIUS_MD)
                                     .text_color(rgb(p.accent))
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(rgb(p.hover)))
@@ -884,7 +884,7 @@ impl Chrome {
                             .child(
                                 NativeButton::new("remote-browser-close")
                                     .size(px(32.))
-                                    .rounded(px(5.))
+                                    .rounded(RADIUS_SM)
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(rgb(p.hover)))
                                     .focus_visible(move |style| {
@@ -981,7 +981,7 @@ impl Chrome {
                             .border_color(rgb(p.accent_border))
                             .bg(rgb(p.accent))
                             .text_color(rgb(p.on_accent))
-                            .rounded(px(7.))
+                            .rounded(RADIUS_MD)
                             .text_size(px(12. + offset))
                             .font_weight(FontWeight::SEMIBOLD)
                             .line_height(relative(1.5))
@@ -1005,7 +1005,7 @@ impl Chrome {
                             .border_1()
                             .border_color(rgb(p.border))
                             .bg(rgb(p.panel))
-                            .rounded(px(7.))
+                            .rounded(RADIUS_MD)
                             .text_size(px(12. + offset))
                             .font_weight(FontWeight::MEDIUM)
                             .gap(px(9.))
@@ -1078,7 +1078,7 @@ impl Chrome {
                                 .min_h(px(36.))
                                 .mb(px(8.))
                                 .px(px(10.))
-                                .rounded(px(4.))
+                                .rounded(RADIUS_MD)
                                 .border_1()
                                 .border_color(rgb(p.border))
                                 .bg(rgb(p.bg))
@@ -1110,7 +1110,7 @@ impl Chrome {
                                 .flex()
                                 .items_center()
                                 .mb(px(6.))
-                                .rounded(px(6.))
+                                .rounded(RADIUS_MD)
                                 .border_1()
                                 .border_color(rgb(p.border))
                                 .bg(rgb(p.surface))
@@ -1176,7 +1176,7 @@ impl Chrome {
                                     .w(px(28.))
                                     .h(px(28.))
                                     .mr(px(6.))
-                                    .rounded(px(4.))
+                                    .rounded(RADIUS_SM)
                                     .flex_shrink_0()
                                     .text_color(rgb(p.muted))
                                     .cursor_pointer()
@@ -1261,7 +1261,7 @@ impl Chrome {
                 .line_height(px(18.))
                 .px(px(12.))
                 .py(px(8.))
-                .rounded(px(6.))
+                .rounded(RADIUS_MD)
                 .border_1()
                 .border_color(rgb(mix(p.danger, p.border, 0.45)))
                 .bg(rgb(mix(p.danger, p.bg, 0.10)))
@@ -1472,7 +1472,7 @@ fn kbd(label: &str, p: Palette, offset: f32) -> AnyElement {
     div()
         .border_1()
         .border_color(rgb(p.border))
-        .rounded(px(4.))
+        .rounded(RADIUS_SM)
         .py(px(2.))
         .px(px(5.))
         .text_size(px(9. + offset))

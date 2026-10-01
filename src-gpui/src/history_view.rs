@@ -5,7 +5,7 @@ use crate::{
         HistoryCache, HistoryPage, HistoryReadSlots, PAGE_SIZE, PageRequests, PositionRead,
         PositionRequests, ReferenceGroup, group_references,
     },
-    theme::{self, Palette},
+    theme::{self, Palette, RADIUS_MD, RADIUS_SM},
 };
 use gpui_kit::{
     assets::IconName,
@@ -1211,7 +1211,7 @@ impl HistoryView {
                         .items_center()
                         .gap(px(8.))
                         .px(px(10.))
-                        .rounded(px(4.))
+                        .rounded(RADIUS_SM)
                         .cursor_pointer()
                         .text_size(px(11. + self.font_size))
                         .line_height(relative(1.5))
@@ -1265,7 +1265,7 @@ impl HistoryView {
             .max_w(max_width)
             .occlude()
             .p(px(5.))
-            .rounded(px(6.))
+            .rounded(RADIUS_MD)
             .border_1()
             .border_color(rgb(palette.border))
             .bg(rgb(palette.panel))
@@ -1719,7 +1719,7 @@ impl HistoryView {
                                         .min_w_0()
                                         .px(px(5.))
                                         .py(px(3.))
-                                        .rounded(px(4.))
+                                        .rounded(RADIUS_SM)
                                         .border_1()
                                         .border_color(if tag {
                                             with_alpha(color, 0.28)
@@ -1941,7 +1941,7 @@ impl Render for HistoryView {
                                     .truncate()
                                     .px(px(8.))
                                     .py(px(5.))
-                                    .rounded(px(4.))
+                                    .rounded(RADIUS_SM)
                                     .border_1()
                                     .border_color(rgb(palette.border))
                                     .bg(rgb(palette.accent_soft))
@@ -1962,7 +1962,7 @@ impl Render for HistoryView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(5.))
+                            .rounded(RADIUS_SM)
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(palette.hover)))
                             .child(theme::icon(IconName::RefreshCw, 14., palette.muted))
@@ -2001,7 +2001,7 @@ impl Render for HistoryView {
                             .tab_index(0)
                             .aria_label("Quitter le mode Solo")
                             .flex_shrink_0()
-                            .rounded(px(4.))
+                            .rounded(RADIUS_MD)
                             .border_1()
                             .border_color(with_alpha(palette.warning, 0.3))
                             .px(px(8.))
@@ -2034,7 +2034,7 @@ impl Render for HistoryView {
                             .items_center()
                             .gap(px(9.))
                             .px(px(11.))
-                            .rounded(px(6.))
+                            .rounded(RADIUS_MD)
                             .border_1()
                             .border_color(rgb(palette.border))
                             .bg(rgb(palette.bg))
@@ -2053,7 +2053,7 @@ impl Render for HistoryView {
                                 style.child(
                                     div()
                                         .flex_shrink_0()
-                                        .rounded(px(4.))
+                                        .rounded(RADIUS_SM)
                                         .border_1()
                                         .border_color(rgb(palette.border))
                                         .px(px(5.))
