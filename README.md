@@ -33,7 +33,7 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Taille des textes mémorisée : **Cmd/Ctrl + +** (ou **=**) agrandit, **Cmd/Ctrl + −** réduit, **Cmd/Ctrl + 0** rétablit la taille par défaut.
 - Le texte des diffs démarre à **11 px**. Les boutons **− / +** dans leur en-tête règlent uniquement cette taille, mémorisée et partagée entre les vues centrale et compacte. Les raccourcis globaux ajustent les deux tailles ; **Cmd/Ctrl + 0** rétablit aussi le diff à 11 px.
 
-Les intégrations de comptes GitHub/GitLab/Bitbucket et les profils restent à implémenter. Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Le fetch utilise **Git installé sur la machine**, les gestionnaires d’identifiants et l’agent SSH existants, sans invite interactive ; aucun clone ni fonctionnalité d’IA n’est fourni.
+Les paramètres proposent des profils personnel/professionnel et des comptes GitLab, GitHub et Bitbucket pour consulter les dépôts accessibles, PR/MR, discussions et résultats CI. GitLab et GitHub proposent une connexion dans le navigateur ; la configuration de leur application est accessible dans l’interface. Les tokens sont conservés dans le coffre sécurisé de l’OS ; les préférences, favoris et récents sont propres à chaque profil. Les éditions couvertes par les adaptateurs, les permissions et les limites de validation sont détaillées dans [les intégrations](docs/integrations.md). Le nom du fournisseur affiché à partir d’une URL remote n’est pas une connexion à son compte. Le fetch utilise **Git installé sur la machine**, les gestionnaires d’identifiants et l’agent SSH existants, sans invite interactive. **Nouvel onglet → Cloner** permet de sélectionner un dépôt connecté ou une URL HTTPS/SSH, de choisir un nouveau dossier et de l’ouvrir après clonage. Les dépôts accessibles sont consultés dans cet écran dédié ; les paramètres servent à gérer les connexions. Aucune fonctionnalité d’IA n’est fournie.
 
 ## Lancer l’application desktop
 
@@ -69,6 +69,8 @@ cargo test --locked --manifest-path src-gpui/Cargo.toml
 cargo fmt --all --check
 cargo clippy --locked -p mangrove-core --all-targets -- -D warnings
 cargo test --locked -p mangrove-core
+cargo clippy --locked -p mangrove-remote --all-targets -- -D warnings
+cargo test --locked -p mangrove-remote
 ```
 
 Les tests du moteur comparent notamment les octets et dates de modification de l’ensemble du dépôt source avant et après consultation. Les tests GPUI protègent les générations de lecture, les ouvertures remplacées, la sélection, les caches bornés et la géométrie du défilement.
@@ -93,6 +95,7 @@ L’option ajoute un commit de préparation, puis `feat(fixture): showcase 46 mi
 ## Organisation
 
 - `crates/mangrove-core` : lecture Git, graphe, indexation et cache ; indépendant de l’interface.
+- `crates/mangrove-remote` : profils, coffre système, lectures HTTP et SSH ; indépendant du moteur Git local.
 - `src-gpui` : application native GPUI, vues virtualisées, orchestration des lectures, préférences et packaging ; workspace Cargo indépendant.
 - `src-gpui/assets/icons` : icônes originales utilisées pour le packaging.
 - `scripts/create-fixture.mjs` : génération isolée de dépôts synthétiques pour la QA et les mesures. Aucun bridge HTTP de lecture des dépôts n’est fourni.

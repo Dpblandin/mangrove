@@ -1,4 +1,5 @@
 use crate::{
+    integrations::{IntegrationsSection, IntegrationsView},
     preferences::{MAX_AUTO_FETCH_INTERVAL, parse_auto_fetch_interval},
     theme::{Palette, ThemeId, icon, scrollbar_theme},
 };
@@ -25,7 +26,17 @@ pub enum SettingsEvent {
     ImagePreviewsChanged(bool),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsSection {
+    General,
+    Profiles,
+    Ssh,
+    Integrations,
+}
+
 pub struct SettingsView {
+    section: SettingsSection,
+    integrations: Option<Entity<IntegrationsView>>,
     interval: u32,
     show_image_previews: bool,
     input: Entity<InputState>,
@@ -84,6 +95,8 @@ impl SettingsView {
             }
         });
         Self {
+            section: SettingsSection::General,
+            integrations: None,
             interval,
             show_image_previews,
             input,
@@ -96,12 +109,67 @@ impl SettingsView {
             _subscriptions: vec![input_subscription, theme_subscription],
         }
     }
+    pub fn set_integrations(
+        &mut self,
+        integrations: Entity<IntegrationsView>,
+        cx: &mut Context<Self>,
+    ) {
+        self.integrations = Some(integrations);
+        cx.notify();
+    }
+
+    fn select_section(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let switched = self.section != section;
+        self.section = section;
+        if section == SettingsSection::General {
+            self.leave(window, cx);
+            self.focus(window, cx);
+        } else if let Some(integrations) = &self.integrations {
+            integrations.update(cx, |view, cx| {
+                if switched {
+                    view.leave_settings(window, cx);
+                }
+                view.set_section(
+                    match section {
+                        SettingsSection::Profiles => IntegrationsSection::Profiles,
+                        SettingsSection::Ssh => IntegrationsSection::Ssh,
+                        _ => IntegrationsSection::Integrations,
+                    },
+                    cx,
+                )
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn show_integrations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_section(SettingsSection::Integrations, window, cx);
+    }
+
+    pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_section(self.section, window, cx);
+    }
+
+    pub fn leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(integrations) = &self.integrations {
+            integrations.update(cx, |view, cx| view.leave_settings(window, cx));
+        }
+    }
+
     pub fn set_theme(&mut self, palette: Palette, font_size_offset: f32, cx: &mut Context<Self>) {
         if self.palette == palette && self.font_size_offset == font_size_offset {
             return;
         }
         self.palette = palette;
         self.font_size_offset = font_size_offset;
+        if let Some(integrations) = &self.integrations {
+            integrations.update(cx, |view, cx| view.set_theme(palette, font_size_offset, cx));
+        }
         cx.notify();
     }
     pub fn set_interval(&mut self, interval: u32, window: &mut Window, cx: &mut Context<Self>) {
@@ -111,6 +179,18 @@ impl SettingsView {
         });
         self.error = None;
         self.saved = false;
+        cx.notify();
+    }
+    pub fn set_selected_theme(
+        &mut self,
+        theme: ThemeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let index = ThemeId::ALL.iter().position(|id| *id == theme).unwrap_or(0);
+        self.theme_select.update(cx, |select, cx| {
+            select.set_selected_index(Some(IndexPath::new(index)), window, cx);
+        });
         cx.notify();
     }
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -281,7 +361,7 @@ impl Render for SettingsView {
                                     .justify_start()
                                     .gap(px(12.))
                                     .rounded(px(6.))
-                                    .bg(rgb(p.accent).opacity(0.1))
+                                    .when(self.section == SettingsSection::General, |button| button.bg(rgb(p.accent).opacity(0.1)))
                                     .text_color(rgb(p.text))
                                     .text_size(px(16. + offset))
                                     .line_height(relative(1.5))
@@ -291,8 +371,18 @@ impl Render for SettingsView {
                                     .focus_visible(move |style| style.bg(rgb(p.selection)))
                                     .child(icon(IconName::SlidersHorizontal, 16., p.text))
                                     .child("Général")
-                                    .on_click(cx.listener(|this, _, window, cx| this.focus(window, cx))),
-                            ),
+                                    .on_click(cx.listener(|this, _, window, cx| this.select_section(SettingsSection::General, window, cx))),
+                            )
+                            .children([(SettingsSection::Profiles, "settings-profiles", "Profils", IconName::Users), (SettingsSection::Ssh, "settings-ssh", "SSH", IconName::ShieldCheck), (SettingsSection::Integrations, "settings-integrations", "Intégrations", IconName::Plug)].into_iter().map(|(section, id, label, glyph)| {
+                                Button::new(id).w_full().mt(px(4.)).px(px(16.)).py(px(12.)).justify_start().rounded(px(6.))
+                                    .when(self.section == section, |button| button.bg(rgb(p.accent).opacity(0.1)))
+                                    .text_color(rgb(p.text)).text_size(px(16. + offset)).cursor_pointer().accessibility_label(label)
+                                    .focus_visible(move |style| style.bg(rgb(p.selection)))
+                                    .gap(px(12.))
+                                    .child(icon(glyph, 16., p.text))
+                                    .child(label)
+                                    .on_click(cx.listener(move |this, _, window, cx| this.select_section(section, window, cx)))
+                            })),
                     )
                     .child(
                         div()
@@ -302,7 +392,7 @@ impl Render for SettingsView {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(
+                            .when(self.section == SettingsSection::General, |view| view.child(
                                 div()
                                     .id("settings-scroll-area")
                                     .size_full()
@@ -464,8 +554,9 @@ impl Render for SettingsView {
                                                     ),
                                             ),
                                     ),
-                            )
-                            .child(scrollbar_theme(Scrollbar::vertical(&self.scroll).id("settings-scrollbar"))),
+                            ))
+                            .when(self.section != SettingsSection::General, |view| view.when_some(self.integrations.clone(), |view, integrations| view.child(integrations)))
+                            .when(self.section == SettingsSection::General, |view| view.child(scrollbar_theme(Scrollbar::vertical(&self.scroll).id("settings-scrollbar")))),
                     ),
             )
     }

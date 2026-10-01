@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "coldOpenMs": 6.206542,
+    "commits": 207,
+    "diff": {
+      "p50Ms": 1.147,
+      "p95Ms": 1.47725,
+      "samples": 50
+    },
+    "search": {
+      "p50Ms": 0.555292,
+      "p95Ms": 0.833375,
+      "samples": 50
+    }
+  },
+  "cancellationMs": 0.089167,
+  "note": "Backend-only, 50 warm search/diff samples per condition and one cold open per condition; synthetic delayed GET, no real network, excludes native rendering. Filesystem cache is warm; this demonstrates isolation, not a statistical performance guarantee.",
+  "pendingSyntheticApi": {
+    "coldOpenMs": 2.093458,
+    "commits": 207,
+    "diff": {
+      "p50Ms": 1.140666,
+      "p95Ms": 1.2630000000000001,
+      "samples": 50
+    },
+    "search": {
+      "p50Ms": 0.527583,
+      "p95Ms": 0.7854169999999999,
+      "samples": 50
+    }
+  }
+}

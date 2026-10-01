@@ -282,6 +282,7 @@ def run_application(reader, executable, repository, cache, output, args):
     # Opening a repository records a recent entry even in benchmark mode. Keep
     # those preferences in the temporary run directory, away from the user's app.
     env["MANGROVE_GPUI_PREFERENCES"] = str(output.with_suffix(".preferences.json"))
+    env["MANGROVE_PROFILES_PATH"] = str(output.with_suffix(".profiles.json"))
     argv = [str(executable), str(repository)]
     env["MANGROVE_BENCH_LAUNCH_UNIX_MS"] = str(time.time_ns() / 1_000_000)
     pid = reader.spawn(argv, env)

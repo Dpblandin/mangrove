@@ -1,6 +1,7 @@
 //! Application chrome. The parent owns repositories, tasks and tab workspaces.
 use crate::{
-    preferences::{Pane, Preferences, RecentRepository},
+    integrations::{IntegrationsEvent, IntegrationsView},
+    preferences::{Pane, Preferences, RecentRepository, profile_store},
     recent_repositories::{RecentMetadata, RecentNamesRequest},
     settings::{SettingsEvent, SettingsView},
     theme::{Palette, ThemeId, icon, mix, scrollbar_theme},
@@ -18,6 +19,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+use mangrove_remote::{Profile, ProfileStore, Profiles};
 use std::{collections::HashMap, time::Duration};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,11 +36,15 @@ pub enum ChromeEvent {
     ActivateTab(u64),
     CloseTab(u64),
     NewTab,
+    BrowseRepositories,
+    CloseRepositoryBrowser,
+    ManageIntegrations,
     ShowSettings,
     BackToWorkspace,
     Fetch,
     DismissError,
     PreferencesChanged,
+    ProfileChanged,
     PaneResized(Pane, f32),
 }
 
@@ -63,6 +69,9 @@ struct Resize {
 
 pub struct Chrome {
     pub preferences: Preferences,
+    profiles: Profiles,
+    profile_store: Option<ProfileStore>,
+    integrations: Entity<IntegrationsView>,
     recent_metadata: RecentMetadata,
     applied_theme: ThemeId,
     pub settings: Entity<SettingsView>,
@@ -79,6 +88,7 @@ pub struct Chrome {
     error: Option<String>,
     recent_filter: Entity<InputState>,
     welcome_scroll: ScrollHandle,
+    repository_browser: bool,
     separator_focus: [FocusHandle; 2],
     resize: Option<Resize>,
     _subscriptions: Vec<Subscription>,
@@ -88,6 +98,30 @@ impl EventEmitter<ChromeEvent> for Chrome {}
 
 impl Chrome {
     pub fn new(preferences: Preferences, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (profiles, profile_store, profile_error) = match profile_store()
+            .and_then(|store| store.load().map(|profiles| (store, profiles)))
+        {
+            Ok((store, profiles)) => (profiles, Some(store), None),
+            Err(error) => (Profiles::default(), None, Some(error.to_string())),
+        };
+        let integrations = cx.new(|cx| {
+            IntegrationsView::new(
+                profiles
+                    .active()
+                    .cloned()
+                    .unwrap_or_else(|| Profile::new("personal", "Personnel")),
+                preferences.palette(),
+                preferences.font_size_offset,
+                window,
+                cx,
+            )
+        });
+        integrations.update(cx, |view, cx| {
+            view.set_profiles(profiles.profiles.clone(), window, cx);
+            if let Some(error) = profile_error.clone() {
+                view.set_error(error, cx);
+            }
+        });
         let recent_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Rechercher un dépôt récent…"));
         let settings = cx.new(|cx| {
@@ -101,7 +135,13 @@ impl Chrome {
                 cx,
             )
         });
+        settings.update(cx, |view, cx| {
+            view.set_integrations(integrations.clone(), cx)
+        });
         let subscriptions = vec![
+            cx.subscribe_in(&integrations, window, |this, _, event, window, cx| {
+                this.integration_event(event, window, cx)
+            }),
             cx.subscribe(&recent_filter, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&settings, |this, _, event, cx| match event {
                 SettingsEvent::Back => cx.emit(ChromeEvent::BackToWorkspace),
@@ -122,6 +162,9 @@ impl Chrome {
         let applied_theme = preferences.theme;
         Self {
             preferences,
+            profiles,
+            profile_store,
+            integrations,
             recent_metadata: RecentMetadata::default(),
             applied_theme,
             settings,
@@ -135,9 +178,10 @@ impl Chrome {
             busy_task: None,
             choosing: false,
             fetching: false,
-            error: None,
+            error: profile_error,
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
+            repository_browser: false,
             separator_focus: [cx.focus_handle(), cx.focus_handle()],
             resize: None,
             _subscriptions: subscriptions,
@@ -230,7 +274,7 @@ impl Chrome {
             .recent_metadata
             .apply(request, &mut self.preferences.recent, names)
         {
-            let _ = self.preferences.save();
+            self.save_preferences(cx);
             cx.notify();
         }
     }
@@ -240,7 +284,11 @@ impl Chrome {
         self.preferences_changed(cx);
     }
     pub fn begin_repository_picker(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.busy || self.choosing || self.resize.is_some() {
+        if self.busy
+            || self.choosing
+            || self.resize.is_some()
+            || self.integrations.read(cx).choosing_path()
+        {
             return false;
         }
         self.choosing = true;
@@ -250,8 +298,8 @@ impl Chrome {
     pub fn choosing_repository(&self) -> bool {
         self.choosing
     }
-    pub fn can_show_settings(&self) -> bool {
-        !self.choosing && self.resize.is_none()
+    pub fn can_show_settings(&self, cx: &App) -> bool {
+        !self.choosing && self.resize.is_none() && !self.integrations.read(cx).choosing_path()
     }
     pub fn finish_repository_picker(&mut self, cx: &mut Context<Self>) {
         self.choosing = false;
@@ -269,7 +317,14 @@ impl Chrome {
             self.preferences.apply_palette(cx);
             self.applied_theme = self.preferences.theme;
         }
-        let _ = self.preferences.save();
+        self.save_preferences(cx);
+        self.integrations.update(cx, |view, cx| {
+            view.set_theme(
+                self.preferences.palette(),
+                self.preferences.font_size_offset,
+                cx,
+            )
+        });
         self.settings.update(cx, |settings, cx| {
             settings.set_theme(
                 self.preferences.palette(),
@@ -279,6 +334,157 @@ impl Chrome {
         });
         cx.emit(ChromeEvent::PreferencesChanged);
         cx.notify();
+    }
+    fn save_preferences(&mut self, cx: &mut Context<Self>) {
+        if self
+            .preferences
+            .save_for_profile(&self.profiles.active_profile_id)
+            .is_err()
+        {
+            self.integrations.update(cx, |view, cx| {
+                view.set_error(
+                    "Impossible d’enregistrer les préférences du profil.".into(),
+                    cx,
+                )
+            });
+        }
+    }
+    fn integration_event(
+        &mut self,
+        event: &IntegrationsEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut profiles = self.profiles.clone();
+        match event {
+            IntegrationsEvent::OpenIntegrationSettings => {
+                cx.emit(ChromeEvent::ManageIntegrations);
+                return;
+            }
+            IntegrationsEvent::OpenLocalFavorite(path) => {
+                cx.emit(ChromeEvent::OpenRepository(path.clone()));
+                return;
+            }
+            IntegrationsEvent::ProfileSelected(id) => {
+                if profiles.active_profile_id == *id {
+                    return;
+                }
+                self.save_preferences(cx);
+                profiles.active_profile_id = id.clone();
+            }
+            IntegrationsEvent::ProfileCreated(name) => {
+                let mut index = 1;
+                while profiles
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.id == format!("profile-{index}"))
+                {
+                    index += 1;
+                }
+                let profile = Profile::new(format!("profile-{index}"), name.clone());
+                profiles.profiles.push(profile);
+            }
+            IntegrationsEvent::AccountAdded {
+                profile_id,
+                account,
+            } => {
+                if let Some(profile) = profiles
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == *profile_id)
+                {
+                    profile
+                        .accounts
+                        .retain(|existing| existing.id != account.id);
+                    profile.accounts.push(account.clone());
+                }
+            }
+            IntegrationsEvent::AccountRemoved {
+                profile_id,
+                account_id,
+            } => {
+                if let Some(profile) = profiles
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == *profile_id)
+                {
+                    profile.accounts.retain(|account| account.id != *account_id);
+                }
+            }
+            IntegrationsEvent::FavoritesChanged(favorites) => {
+                if let Some(profile) = profiles
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profiles.active_profile_id)
+                {
+                    profile.favorites = favorites.clone();
+                }
+            }
+            IntegrationsEvent::SshChanged(choice) => {
+                if let Some(profile) = profiles
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profiles.active_profile_id)
+                {
+                    profile.ssh = choice.clone();
+                }
+            }
+        }
+        let Some(store) = &self.profile_store else {
+            self.profile_save_failed(event, "Les profils ne peuvent pas être enregistrés. Vérifiez leur fichier de configuration.".into(), window, cx);
+            cx.notify();
+            return;
+        };
+        if let Err(error) = store.save(&profiles) {
+            self.profile_save_failed(event, error.to_string(), window, cx);
+            cx.notify();
+            return;
+        }
+        let changed_profile = profiles.active_profile_id != self.profiles.active_profile_id;
+        self.profiles = profiles;
+        if changed_profile {
+            self.preferences = Preferences::load_for_profile(&self.profiles.active_profile_id);
+            self.recent_metadata = RecentMetadata::default();
+            self.preferences.apply_palette(cx);
+            self.applied_theme = self.preferences.theme;
+            self.settings.update(cx, |view, cx| {
+                view.set_interval(self.preferences.auto_fetch_interval, window, cx);
+                view.set_selected_theme(self.preferences.theme, window, cx);
+            });
+        }
+        if let Some(profile) = self.profiles.active().cloned() {
+            self.integrations.update(cx, |view, cx| {
+                view.set_profiles(self.profiles.profiles.clone(), window, cx);
+                view.set_profile(profile, window, cx);
+            });
+        }
+        if changed_profile {
+            self.preferences_changed(cx);
+            cx.emit(ChromeEvent::ProfileChanged);
+        }
+        cx.notify();
+    }
+    fn profile_save_failed(
+        &mut self,
+        event: &IntegrationsEvent,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.integrations.update(cx, |view, cx| {
+            if let IntegrationsEvent::AccountAdded {
+                profile_id,
+                account,
+            } = event
+            {
+                view.rollback_new_account(profile_id, &account.id, cx);
+            }
+            view.set_profiles(self.profiles.profiles.clone(), window, cx);
+            if let Some(profile) = self.profiles.active().cloned() {
+                view.set_profile(profile, window, cx);
+            }
+            view.set_error(message, cx);
+        });
     }
     fn tab_key(
         &mut self,
@@ -459,7 +665,13 @@ impl Chrome {
                     .min_w_0()
                     .text_size(px(11. + offset))
                     .text_color(rgb(p.muted))
-                    .child("Espace local")
+                    .child(format!(
+                        "Espace local · {}",
+                        self.profiles
+                            .active()
+                            .map(|profile| profile.name.as_str())
+                            .unwrap_or("Personnel")
+                    ))
                     .child(icon(IconName::ChevronRight, 12., p.muted))
                     .child(
                         div()
@@ -503,7 +715,7 @@ impl Chrome {
                             .accessibility_label("Paramètres")
                             .tooltip("Paramètres · ⌘ ,")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if this.can_show_settings() {
+                                if this.can_show_settings(cx) {
                                     cx.emit(ChromeEvent::ShowSettings)
                                 }
                             })),
@@ -586,6 +798,119 @@ impl Chrome {
             .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
             .into_any_element()
     }
+    pub fn repository_browser_open(&self) -> bool {
+        self.repository_browser
+    }
+
+    pub fn open_repository_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_browser = true;
+        self.integrations
+            .update(cx, |view, cx| view.open_repositories(window, cx));
+        cx.notify();
+    }
+
+    pub fn close_repository_browser(&mut self, cx: &mut Context<Self>) {
+        if !self.repository_browser {
+            return;
+        }
+        self.repository_browser = false;
+        self.integrations
+            .update(cx, |view, cx| view.close_repositories(cx));
+        cx.notify();
+    }
+
+    pub fn render_repository_browser(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.preferences.palette();
+        let offset = self.preferences.font_size_offset;
+        div()
+            .id("remote-repository-browser")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .bg(rgb(p.bg))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .px(px(24.))
+                    .py(px(16.))
+                    .bg(rgb(p.panel))
+                    .border_b_1()
+                    .border_color(rgb(p.border))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(icon(IconName::Globe, 20., p.accent))
+                            .child(
+                                div()
+                                    .text_size(px(16. + offset))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Dépôts distants"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                NativeButton::new("remote-manage-accounts")
+                                    .px(px(12.))
+                                    .py(px(7.))
+                                    .text_size(px(12. + offset))
+                                    .rounded(px(5.))
+                                    .text_color(rgb(p.accent))
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(rgb(p.hover)))
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
+                                    .accessibility_label("Gérer les connexions")
+                                    .child("Gérer les connexions")
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ChromeEvent::ManageIntegrations)
+                                    })),
+                            )
+                            .child(
+                                NativeButton::new("remote-browser-close")
+                                    .size(px(32.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(rgb(p.hover)))
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
+                                    .accessibility_label("Fermer les dépôts distants")
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Fermer (Échap)").build(window, cx)
+                                    })
+                                    .child(icon(IconName::X, 18., p.muted))
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ChromeEvent::CloseRepositoryBrowser)
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(self.integrations.clone()),
+            )
+            .into_any_element()
+    }
+
     pub fn render_welcome(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.preferences.palette();
         let offset = self.preferences.font_size_offset;
@@ -611,67 +936,103 @@ impl Chrome {
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
-            .pt(px(35.))
-            .px(px(40.))
-            .pb(px(25.))
+            .justify_start()
+            .pt(px(54.))
+            .px(px(28.))
+            .pb(px(32.))
             .bg(rgb(p.bg))
-            .text_center()
+            .text_left()
             .child(
                 div()
-                    .p(px(13.))
-                    .rounded(px(24.))
-                    .border_1()
-                    .border_color(rgb(p.accent_border))
-                    .bg(rgb(p.accent_soft))
+                    .w_full()
+                    .max_w(px(660.))
                     .mb(px(24.))
-                    .child(logo()),
-            )
-            .child(
-                div()
-                    .mb(px(28.))
-                    .text_size(px(30. + offset))
-                    .font_weight(FontWeight(530.))
-                    .line_height(px((30. + offset) * 1.12))
-                    .child("Mangrove"),
-            )
-            .child(
-                NativeButton::new("welcome-open")
-                    .px(px(17.))
-                    .py(px(12.))
-                    .border_1()
-                    .border_color(rgb(p.accent_border))
-                    .bg(rgb(p.accent))
-                    .text_color(rgb(p.on_accent))
-                    .rounded(px(7.))
-                    .text_size(px(12. + offset))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .line_height(relative(1.5))
-                    .gap(px(9.))
-                    .cursor_pointer()
-                    .accessibility_label("Ouvrir un dépôt local")
-                    .hover(move |style| style.bg(rgb(mix(p.accent, p.text, 0.85))))
-                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                    .child(icon(IconName::FolderOpen, 17., p.on_accent))
-                    .child("Ouvrir un dépôt local")
                     .child(
                         div()
-                            .ml(px(14.))
-                            .child(icon(IconName::ArrowRight, 15., p.on_accent)),
+                            .text_size(px(24. + offset))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Dépôts"),
                     )
-                    .disabled(self.busy || self.choosing)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository))),
+                    .child(
+                        div()
+                            .mt(px(6.))
+                            .text_size(px(12. + offset))
+                            .text_color(rgb(p.muted))
+                            .child(format!(
+                                "Profil {}",
+                                self.profiles
+                                    .active()
+                                    .map_or("Personnel", |profile| profile.name.as_str())
+                            )),
+                    ),
             )
             .child(
                 div()
+                    .w_full()
+                    .max_w(px(660.))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(10.))
+                    .child(
+                        NativeButton::new("welcome-open")
+                            .px(px(17.))
+                            .py(px(12.))
+                            .border_1()
+                            .border_color(rgb(p.accent_border))
+                            .bg(rgb(p.accent))
+                            .text_color(rgb(p.on_accent))
+                            .rounded(px(7.))
+                            .text_size(px(12. + offset))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .line_height(relative(1.5))
+                            .gap(px(9.))
+                            .cursor_pointer()
+                            .accessibility_label("Ouvrir un dépôt local")
+                            .hover(move |style| style.bg(rgb(mix(p.accent, p.text, 0.85))))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                            .child(icon(IconName::FolderOpen, 17., p.on_accent))
+                            .child("Ouvrir")
+                            .disabled(self.busy || self.choosing)
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository)),
+                            ),
+                    )
+                    .child(
+                        NativeButton::new("welcome-remotes")
+                            .px(px(17.))
+                            .py(px(12.))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .bg(rgb(p.panel))
+                            .rounded(px(7.))
+                            .text_size(px(12. + offset))
+                            .font_weight(FontWeight::MEDIUM)
+                            .gap(px(9.))
+                            .cursor_pointer()
+                            .accessibility_label("Cloner ou consulter un dépôt distant")
+                            .hover(move |style| style.bg(rgb(p.hover)))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                            .disabled(self.busy || self.choosing)
+                            .child(icon(IconName::Globe, 17., p.muted))
+                            .child("Cloner")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::BrowseRepositories)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(660.))
                     .mt(px(15.))
                     .flex()
                     .items_center()
                     .gap(px(4.))
                     .text_size(px(9. + offset))
                     .text_color(rgb(p.muted))
-                    .child("ou")
+                    .child("Ouvrir un dépôt local")
                     .child(kbd(
                         if cfg!(target_os = "macos") {
                             "⌘ O"
@@ -695,14 +1056,14 @@ impl Chrome {
             .when(!self.preferences.recent.is_empty(), |view| {
                 view.child(
                     div()
-                        .w(px(340.))
+                        .w(px(660.))
                         .max_w_full()
                         .mt(px(28.))
                         .text_left()
                         .child(
                             div()
                                 .mb(px(8.))
-                                .text_size(px(9. + offset))
+                                .text_size(px(12. + offset))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(p.muted))
                                 .child("Récemment ouverts"),
@@ -784,11 +1145,17 @@ impl Chrome {
                                             .flex_1()
                                             .min_w_0()
                                             .text_size(px(11. + offset))
-                                            .child(div().truncate().child(entry.name.clone()))
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(p.accent))
+                                                    .child(entry.name.clone()),
+                                            )
                                             .child(
                                                 div()
                                                     .mt(px(4.))
-                                                    .max_w(px(270.))
+                                                    .w_full()
                                                     .truncate()
                                                     .text_size(px(9. + offset))
                                                     .text_color(rgb(p.muted))
@@ -1112,59 +1479,4 @@ fn kbd(label: &str, p: Palette, offset: f32) -> AnyElement {
         .text_color(rgb(p.muted))
         .child(label.to_string())
         .into_any_element()
-}
-
-fn logo() -> AnyElement {
-    canvas(
-        |_, _, _| (),
-        |bounds, _, window, _| {
-            let unit = f32::from(bounds.size.width) / 64.;
-            let position = |x, y| point(bounds.left() + px(x * unit), bounds.top() + px(y * unit));
-            window.paint_quad(fill(bounds, rgb(0x173a33)).corner_radii(px(18. * unit)));
-            // Separate segments plus endpoint circles reproduce the SVG's
-            // round caps and joins without adding a second SVG asset source.
-            let mut path = PathBuilder::stroke(px(5. * unit));
-            for ((x1, y1), (x2, y2)) in [
-                ((17., 46.), (17., 23.)),
-                ((17., 23.), (32., 37.)),
-                ((32., 37.), (47., 23.)),
-                ((47., 23.), (47., 46.)),
-                ((32., 37.), (32., 17.)),
-            ] {
-                path.move_to(position(x1, y1));
-                path.line_to(position(x2, y2));
-            }
-            if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0x78e4bb));
-            }
-            for (x, y) in [
-                (17., 46.),
-                (17., 23.),
-                (32., 37.),
-                (47., 23.),
-                (47., 46.),
-                (32., 17.),
-            ] {
-                window.paint_quad(
-                    fill(
-                        Bounds::new(
-                            position(x - 2.5, y - 2.5),
-                            size(px(5. * unit), px(5. * unit)),
-                        ),
-                        rgb(0x78e4bb),
-                    )
-                    .corner_radii(px(2.5 * unit)),
-                );
-            }
-            window.paint_quad(
-                fill(
-                    Bounds::new(position(27., 10.), size(px(10. * unit), px(10. * unit))),
-                    rgb(0x78e4bb),
-                )
-                .corner_radii(px(5. * unit)),
-            );
-        },
-    )
-    .size(px(56.))
-    .into_any_element()
 }

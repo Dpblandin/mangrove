@@ -1,7 +1,7 @@
 [workspace]
-members = ["crates/mangrove-core"]
+members = ["crates/mangrove-core", "crates/mangrove-remote"]
 exclude = ["src-gpui"]
-default-members = ["crates/mangrove-core"]
+default-members = ["crates/mangrove-core", "crates/mangrove-remote"]
 resolver = "2"
 
 [workspace.package]

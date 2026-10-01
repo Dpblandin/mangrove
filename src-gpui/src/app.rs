@@ -12,7 +12,7 @@ use crate::{
     theme::SANS,
     view_cache::render_cached_view,
 };
-use gpui_kit::{prelude::*, *};
+use gpui_kit::{component::input::Escape as InputEscape, prelude::*, *};
 use mangrove_core::{Workspace, model::RepositoryInfo};
 #[cfg(feature = "app-benchmark")]
 use std::time::Instant;
@@ -279,6 +279,28 @@ impl Mangrove {
             .update(cx, |view, cx| view.clear_repository(cx));
         self.sync_chrome(cx);
     }
+    fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings {
+            self.chrome
+                .read(cx)
+                .settings
+                .clone()
+                .update(cx, |view, cx| view.leave(window, cx));
+        }
+        self.settings = false;
+    }
+
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome.read(cx).repository_browser_open() {
+            self.chrome_event(&ChromeEvent::CloseRepositoryBrowser, window, cx);
+        } else if self.settings {
+            self.chrome_event(&ChromeEvent::BackToWorkspace, window, cx);
+        } else if self.inspector.read(cx).central_active() {
+            self.inspector
+                .update(cx, |inspector, cx| inspector.close_workspace(cx));
+        }
+    }
+
     fn open(
         &mut self,
         path: String,
@@ -287,6 +309,10 @@ impl Mangrove {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !refresh {
+            self.chrome
+                .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+        }
         if refresh && self.opening && solo.is_none() {
             self.refresh_queued = true;
             return;
@@ -317,7 +343,7 @@ impl Mangrove {
         self.opening = true;
         self.fetch_timer = None;
         if !refresh {
-            self.settings = false;
+            self.leave_settings(window, cx);
         }
         if !same_path {
             self.repository = None;
@@ -424,13 +450,17 @@ impl Mangrove {
         }
         let path = self.tabs.activate(id);
         self.clear_workspace(cx);
-        self.settings = false;
+        self.leave_settings(window, cx);
         if let Some(path) = path {
             self.open(path, true, None, window, cx);
         }
     }
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let active = self.tabs.active == Some(id);
+        if active {
+            self.chrome
+                .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+        }
         self.tabs.close(id);
         if active {
             let path = self.tabs.active_tab().and_then(|tab| tab.path.clone());
@@ -441,9 +471,11 @@ impl Mangrove {
         }
         self.sync_chrome(cx);
     }
-    fn new_tab(&mut self, cx: &mut Context<Self>) {
+    fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chrome
+            .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         self.tabs.create();
-        self.settings = false;
+        self.leave_settings(window, cx);
         self.clear_workspace(cx);
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -453,12 +485,14 @@ impl Mangrove {
         {
             return;
         }
-        let previous_focus = if self.settings {
+        let previous_focus = if self.settings || self.chrome.read(cx).repository_browser_open() {
             Some(self.focus.clone())
         } else {
             window.focused(cx)
         };
-        self.settings = false;
+        self.leave_settings(window, cx);
+        self.chrome
+            .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         let picker = rfd::AsyncFileDialog::new()
             .set_parent(window)
             .set_title("Ouvrir un dépôt Git");
@@ -666,31 +700,76 @@ impl Mangrove {
         }
     }
     fn chrome_event(&mut self, event: &ChromeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            event,
+            ChromeEvent::OpenRepository(_)
+                | ChromeEvent::ActivateTab(_)
+                | ChromeEvent::NewTab
+                | ChromeEvent::ProfileChanged
+        ) {
+            self.chrome
+                .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+        }
         match event {
             ChromeEvent::OpenRepository(path) => self.open(path.clone(), false, None, window, cx),
             ChromeEvent::PickRepository => self.pick_repository(window, cx),
             ChromeEvent::ActivateTab(id) => self.activate_tab(*id, window, cx),
             ChromeEvent::CloseTab(id) => self.close_tab(*id, window, cx),
-            ChromeEvent::NewTab => self.new_tab(cx),
+            ChromeEvent::NewTab => self.new_tab(window, cx),
+            ChromeEvent::BrowseRepositories => {
+                self.leave_settings(window, cx);
+                self.chrome
+                    .update(cx, |chrome, cx| chrome.open_repository_browser(window, cx));
+                cx.notify();
+            }
+            ChromeEvent::CloseRepositoryBrowser => {
+                self.chrome
+                    .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+                self.focus.focus(window, cx);
+                cx.notify();
+            }
+            ChromeEvent::ManageIntegrations => {
+                self.chrome
+                    .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+                self.chrome
+                    .read(cx)
+                    .settings
+                    .clone()
+                    .update(cx, |settings, cx| settings.show_integrations(window, cx));
+                self.settings = true;
+                cx.notify();
+            }
             ChromeEvent::ShowSettings => {
-                if self.settings || !self.chrome.read(cx).can_show_settings() {
+                if self.settings || !self.chrome.read(cx).can_show_settings(cx) {
                     return;
                 }
+                self.chrome
+                    .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
                 let chrome = self.chrome.read(cx);
                 let settings = chrome.settings.clone();
                 let interval = chrome.preferences.auto_fetch_interval;
-                settings.update(cx, |view, cx| view.set_interval(interval, window, cx));
+                settings.update(cx, |view, cx| {
+                    view.set_interval(interval, window, cx);
+                    view.show(window, cx);
+                });
                 self.focus.focus(window, cx);
                 self.settings = true;
                 cx.notify();
             }
             ChromeEvent::BackToWorkspace => {
-                self.settings = false;
+                self.leave_settings(window, cx);
                 self.focus.focus(window, cx);
                 cx.notify();
             }
             ChromeEvent::Fetch => self.fetch(window, cx),
             ChromeEvent::PreferencesChanged => self.apply_preferences(window, cx),
+            ChromeEvent::ProfileChanged => {
+                self.recent_task = None;
+                self.tabs = Tabs::default();
+                self.clear_workspace(cx);
+                self.refresh_recent(cx);
+                self.apply_preferences(window, cx);
+            }
             ChromeEvent::PaneResized(pane, width) => {
                 if *pane == Pane::Left {
                     self.sidebar
@@ -909,75 +988,82 @@ impl Render for Mangrove {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prefs = self.chrome.read(cx).preferences.clone();
         let p = prefs.palette();
-        let root =
-            div()
-                .id("mangrove-app")
-                .track_focus(&self.focus)
-                .relative()
-                .size_full()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .bg(rgb(p.bg))
-                .text_color(rgb(p.text))
-                .font_family(SANS)
-                .text_size(px(16. + prefs.font_size_offset))
-                .font_weight(FontWeight::NORMAL)
-                .line_height(relative(1.5))
-                .on_action(cx.listener(|view, _: &OpenRepository, window, cx| {
+        let root = div()
+            .id("mangrove-app")
+            .track_focus(&self.focus)
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(rgb(p.bg))
+            .text_color(rgb(p.text))
+            .font_family(SANS)
+            .text_size(px(16. + prefs.font_size_offset))
+            .font_weight(FontWeight::NORMAL)
+            .line_height(relative(1.5))
+            .on_action(
+                cx.listener(|view, _: &OpenRepository, window, cx| {
                     view.pick_repository(window, cx)
-                }))
-                .on_action(cx.listener(|view, _: &NewTab, _, cx| view.new_tab(cx)))
-                .on_action(cx.listener(|view, _: &CloseTab, window, cx| {
-                    if let Some(id) = view.tabs.active {
-                        view.close_tab(id, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|view, _: &NewTab, window, cx| view.new_tab(window, cx)))
+            .on_action(cx.listener(|view, _: &CloseTab, window, cx| {
+                if let Some(id) = view.tabs.active {
+                    view.close_tab(id, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
+                view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &Search, window, cx| {
+                if view.repository.is_none() {
+                    return;
+                }
+                view.leave_settings(window, cx);
+                view.chrome
+                    .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+                view.inspector
+                    .update(cx, |inspector, cx| inspector.close_workspace(cx));
+                // ModeChanged restores the list focus through a queued
+                // event; focus the search after that event and the view switch.
+                cx.on_next_frame(window, |view, window, cx| {
+                    if !view.settings
+                        && !view.chrome.read(cx).repository_browser_open()
+                        && view.repository.is_some()
+                        && !view.inspector.read(cx).central_active()
+                        && !view.chrome.read(cx).choosing_repository()
+                    {
+                        view.history
+                            .update(cx, |history, cx| history.focus_search(window, cx));
                     }
-                }))
-                .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
-                    view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
-                }))
-                .on_action(cx.listener(|view, _: &Search, window, cx| {
-                    if view.repository.is_none() {
-                        return;
-                    }
-                    view.settings = false;
-                    view.inspector
-                        .update(cx, |inspector, cx| inspector.close_workspace(cx));
-                    // ModeChanged restores the list focus through a queued
-                    // event; focus the search after that event and the view switch.
-                    cx.on_next_frame(window, |view, window, cx| {
-                        if !view.settings
-                            && view.repository.is_some()
-                            && !view.inspector.read(cx).central_active()
-                            && !view.chrome.read(cx).choosing_repository()
-                        {
-                            view.history
-                                .update(cx, |history, cx| history.focus_search(window, cx));
-                        }
-                    });
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|view, _: &ZoomIn, _, cx| {
-                    view.chrome
-                        .update(cx, |chrome, cx| chrome.zoom(Some(1), cx))
-                }))
-                .on_action(cx.listener(|view, _: &ZoomOut, _, cx| {
-                    view.chrome
-                        .update(cx, |chrome, cx| chrome.zoom(Some(-1), cx))
-                }))
-                .on_action(cx.listener(|view, _: &ZoomReset, _, cx| {
-                    view.chrome.update(cx, |chrome, cx| chrome.zoom(None, cx))
-                }))
-                .on_action(cx.listener(|view, _: &Escape, window, cx| {
-                    if view.settings {
-                        view.chrome_event(&ChromeEvent::BackToWorkspace, window, cx);
-                    } else if view.inspector.read(cx).central_active() {
-                        view.inspector
-                            .update(cx, |inspector, cx| inspector.close_workspace(cx));
-                    }
-                }));
+                });
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| {
+                view.chrome
+                    .update(cx, |chrome, cx| chrome.zoom(Some(1), cx))
+            }))
+            .on_action(cx.listener(|view, _: &ZoomOut, _, cx| {
+                view.chrome
+                    .update(cx, |chrome, cx| chrome.zoom(Some(-1), cx))
+            }))
+            .on_action(cx.listener(|view, _: &ZoomReset, _, cx| {
+                view.chrome.update(cx, |chrome, cx| chrome.zoom(None, cx))
+            }))
+            .on_action(cx.listener(|view, _: &Escape, window, cx| view.escape(window, cx)))
+            .on_action(cx.listener(|view, _: &InputEscape, window, cx| view.escape(window, cx)));
         if self.settings {
             return root.child(self.chrome.read(cx).settings.clone());
+        }
+        if self.chrome.read(cx).repository_browser_open() {
+            let tabs = self
+                .chrome
+                .update(cx, |chrome, cx| chrome.render_tabs(window, cx));
+            let browser = self.chrome.update(cx, |chrome, cx| {
+                chrome.render_repository_browser(window, cx)
+            });
+            return root.child(tabs).child(browser);
         }
         let width = f32::from(window.viewport_size().width);
         let layout = prefs.pane_layout(width);
