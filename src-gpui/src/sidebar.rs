@@ -403,7 +403,29 @@ impl SidebarView {
         cx.notify();
     }
 
+    fn shares_worktree_list(&self, path: &str) -> bool {
+        self.repository.is_some()
+            && self
+                .context
+                .worktrees
+                .data
+                .as_ref()
+                .is_some_and(|list| list.worktrees.iter().any(|item| item.path == path))
+    }
+
+    /// Linked worktrees share this navigation tree. Keep its rows and scroll
+    /// anchor while the new session and its lazy context are being loaded.
+    pub fn prepare_repository_open(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.shares_worktree_list(path) {
+            self.context.invalidate(false);
+            self.close_menu(cx);
+        } else {
+            self.clear_repository(cx);
+        }
+    }
+
     pub fn set_repository(&mut self, repository: Arc<RepositoryInfo>, cx: &mut Context<Self>) {
+        let shared_worktrees = self.shares_worktree_list(&repository.path);
         let changed = self
             .repository
             .as_ref()
@@ -432,10 +454,12 @@ impl SidebarView {
         self.reference_focus
             .retain(|name, _| names.contains(name.as_str()));
         self.repository = Some(repository);
-        self.context.invalidate(changed);
+        self.context.invalidate(changed && !shared_worktrees);
         if different_path {
-            self.reference_state.set_filter(String::new());
-            self.reset_filter_input = true;
+            if !shared_worktrees {
+                self.reference_state.set_filter(String::new());
+                self.reset_filter_input = true;
+            }
             self.selected_sha = None;
             self.selected_stash.clear();
         }
@@ -1105,6 +1129,10 @@ impl SidebarView {
                     item.head_name.clone()
                 };
                 let path = item.path.clone();
+                let current = self
+                    .repository
+                    .as_ref()
+                    .is_some_and(|repository| repository.path == item.path);
                 let available = item.available;
                 let description = format!(
                     "{}\n{}{}{}{}",
@@ -1114,7 +1142,7 @@ impl SidebarView {
                     } else {
                         "Worktree lié"
                     },
-                    if item.current { "\nOuvert ici" } else { "" },
+                    if current { "\nOuvert ici" } else { "" },
                     item.locked
                         .as_ref()
                         .map(|reason| format!("\nVerrouillé : {reason}"))
@@ -1125,7 +1153,7 @@ impl SidebarView {
                         .unwrap_or_default()
                 );
                 let tooltip_text = format!("{label}\n{description}");
-                let color = if item.current { p.success } else { p.text };
+                let color = if current { p.success } else { p.text };
                 NativeButton::new(SharedString::from(format!("worktree-{path}")))
                     .disabled(!available)
                     .role(Role::Button)
@@ -1143,9 +1171,9 @@ impl SidebarView {
                     .text_size(px(11. + font_offset))
                     .text_color(rgb(color))
                     .opacity(if available { 1. } else { 0.7 })
-                    .when(item.current, |this| this.bg(rgb(p.success).opacity(0.18)))
+                    .when(current, |this| this.bg(rgb(p.success).opacity(0.18)))
                     .hover(|style| {
-                        style.bg(if item.current {
+                        style.bg(if current {
                             rgb(p.success).opacity(0.18)
                         } else {
                             rgb(p.accent).opacity(0.1)
@@ -1166,7 +1194,7 @@ impl SidebarView {
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .font_weight(if item.current {
+                            .font_weight(if current {
                                 FontWeight::SEMIBOLD
                             } else {
                                 FontWeight::MEDIUM
@@ -1179,7 +1207,7 @@ impl SidebarView {
                     .when(item.locked.is_some(), |this| {
                         this.child(icon(IconName::LockKeyhole, 12., p.warning))
                     })
-                    .when(item.current, |this| {
+                    .when(current, |this| {
                         this.child(icon(IconName::Check, 12., color))
                     })
                     .on_click(cx.listener(move |_, _, _, cx| {
