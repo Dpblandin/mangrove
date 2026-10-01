@@ -880,7 +880,9 @@ impl InspectorView {
             self.browser
                 .update(cx, |view, cx| view.present(presentation, cx));
         }
-        cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+        if !self.compact {
+            cx.emit(InspectorEvent::ModeChanged(true));
+        }
         if !can_read {
             // The latest key wins even if the status is still being read. Keep
             // the coherent display, then resolve the key in the fresh rows.
