@@ -316,6 +316,7 @@ pub struct SidebarView {
     solo_refs: HashSet<String>,
     reference_state: ReferenceTreeState,
     references: Vec<Arc<Reference>>,
+    reference_shas: HashSet<String>,
     reference_groups: Vec<ReferenceGroup>,
     rows: Vec<SidebarRow>,
     list_state: ListState,
@@ -363,6 +364,7 @@ impl SidebarView {
             solo_refs: HashSet::new(),
             reference_state: ReferenceTreeState::default(),
             references: Vec::new(),
+            reference_shas: HashSet::new(),
             reference_groups: Vec::new(),
             rows: Vec::new(),
             list_state,
@@ -417,6 +419,11 @@ impl SidebarView {
             .cloned()
             .map(Arc::new)
             .collect();
+        self.reference_shas = self
+            .references
+            .iter()
+            .map(|reference| reference.sha.clone())
+            .collect();
         let names: HashSet<_> = self
             .references
             .iter()
@@ -441,6 +448,7 @@ impl SidebarView {
     pub fn clear_repository(&mut self, cx: &mut Context<Self>) {
         self.repository = None;
         self.references.clear();
+        self.reference_shas.clear();
         self.reference_focus.clear();
         self.reference_groups.clear();
         self.context.invalidate(true);
@@ -462,9 +470,19 @@ impl SidebarView {
         if self.selected_sha == selected_sha && self.selected_stash == selected_stash {
             return;
         }
+        let reference_highlight_changed = self
+            .selected_sha
+            .as_ref()
+            .is_some_and(|sha| self.reference_shas.contains(sha))
+            || selected_sha
+                .as_ref()
+                .is_some_and(|sha| self.reference_shas.contains(sha));
+        let stash_highlight_changed = self.selected_stash != selected_stash;
         self.selected_sha = selected_sha;
         self.selected_stash = selected_stash;
-        cx.notify();
+        if reference_highlight_changed || stash_highlight_changed {
+            cx.notify();
+        }
     }
 
     fn rebuild_reference_groups(&mut self) {

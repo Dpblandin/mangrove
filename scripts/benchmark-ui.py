@@ -380,7 +380,7 @@ def aggregate(runs):
                     "pooled_ms": summary([value for run in selected for value in run["timings_ms"].get(name, [])])}
             resource_metrics = {"peak_resident_mib": summary([run["resources"]["peak_resident_mib"] for run in selected]),
                 "peak_physical_footprint_mib": summary([run["resources"]["peak_physical_footprint_mib"] for run in selected if run["resources"]["peak_physical_footprint_mib"] is not None])}
-            for phase in ("idle", "history_scroll", "diff_scroll", "selection", "syntax"):
+            for phase in ("idle", "history_scroll", "diff_scroll", "selection", "selection_burst", "syntax"):
                 resource_metrics[phase] = {}
                 for name in ("cpu_percent_one_core", "resident_mib", "physical_footprint_mib"):
                     values = []
@@ -391,7 +391,7 @@ def aggregate(runs):
                             values.append(value)
                     resource_metrics[phase][name] = summary(values)
             frame_metrics = {}
-            for phase in ("history_scroll", "diff_scroll"):
+            for phase in ("history_scroll", "diff_scroll", "selection", "selection_burst", "syntax"):
                 frame_metrics[phase] = {}
                 for name in ("interval_ms", "draw_ms", "submit_ms"):
                     lists = [run["frames"].get(phase, {}).get(name, []) for run in selected]

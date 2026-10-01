@@ -43,15 +43,23 @@ fn main() -> Result<(), String> {
         let diff = engine.file_diff(&repository.id, &sha, file.index)?;
         let read_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = Instant::now();
-        let tokens = syntax::cached_diff_tokens(&file.path, &diff);
+        let tokens =
+            syntax::cached_diff_tokens_cancellable(&file.path, &diff, || false).unwrap_or_default();
         let syntax_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = Instant::now();
+        let cached_tokens =
+            syntax::cached_diff_tokens_cancellable(&file.path, &diff, || false).unwrap_or_default();
+        let syntax_cached_ms = started.elapsed().as_secs_f64() * 1000.;
         files.push(json!({
             "path": file.path,
             "read_ms": read_ms,
             "syntax_ms": syntax_ms,
+            "syntax_cached_ms": syntax_cached_ms,
+            "syntax_cache_reused": std::sync::Arc::ptr_eq(&tokens, &cached_tokens),
             "hunks": diff.hunks.len(),
             "lines": diff.hunks.iter().map(|h| h.lines.len()).sum::<usize>(),
             "tokens": tokens.iter().map(Vec::len).sum::<usize>(),
+            "token_rows": tokens.len(),
             "truncated": diff.truncated,
         }));
     }

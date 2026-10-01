@@ -9,12 +9,53 @@ use serde::Serialize;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 const SCROLL_SECONDS: f32 = 3.0;
 const SCROLL_SPEED: f32 = 2_400.0;
 const MAX_FRAME_SAMPLES: usize = 2_000;
+const BURST_SELECTIONS: usize = 60;
+const BURST_INTERVAL: Duration = Duration::from_millis(33);
+
+#[derive(Default, Serialize)]
+struct Operations {
+    timings_ms: BTreeMap<&'static str, Vec<f64>>,
+    counts: BTreeMap<&'static str, usize>,
+    counts_by_phase: BTreeMap<&'static str, BTreeMap<&'static str, usize>>,
+    #[serde(skip)]
+    phase: &'static str,
+}
+
+fn operations() -> &'static Mutex<Operations> {
+    static OPERATIONS: OnceLock<Mutex<Operations>> = OnceLock::new();
+    OPERATIONS.get_or_init(|| Mutex::new(Operations::default()))
+}
+
+pub fn record_operation(name: &'static str, duration: Duration) {
+    let mut operations = operations()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let samples = operations.timings_ms.entry(name).or_default();
+    if samples.len() < MAX_FRAME_SAMPLES {
+        samples.push(duration.as_secs_f64() * 1_000.0);
+    }
+}
+
+pub fn record_count(name: &'static str) {
+    let mut operations = operations()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *operations.counts.entry(name).or_default() += 1;
+    let phase = operations.phase;
+    *operations
+        .counts_by_phase
+        .entry(phase)
+        .or_default()
+        .entry(name)
+        .or_default() += 1;
+}
 
 /// An opt-in benchmark cannot fall back to the user's repository or cache.
 pub struct Configuration {
@@ -105,6 +146,7 @@ pub struct PerfSnapshot {
     pub details_ready: bool,
     pub diff_ready: bool,
     pub syntax_ready: bool,
+    pub coloring: bool,
     pub selected_index: usize,
     /// 0 or 1 for the two small syntax targets; `None` for another file.
     pub syntax_target: Option<usize>,
@@ -121,6 +163,7 @@ pub struct PerfSnapshot {
 #[derive(Debug, Clone, Copy)]
 pub enum PerfAction {
     SelectCommit(usize),
+    SelectCommitKeyboard(usize),
     OpenSyntaxFile(usize),
     OpenHeavyDiff,
     CloseDiff,
@@ -148,6 +191,7 @@ struct Report {
     status: &'static str,
     timings_ms: BTreeMap<String, Vec<f64>>,
     frames: BTreeMap<String, Frames>,
+    operations: Operations,
     workload: Workload,
     elapsed_ms: f64,
     launch_overhead_ms: f64,
@@ -162,6 +206,7 @@ struct Workload {
     heavy_diff_rows: usize,
     heavy_diff_colored: usize,
     selection_samples: usize,
+    burst_selections: usize,
     syntax_samples: usize,
     scroll_duration_ms: usize,
     scroll_speed_px_s: usize,
@@ -179,6 +224,8 @@ enum Stage {
     Startup,
     Index,
     Select,
+    Burst,
+    BurstRestore,
     Syntax,
     Heavy,
     DiffScroll,
@@ -203,6 +250,8 @@ pub struct PerfSession {
     sample: usize,
     samples: usize,
     action_sent: bool,
+    syntax_raw_ready: bool,
+    burst_last_selection: Option<Instant>,
     ready_submission: Option<u64>,
     collector: FrameTimingCollector,
     submissions: u64,
@@ -236,6 +285,9 @@ impl PerfSession {
             .max(0.0);
         // Enable only in benchmark runs. Profiler task locations are never exported.
         profiler::set_trace_enabled(true);
+        *operations()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Operations::default();
         let phase_path = output.with_extension("phase");
         let mut session = Self {
             scroll_files: configuration.scroll_files,
@@ -249,6 +301,8 @@ impl PerfSession {
             sample: 0,
             samples,
             action_sent: false,
+            syntax_raw_ready: false,
+            burst_last_selection: None,
             ready_submission: None,
             collector: FrameTimingCollector::new(),
             submissions: 0,
@@ -261,6 +315,7 @@ impl PerfSession {
                 status: "ok",
                 timings_ms: BTreeMap::new(),
                 frames: BTreeMap::new(),
+                operations: Operations::default(),
                 workload: Workload {
                     scroll_duration_ms: 3_000,
                     scroll_speed_px_s: 2_400,
@@ -277,15 +332,20 @@ impl PerfSession {
         Ok(session)
     }
 
-    fn phase(&mut self, name: &str) -> Result<(), String> {
+    fn phase(&mut self, name: &'static str) -> Result<(), String> {
+        operations()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .phase = name;
         std::fs::write(&self.phase_path, name).map_err(|e| e.to_string())
     }
 
-    fn transition(&mut self, stage: Stage, phase: &str) {
+    fn transition(&mut self, stage: Stage, phase: &'static str) {
         self.stage = stage;
         self.stage_started = Instant::now();
         self.sample = 0;
         self.action_sent = false;
+        self.burst_last_selection = None;
         self.ready_submission = None;
         self.last_submission_ms = None;
         if let Err(error) = self.phase(phase) {
@@ -311,6 +371,9 @@ impl PerfSession {
             Stage::DiffScroll => Some("diff_scroll"),
             Stage::HistoryScroll => Some("history_scroll"),
             Stage::FileScroll => Some("file_list_scroll"),
+            Stage::Select => Some("selection"),
+            Stage::Burst => Some("selection_burst"),
+            Stage::Syntax => Some("syntax"),
             _ => None,
         };
         for event in self.collector.collect_unseen() {
@@ -371,7 +434,9 @@ impl PerfSession {
 
     /// Quiet polling for idle/index; frame-paced while measuring visual changes.
     pub fn wake_after(&self) -> Duration {
-        if matches!(self.stage, Stage::Idle | Stage::Index) {
+        if self.stage == Stage::Burst && self.sample < BURST_SELECTIONS {
+            burst_wait(self.burst_last_selection, Instant::now())
+        } else if matches!(self.stage, Stage::Idle | Stage::Index) {
             Duration::from_millis(100)
         } else {
             Duration::ZERO
@@ -494,20 +559,69 @@ impl PerfSession {
                     if self.sample >= self.samples {
                         self.report.workload.selection_samples = self.sample;
                         self.report.workload.changed_files = snapshot.file_count;
-                        self.transition(Stage::Syntax, "syntax");
+                        self.transition(Stage::Burst, "selection_burst");
                     }
                 }
+            }
+            Stage::Burst => {
+                if self.sample < BURST_SELECTIONS {
+                    let now = Instant::now();
+                    if burst_wait(self.burst_last_selection, now).is_zero() {
+                        if let Some(previous) = self.burst_last_selection {
+                            self.timing(
+                                "burst_inter_selection",
+                                now.duration_since(previous).as_secs_f64() * 1_000.0,
+                            );
+                        }
+                        self.burst_last_selection = Some(now);
+                        let target = burst_target(self.sample, snapshot.history_total);
+                        self.sample += 1;
+                        if self.sample == BURST_SELECTIONS {
+                            self.stage_started = now;
+                        }
+                        return Some(PerfAction::SelectCommitKeyboard(target));
+                    }
+                } else {
+                    let target = burst_target(BURST_SELECTIONS - 1, snapshot.history_total);
+                    if self.submitted_ready(
+                        snapshot.details_ready && snapshot.selected_index == target,
+                        "burst_last_details",
+                    ) {
+                        self.timing(
+                            "burst_last_details",
+                            self.stage_started.elapsed().as_secs_f64() * 1_000.0,
+                        );
+                        self.report.workload.burst_selections = self.sample;
+                        self.transition(Stage::BurstRestore, "selection_restore");
+                        return Some(PerfAction::SelectCommit(0));
+                    }
+                }
+            }
+            Stage::BurstRestore if snapshot.details_ready && snapshot.selected_index == 0 => {
+                self.transition(Stage::Syntax, "syntax");
             }
             Stage::Syntax => {
                 let target = self.sample % 2;
                 if !self.action_sent {
                     self.stage_started = Instant::now();
                     self.action_sent = true;
+                    self.syntax_raw_ready = false;
                     return Some(PerfAction::OpenSyntaxFile(target));
+                }
+                if !self.syntax_raw_ready
+                    && snapshot.diff_ready
+                    && snapshot.syntax_target == Some(target)
+                {
+                    self.syntax_raw_ready = true;
+                    self.timing(
+                        "select_raw_diff_cpu_ready",
+                        self.stage_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
                 }
                 if self.submitted_ready(
                     snapshot.diff_ready
                         && snapshot.syntax_ready
+                        && !snapshot.coloring
                         && snapshot.syntax_target == Some(target),
                     "select_colored_diff",
                 ) {
@@ -527,10 +641,18 @@ impl PerfSession {
             Stage::Heavy => {
                 if !self.action_sent {
                     self.action_sent = true;
+                    self.syntax_raw_ready = false;
                     return Some(PerfAction::OpenHeavyDiff);
                 }
+                if !self.syntax_raw_ready && snapshot.diff_ready && snapshot.heavy_diff {
+                    self.syntax_raw_ready = true;
+                    self.timing(
+                        "open_heavy_raw_cpu_ready",
+                        self.stage_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
+                }
                 if self.submitted_ready(
-                    snapshot.diff_ready && snapshot.heavy_diff,
+                    snapshot.diff_ready && snapshot.heavy_diff && !snapshot.coloring,
                     "open_heavy_diff",
                 ) {
                     self.timing(
@@ -590,6 +712,11 @@ impl PerfSession {
         self.stage = Stage::Done;
         self.report.elapsed_ms =
             self.started.elapsed().as_secs_f64() * 1_000.0 + self.report.launch_overhead_ms;
+        self.report.operations = std::mem::take(
+            &mut *operations()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
         let temporary = self.output.with_extension("tmp");
         if let Ok(json) = serde_json::to_vec_pretty(&self.report)
             && std::fs::write(&temporary, json).is_ok()
@@ -601,10 +728,43 @@ impl PerfSession {
     }
 }
 
+fn burst_target(sample: usize, total: usize) -> usize {
+    (sample + 1).min(total.saturating_sub(1))
+}
+
+// Schedule from the last dispatched action. After a slow render/Git step, an
+// absolute schedule would catch up by sending multiple keys less than 33 ms apart.
+fn burst_wait(previous: Option<Instant>, now: Instant) -> Duration {
+    previous.map_or(Duration::ZERO, |previous| {
+        BURST_INTERVAL.saturating_sub(now.duration_since(previous))
+    })
+}
+
 #[cfg(test)]
 mod configuration_tests {
     use super::Configuration;
     use std::path::PathBuf;
+
+    #[test]
+    fn burst_pacing_waits_from_the_actual_last_key_without_catching_up() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        assert_eq!(super::burst_wait(None, start), Duration::ZERO);
+        assert_eq!(
+            super::burst_wait(Some(start), start + Duration::from_millis(32)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            super::burst_wait(Some(start), start + Duration::from_millis(33)),
+            Duration::ZERO
+        );
+        let delayed = start + Duration::from_millis(200);
+        assert_eq!(super::burst_wait(Some(start), delayed), Duration::ZERO);
+        assert_eq!(
+            super::burst_wait(Some(delayed), delayed),
+            Duration::from_millis(33)
+        );
+    }
 
     fn absolute(name: &str) -> PathBuf {
         PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }).join(name)

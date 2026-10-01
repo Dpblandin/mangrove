@@ -21,13 +21,12 @@ use std::{
     collections::{HashMap, VecDeque},
     ops::Range,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 256;
 const MAX_CACHE_TOKENS: usize = 200_000;
-
 pub enum InspectorEvent {
     ModeChanged(bool),
     NavigateCommit(String),
@@ -199,10 +198,11 @@ impl DiffCache {
             }
             return;
         }
+        let old = self.entries.get(&key);
         if background
-            && (self.entries.len() >= MAX_CACHE_ENTRIES
-                || self.bytes + bytes > MAX_CACHE_BYTES
-                || self.tokens + tokens > MAX_CACHE_TOKENS)
+            && (self.entries.len() + usize::from(old.is_none()) > MAX_CACHE_ENTRIES
+                || self.bytes - old.map_or(0, |cached| cached.bytes) + bytes > MAX_CACHE_BYTES
+                || self.tokens - old.map_or(0, |cached| cached.tokens) + tokens > MAX_CACHE_TOKENS)
         {
             self.background_full = true;
             return;
@@ -281,10 +281,44 @@ struct ReadRequest {
     kind: ReadKind,
 }
 enum ReadResult {
-    Commit(Arc<CommitDetails>, Option<DiffSnapshot>),
+    Commit(Arc<CommitDetails>),
     Stash(Arc<StashDetails>),
     Status(Arc<WorkingTreeStatus>),
     Diff(PreparedDiff),
+}
+
+struct ColorRequest {
+    revision: Revision,
+    selection: Selection,
+    file: FileChoice,
+    prepared: PreparedDiff,
+    background: bool,
+}
+
+impl ReadRequest {
+    fn current(&self, revision: Revision) -> bool {
+        match &self.kind {
+            ReadKind::Status => {
+                self.revision.repository == revision.repository
+                    && self.revision.status == revision.status
+            }
+            ReadKind::Commit { .. } | ReadKind::Stash(_) => {
+                self.revision.selection_matches(revision)
+            }
+            ReadKind::Diff { selection, .. } => {
+                self.revision.file_matches(revision)
+                    && (!matches!(selection, Selection::Working)
+                        || self.revision.mutable_selection_matches(revision))
+            }
+        }
+    }
+}
+impl ColorRequest {
+    fn current(&self, revision: Revision) -> bool {
+        self.revision.file_matches(revision)
+            && (!matches!(self.selection, Selection::Working)
+                || self.revision.mutable_selection_matches(revision))
+    }
 }
 
 pub struct InspectorView {
@@ -294,6 +328,13 @@ pub struct InspectorView {
     selection: Selection,
     revision: Revision,
     details: Option<Arc<CommitDetails>>,
+    commit_message: Option<(SharedString, SharedString)>,
+    live_revision: Arc<Mutex<Revision>>,
+    color_active: bool,
+    color_pending: Option<ColorRequest>,
+    color_task: Option<Task<()>>,
+    selection_debounce: Option<Task<()>>,
+    last_keyboard_selection: Option<Instant>,
     stash: Option<Arc<StashDetails>>,
     status: Option<Arc<WorkingTreeStatus>>,
     stash_area: String,
@@ -336,6 +377,19 @@ pub struct InspectorView {
 impl EventEmitter<InspectorEvent> for InspectorView {}
 
 impl InspectorView {
+    fn update_live_revision(&mut self) {
+        *self
+            .live_revision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.revision;
+        if self
+            .color_pending
+            .as_ref()
+            .is_some_and(|pending| !pending.current(self.revision))
+        {
+            self.color_pending = None;
+        }
+    }
     pub fn new(engine: Arc<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let gate = Arc::new(Mutex::new(()));
         let viewer = cx.new(|cx| CodeView::new(window, cx));
@@ -369,6 +423,18 @@ impl InspectorView {
                 file: 0,
             },
             details: None,
+            commit_message: None,
+            live_revision: Arc::new(Mutex::new(Revision {
+                status: 0,
+                repository: 0,
+                selection: 0,
+                file: 0,
+            })),
+            color_active: false,
+            color_pending: None,
+            color_task: None,
+            selection_debounce: None,
+            last_keyboard_selection: None,
             stash: None,
             status: None,
             stash_area: "worktree".into(),
@@ -413,7 +479,11 @@ impl InspectorView {
         self.revision.repository += 1;
         self.revision.selection += 1;
         self.revision.file += 1;
+        self.update_live_revision();
         self.clear_image_preview(cx);
+        self.commit_message = None;
+        self.selection_debounce = None;
+        self.last_keyboard_selection = None;
         self.repository = None;
         self.selection = Selection::None;
         self.details = None;
@@ -457,8 +527,11 @@ impl InspectorView {
         self.revision.repository += 1;
         self.revision.selection += 1;
         self.revision.file += 1;
+        self.update_live_revision();
         self.clear_image_preview(cx);
         self.repository = Some(repository);
+        self.selection_debounce = None;
+        self.last_keyboard_selection = None;
         self.pending = None;
         self.pending_status = true;
         self.cache.clear();
@@ -579,8 +652,19 @@ impl InspectorView {
         self.details.as_ref()
     }
     #[cfg(feature = "app-benchmark")]
+    pub fn is_coloring(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.prepared.as_ref())
+            .is_some_and(|prepared| !prepared.syntax_ready)
+    }
+    #[cfg(feature = "app-benchmark")]
     pub fn is_loading(&self) -> bool {
         self.details_loading || self.diff_loading
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn details_ready(&self) -> bool {
+        !self.details_loading && self.details.is_some()
     }
     pub fn diff(&self) -> Option<&Arc<FileDiff>> {
         self.snapshot
@@ -662,11 +746,13 @@ impl InspectorView {
             return;
         }
         self.revision.status += 1;
+        self.update_live_revision();
         self.pending_status = true;
         self.status_loading = true;
         self.status_error = None;
         if matches!(self.selection, Selection::Working) {
             self.revision.file += 1;
+            self.update_live_revision();
             self.clear_image_preview(cx);
             self.cache.clear();
             self.preload_cursor = 0;
@@ -680,9 +766,19 @@ impl InspectorView {
         self.pump(cx);
         cx.notify();
     }
-    fn prepare_selection(&mut self, selection: Selection, cx: &mut Context<Self>) {
+    fn prepare_selection(&mut self, selection: Selection, cx: &mut Context<Self>) -> bool {
+        // Repeated keys only replace the pending commit intent. The retained
+        // panel is already disabled until details arrive, so keep its scroll
+        // handles and cached row callbacks together while it is unchanged.
+        let unchanged_panel = matches!(self.selection, Selection::Commit(_))
+            && matches!(selection, Selection::Commit(_))
+            && self.details_loading
+            && !self.workspace_open
+            && !self.compact
+            && self.error.is_none();
         self.revision.selection += 1;
         self.revision.file += 1;
+        self.update_live_revision();
         self.clear_image_preview(cx);
         let keep_commit = matches!(self.selection, Selection::Commit(_))
             && matches!(selection, Selection::Commit(_));
@@ -702,9 +798,12 @@ impl InspectorView {
         self.cache.clear();
         self.preload_task = None;
         self.preload_cursor = 0;
+        self.selection_debounce = None;
         self.pending = None;
-        self.scroll = std::array::from_fn(|_| UniformListScrollHandle::new());
-        self.active_file = [0; 3];
+        if !unchanged_panel {
+            self.scroll = std::array::from_fn(|_| UniformListScrollHandle::new());
+            self.active_file = [0; 3];
+        }
         self.viewer_dirty = true;
         let presentation = if keep_commit
             && let (Some(details), Some(snapshot), Some(repository)) =
@@ -725,23 +824,60 @@ impl InspectorView {
         };
         self.browser
             .update(cx, |view, cx| view.present(presentation, cx));
-        self.close_workspace(cx);
+        if !unchanged_panel {
+            self.close_workspace(cx);
+        }
+        !unchanged_panel
     }
     pub fn select_commit(&mut self, sha: String, cx: &mut Context<Self>) {
+        self.last_keyboard_selection = None;
+        self.select_commit_after(sha, None, cx);
+    }
+    pub fn select_commit_keyboard(&mut self, sha: String, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let delay = keyboard_selection_delay(
+            self.last_keyboard_selection
+                .map(|previous| now.duration_since(previous)),
+        );
+        self.last_keyboard_selection = Some(now);
+        self.select_commit_after(sha, delay, cx);
+    }
+    fn select_commit_after(
+        &mut self,
+        sha: String,
+        delay: Option<Duration>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(id) = self.repository.as_ref().map(|r| r.id.clone()) else {
             return;
         };
-        self.prepare_selection(Selection::Commit(sha.clone()), cx);
-        self.pending = Some(ReadRequest {
+        let panel_changed = self.prepare_selection(Selection::Commit(sha.clone()), cx);
+        let request = ReadRequest {
             revision: self.revision,
             id,
             kind: ReadKind::Commit {
                 sha,
                 preferred_key: None,
             },
-        });
-        self.pump(cx);
-        cx.notify();
+        };
+        if let Some(delay) = delay {
+            self.selection_debounce = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |view, cx| {
+                    if request.current(view.revision) {
+                        view.selection_debounce = None;
+                        view.pending = Some(request);
+                        view.pump(cx);
+                    }
+                });
+            }));
+        } else {
+            self.pending = Some(request);
+            self.pump(cx);
+        }
+        if panel_changed {
+            cx.notify();
+        }
     }
     pub fn select_stash(&mut self, sha: String, cx: &mut Context<Self>) {
         let Some(id) = self.repository.as_ref().map(|r| r.id.clone()) else {
@@ -762,6 +898,7 @@ impl InspectorView {
         }
         self.prepare_selection(Selection::Working, cx);
         self.revision.status += 1;
+        self.update_live_revision();
         self.rebuild_rows();
         self.details_loading = false;
         self.pending_status = true;
@@ -894,6 +1031,7 @@ impl InspectorView {
             return;
         };
         self.revision.file += 1;
+        self.update_live_revision();
         self.clear_image_preview(cx);
         let list = match &self.selection {
             Selection::Working if file.area == "staged" => 1,
@@ -946,6 +1084,7 @@ impl InspectorView {
             return;
         }
         if let Some(diff) = self.cache.get(&file.cache_key()) {
+            self.color(file.clone(), diff.clone(), false, cx);
             self.publish_diff(file, Some(diff), None, cx);
         } else {
             self.pending = Some(ReadRequest {
@@ -1007,6 +1146,7 @@ impl InspectorView {
         self.preload_cursor = 0;
         self.preload_task = None;
         self.revision.file += 1;
+        self.update_live_revision();
         self.clear_image_preview(cx);
         self.intent.clear();
         self.snapshot = None;
@@ -1016,7 +1156,7 @@ impl InspectorView {
         cx.notify();
     }
     fn pump(&mut self, cx: &mut Context<Self>) {
-        if self.active {
+        if self.active || self.selection_debounce.is_some() {
             return;
         }
         let request = if let Some(pending) = self.pending.take() {
@@ -1038,61 +1178,171 @@ impl InspectorView {
         self.active = true;
         let engine = self.engine.clone();
         let gate = self.gate.clone();
+        let live_revision = self.live_revision.clone();
         self.read_task = Some(cx.spawn(async move |this, cx| {
             let (request, result) = cx
                 .background_executor()
                 .spawn(async move {
-                    let _guard = gate.lock().unwrap_or_else(|p| p.into_inner());
-                    let result = match &request.kind {
-                        ReadKind::Commit { sha, preferred_key } => read_commit_snapshot(
-                            &engine,
-                            &request.id,
-                            sha,
-                            preferred_key.as_deref(),
-                        ),
-                        ReadKind::Stash(sha) => engine
-                            .stash_details(&request.id, sha)
-                            .map(|v| ReadResult::Stash(Arc::new(v))),
-                        ReadKind::Status => engine
-                            .working_tree_status(&request.id)
-                            .map(|v| ReadResult::Status(Arc::new(v))),
-                        ReadKind::Diff {
-                            selection, file, ..
-                        } => match selection {
-                            Selection::None => Err("Aucune sélection active.".into()),
-                            Selection::Commit(sha) => {
-                                engine.file_diff(&request.id, sha, file.index)
-                            }
-                            Selection::Working => {
-                                engine.working_tree_diff(&request.id, &file.area, &file.key)
-                            }
-                            Selection::Stash(sha) => {
-                                engine.stash_diff(&request.id, sha, &file.area, &file.key)
-                            }
+                    let current = || *live_revision.lock().unwrap_or_else(|p| p.into_inner());
+                    if !request.current(current()) {
+                        return (request, None);
+                    }
+                    #[cfg(feature = "app-benchmark")]
+                    let gate_start = Instant::now();
+                    let result = {
+                        let _guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+                        #[cfg(feature = "app-benchmark")]
+                        crate::perf::record_operation("gate_wait", gate_start.elapsed());
+                        if !request.current(current()) {
+                            return (request, None);
                         }
-                        .map(|value| {
-                            let diff = Arc::new(value);
-                            let tokens = syntax::cached_diff_tokens(&file.path, &diff);
-                            ReadResult::Diff(PreparedDiff { diff, tokens })
-                        }),
+                        #[cfg(feature = "app-benchmark")]
+                        let read_start = Instant::now();
+                        #[cfg(feature = "app-benchmark")]
+                        crate::perf::record_count("reads_started");
+                        let result = match &request.kind {
+                            ReadKind::Commit { sha, .. } => engine
+                                .commit_details_shared(&request.id, sha)
+                                .map(ReadResult::Commit),
+                            ReadKind::Stash(sha) => engine
+                                .stash_details(&request.id, sha)
+                                .map(|v| ReadResult::Stash(Arc::new(v))),
+                            ReadKind::Status => engine
+                                .working_tree_status(&request.id)
+                                .map(|v| ReadResult::Status(Arc::new(v))),
+                            ReadKind::Diff {
+                                selection, file, ..
+                            } => match selection {
+                                Selection::None => Err("Aucune sélection active.".into()),
+                                Selection::Commit(sha) => {
+                                    engine.file_diff(&request.id, sha, file.index)
+                                }
+                                Selection::Working => {
+                                    engine.working_tree_diff(&request.id, &file.area, &file.key)
+                                }
+                                Selection::Stash(sha) => {
+                                    engine.stash_diff(&request.id, sha, &file.area, &file.key)
+                                }
+                            }
+                            .map(|value| ReadResult::Diff(PreparedDiff::raw(Arc::new(value)))),
+                        };
+                        #[cfg(feature = "app-benchmark")]
+                        {
+                            let stage = match &request.kind {
+                                ReadKind::Commit { .. } => "details_git",
+                                ReadKind::Diff { .. } => "patch_git",
+                                _ => "status_git",
+                            };
+                            crate::perf::record_operation(stage, read_start.elapsed());
+                        }
+                        result
                     };
+                    let result = request.current(current()).then_some(result);
                     (request, result)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.active = false;
-                view.accept(request, result, cx);
+                if let Some(result) = result {
+                    view.accept(request, result, cx);
+                } else {
+                    #[cfg(feature = "app-benchmark")]
+                    crate::perf::record_count("stale_reads");
+                }
                 view.pump(cx);
             });
         }));
     }
+
+    fn color(
+        &mut self,
+        file: FileChoice,
+        prepared: PreparedDiff,
+        background: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if prepared.syntax_ready {
+            return;
+        }
+        self.color_pending = Some(ColorRequest {
+            revision: self.revision,
+            selection: self.selection.clone(),
+            file,
+            prepared,
+            background,
+        });
+        self.pump_color(cx);
+    }
+
+    fn pump_color(&mut self, cx: &mut Context<Self>) {
+        if self.color_active {
+            return;
+        }
+        let Some(mut request) = self.color_pending.take() else {
+            return;
+        };
+        self.color_active = true;
+        let live_revision = self.live_revision.clone();
+        self.color_task = Some(cx.spawn(async move |this, cx| {
+            let (request, colored) = cx
+                .background_executor()
+                .spawn(async move {
+                    #[cfg(feature = "app-benchmark")]
+                    let syntax_start = Instant::now();
+                    let tokens = syntax::cached_diff_tokens_cancellable(
+                        &request.file.path,
+                        &request.prepared.diff,
+                        || {
+                            !request
+                                .current(*live_revision.lock().unwrap_or_else(|p| p.into_inner()))
+                        },
+                    );
+                    #[cfg(feature = "app-benchmark")]
+                    crate::perf::record_operation("syntax", syntax_start.elapsed());
+                    let colored = if let Some(tokens) = tokens {
+                        request.prepared.tokens = tokens;
+                        request.prepared.syntax_ready = true;
+                        true
+                    } else {
+                        false
+                    };
+                    (request, colored)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.color_active = false;
+                if colored && request.current(view.revision) {
+                    view.cache.remember(
+                        request.file.cache_key(),
+                        request.prepared.clone(),
+                        request.background,
+                    );
+                    if view
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.file.same_identity(&request.file))
+                    {
+                        view.publish_diff(request.file, Some(request.prepared), None, cx);
+                    }
+                } else {
+                    #[cfg(feature = "app-benchmark")]
+                    crate::perf::record_count("stale_colors");
+                }
+                view.pump_color(cx);
+                view.schedule_preload(cx);
+            });
+        }));
+    }
+
     fn accept(
         &mut self,
         request: ReadRequest,
         result: Result<ReadResult, String>,
         cx: &mut Context<Self>,
     ) {
-        if request.revision.repository != self.revision.repository {
+        if !request.current(self.revision) {
+            #[cfg(feature = "app-benchmark")]
+            crate::perf::record_count("stale_reads");
             return;
         }
         let mut changed = true;
@@ -1174,49 +1424,67 @@ impl InspectorView {
             {
                 self.details_loading = false;
                 match result {
-                    Ok(ReadResult::Commit(details, snapshot)) => {
-                        self.details = Some(details);
-                        self.snapshot = snapshot;
+                    Ok(ReadResult::Commit(details)) => {
+                        // The retained panel's list belongs to the old commit.
+                        // Reset once for the new files, then reveal the chosen
+                        // preview below after rebuilding rows.
+                        self.scroll = std::array::from_fn(|_| UniformListScrollHandle::new());
+                        self.active_file = [0; 3];
                         let preferred_key = match &request.kind {
                             ReadKind::Commit { preferred_key, .. } => preferred_key.as_deref(),
                             _ => None,
                         };
-                        self.intent.restore_commit(
-                            preferred_key,
-                            self.snapshot.as_ref().map(|snapshot| &snapshot.file),
-                        );
+                        let file = preview_choice(&details, preferred_key);
+                        self.intent.restore_commit(preferred_key, file.as_ref());
+                        let mut message = details.message.splitn(2, '\n');
+                        self.commit_message = Some((
+                            message
+                                .next()
+                                .filter(|title| !title.is_empty())
+                                .unwrap_or("Sans message")
+                                .to_owned()
+                                .into(),
+                            message.next().unwrap_or("").trim().to_owned().into(),
+                        ));
+                        self.details = Some(details);
+                        self.snapshot = None;
                         self.viewer_dirty = true;
-                        self.diff_loading = false;
-                        if let Some(snapshot) = &self.snapshot {
-                            let file = snapshot.file.clone();
-                            if let Some(prepared) = &snapshot.prepared {
-                                self.cache
-                                    .remember(file.cache_key(), prepared.clone(), false);
-                            }
+                        if let Some(file) = file {
+                            self.diff_loading = true;
                             if let (Some(repository), Selection::Commit(sha)) =
                                 (&self.repository, &self.selection)
                             {
                                 let target = FileTarget {
                                     session_id: repository.id.clone(),
                                     sha: sha.clone(),
-                                    file_key: file.key,
-                                    path: file.path,
-                                    old_path: file.old_path,
-                                    status: file.status,
+                                    file_key: file.key.clone(),
+                                    path: file.path.clone(),
+                                    old_path: file.old_path.clone(),
+                                    status: file.status.clone(),
                                 };
                                 let presentation =
-                                    snapshot.presentation(self.revision.file, target, false);
+                                    FilePresentation::loading(self.revision.file, target, None);
                                 self.browser
                                     .update(cx, |view, cx| view.present(presentation, cx));
                             }
+                            self.pending = Some(ReadRequest {
+                                revision: self.revision,
+                                id: request.id,
+                                kind: ReadKind::Diff {
+                                    selection: self.selection.clone(),
+                                    file,
+                                    background: false,
+                                },
+                            });
                         } else {
+                            self.diff_loading = false;
                             let presentation = FilePresentation::empty(self.revision.file);
                             self.browser
                                 .update(cx, |view, cx| view.present(presentation, cx));
-                        }
-                        if let Some(open) = self.restore_open.take() {
-                            self.workspace_open = open;
-                            cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+                            if let Some(open) = self.restore_open.take() {
+                                self.workspace_open = open;
+                                cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+                            }
                         }
                     }
                     Ok(ReadResult::Stash(stash)) => {
@@ -1248,11 +1516,11 @@ impl InspectorView {
                 }
                 self.rebuild_rows();
                 if matches!(self.selection, Selection::Commit(_))
-                    && let Some(snapshot) = &self.snapshot
-                    && let Some(position) = self
-                        .rows("")
-                        .iter()
-                        .position(|row| row.key == snapshot.file.key)
+                    && let Some(ReadRequest {
+                        kind: ReadKind::Diff { file, .. },
+                        ..
+                    }) = &self.pending
+                    && let Some(position) = self.rows("").iter().position(|row| row.key == file.key)
                 {
                     self.active_file[0] = position;
                     self.scroll[0].scroll_to_item(position, ScrollStrategy::Nearest);
@@ -1287,21 +1555,10 @@ impl InspectorView {
             {
                 match result {
                     Ok(ReadResult::Diff(diff)) => {
-                        let promoted = background
-                            && self.diff_loading
-                            && self
-                                .intent
-                                .choice()
-                                .is_some_and(|intent| intent.same_identity(&file));
-                        self.cache.remember(
-                            file.cache_key(),
-                            diff.clone(),
-                            background && !promoted,
-                        );
-                        if promoted {
-                            self.pending = None;
-                        }
-                        if promoted || !background && request.revision.file_matches(self.revision) {
+                        self.cache
+                            .remember(file.cache_key(), diff.clone(), background);
+                        self.color(file.clone(), diff.clone(), background, cx);
+                        if !background {
                             self.publish_diff(file, Some(diff), None, cx);
                         } else {
                             changed = false;
@@ -1325,6 +1582,8 @@ impl InspectorView {
     }
     fn schedule_preload(&mut self, cx: &mut Context<Self>) {
         if self.preload_task.is_some()
+            || self.color_active
+            || self.color_pending.is_some()
             || self.active
             || self.pending.is_some()
             || self.details_loading
@@ -1435,6 +1694,8 @@ impl InspectorView {
             .unwrap_or_default();
         let error = self.snapshot.as_ref().and_then(|s| s.error.clone());
         let loading = self.diff_loading || self.details_loading;
+        #[cfg(feature = "app-benchmark")]
+        let prepare_start = Instant::now();
         self.viewer.update(cx, |view, cx| {
             if let Some(prepared) = prepared {
                 view.set_prepared_diff(prepared.diff, path, prepared.tokens, window, cx);
@@ -1444,6 +1705,8 @@ impl InspectorView {
             view.set_loading(loading, cx);
             view.set_error(error, cx);
         });
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_operation("ui_prepare", prepare_start.elapsed());
     }
     pub fn render_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if matches!(self.selection, Selection::Commit(_)) {
@@ -1944,13 +2207,10 @@ impl InspectorView {
         let Some(details) = self.details.clone() else {
             return panel.child(if self.details_loading{self.state("Lecture du commit…","",IconName::GitCommitHorizontal,false)}else{self.state("Chaque commit a son histoire","Sélectionnez un commit pour découvrir son message, ses fichiers et ses modifications.",IconName::GitCommitHorizontal,false)}).into_any_element();
         };
-        let mut lines = details.message.splitn(2, '\n');
-        let title = lines
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Sans message")
-            .to_owned();
-        let description = lines.next().unwrap_or("").trim().to_owned();
+        if let Some(limit) = &details.similarity_limited {
+            panel = panel.child(notice(limit.clone(), p.warning, o));
+        }
+        let (title, description) = self.commit_message.clone().unwrap_or_default();
         let sha = details.sha.clone();
         let parent = if details.parents.len() > 1 {
             format!(
@@ -2307,6 +2567,9 @@ impl InspectorView {
         if let Some(error) = &self.status_error {
             panel = panel.child(notice(error.clone(), p.danger, o));
         }
+        if let Some(limit) = &status.similarity_limited {
+            panel = panel.child(notice(limit.clone(), p.warning, o));
+        }
         panel = panel.child(self.mode_controls(false, cx));
         let unstaged_small = status.unstaged.len() < status.staged.len();
         let empty = if unstaged_small {
@@ -2474,39 +2737,22 @@ impl InspectorView {
         panel.into_any_element()
     }
 }
-fn read_commit_snapshot(
-    engine: &Workspace,
-    id: &str,
-    sha: &str,
-    preferred_key: Option<&str>,
-) -> Result<ReadResult, String> {
-    let details = Arc::new(engine.commit_details(id, sha)?);
-    let file = preferred_key
+fn keyboard_selection_delay(previous: Option<Duration>) -> Option<Duration> {
+    previous
+        .filter(|elapsed| *elapsed <= Duration::from_millis(150))
+        .map(|_| Duration::from_millis(70))
+}
+
+fn preview_choice(details: &CommitDetails, preferred_key: Option<&str>) -> Option<FileChoice> {
+    preferred_key
         .and_then(|key| details.files.iter().find(|file| file.file_key == key))
-        .or_else(|| details.files.first());
-    let snapshot = file.map(|file| {
-        let choice = FileChoice::changed(file, "");
-        match engine.file_diff(id, sha, file.index) {
-            Ok(diff) => {
-                let diff = Arc::new(diff);
-                let tokens = syntax::cached_diff_tokens(&choice.path, &diff);
-                DiffSnapshot {
-                    file: choice,
-                    prepared: Some(PreparedDiff { diff, tokens }),
-                    error: None,
-                }
-            }
-            Err(error) => DiffSnapshot {
-                file: choice,
-                prepared: None,
-                error: Some(error),
-            },
-        }
-    });
-    Ok(ReadResult::Commit(details, snapshot))
+        .or_else(|| details.files.first())
+        .map(|file| FileChoice::changed(file, ""))
 }
 impl Render for InspectorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_count("inspector_render");
         let _keep_subscriptions = &self.subscriptions;
         match self.selection {
             Selection::None | Selection::Commit(_) => self.render_commit(window, cx),
@@ -2609,7 +2855,88 @@ mod tests {
         super::PreparedDiff {
             diff,
             tokens: Arc::default(),
+            syntax_ready: true,
         }
+    }
+    #[test]
+    fn keyboard_bursts_delay_only_repeated_selection_intents() {
+        use std::time::Duration;
+        assert_eq!(super::keyboard_selection_delay(None), None);
+        assert_eq!(
+            super::keyboard_selection_delay(Some(Duration::from_millis(33))),
+            Some(Duration::from_millis(70))
+        );
+        assert_eq!(
+            super::keyboard_selection_delay(Some(Duration::from_millis(90))),
+            Some(Duration::from_millis(70))
+        );
+        assert_eq!(
+            super::keyboard_selection_delay(Some(Duration::from_millis(151))),
+            None
+        );
+    }
+    #[test]
+    fn obsolete_preloads_and_color_are_cancelled_without_cancelling_status() {
+        let revision = Revision {
+            status: 1,
+            repository: 1,
+            selection: 2,
+            file: 3,
+        };
+        let next_file = Revision {
+            file: 4,
+            ..revision
+        };
+        let next_status = Revision {
+            status: 2,
+            ..revision
+        };
+        let file = choice("a", 0, "unstaged");
+        let preload = super::ReadRequest {
+            revision,
+            id: "session".into(),
+            kind: super::ReadKind::Diff {
+                selection: super::Selection::Working,
+                file: file.clone(),
+                background: true,
+            },
+        };
+        assert!(preload.current(revision));
+        assert!(!preload.current(next_file));
+        assert!(!preload.current(next_status));
+        let color = super::ColorRequest {
+            revision,
+            selection: super::Selection::Working,
+            file,
+            prepared: diff(1),
+            background: true,
+        };
+        assert!(!color.current(next_file));
+        assert!(!color.current(next_status));
+        let status = super::ReadRequest {
+            revision,
+            id: "session".into(),
+            kind: super::ReadKind::Status,
+        };
+        assert!(status.current(next_file));
+        assert!(!status.current(next_status));
+        let commit = super::ReadRequest {
+            revision,
+            id: "session".into(),
+            kind: super::ReadKind::Commit {
+                sha: "immutable".into(),
+                preferred_key: None,
+            },
+        };
+        assert!(commit.current(next_status));
+        assert!(!commit.current(Revision {
+            selection: 3,
+            ..revision
+        }));
+        assert!(!commit.current(Revision {
+            repository: 2,
+            ..revision
+        }));
     }
     #[test]
     fn replacing_generation_cannot_publish_old_file_or_old_repository() {
@@ -2828,60 +3155,44 @@ mod tests {
         let sha = git(&["rev-parse", "HEAD"]);
         let workspace = mangrove_core::Workspace::new(base.join("cache")).unwrap();
         let repo = workspace.open_repository(path.to_str().unwrap()).unwrap();
-        let super::ReadResult::Commit(details, Some(snapshot)) =
-            super::read_commit_snapshot(&workspace, &repo.id, &sha, None).unwrap()
-        else {
-            panic!("first file preview must be prepared");
-        };
+        let details = workspace.commit_details_shared(&repo.id, &sha).unwrap();
+        let first = super::preview_choice(&details, None).unwrap();
+        let raw = super::PreparedDiff::raw(Arc::new(
+            workspace.file_diff(&repo.id, &sha, first.index).unwrap(),
+        ));
         assert_eq!(details.sha, sha);
-        assert_eq!(snapshot.file.path, details.files[0].path);
-        assert_eq!(snapshot.file.path, "a.rs");
-        assert_eq!(snapshot.prepared.as_ref().unwrap().diff.additions, 1);
-        assert!(snapshot.error.is_none());
-        assert!(
-            snapshot
-                .prepared
-                .as_ref()
-                .unwrap()
-                .tokens
-                .iter()
-                .flatten()
-                .any(|token| token.kind != crate::syntax::Kind::Plain)
-        );
+        assert_eq!(first.path, details.files[0].path);
+        assert_eq!(first.path, "a.rs");
+        assert_eq!(raw.diff.additions, 1);
+        assert!(!raw.syntax_ready);
+        assert!(raw.tokens.is_empty());
         let mut intent = FileIntent::default();
-        intent.restore_commit(None, Some(&snapshot.file));
+        intent.restore_commit(None, Some(&first));
         assert!(intent.choice().is_none());
 
         let key = &details.files[1].file_key;
-        let super::ReadResult::Commit(_, Some(restored)) =
-            super::read_commit_snapshot(&workspace, &repo.id, &sha, Some(key)).unwrap()
-        else {
-            panic!("chosen file must be restored");
-        };
-        assert_eq!(restored.file.path, "b.rs");
-        intent.restore_commit(Some(key), Some(&restored.file));
+        let restored = super::preview_choice(&details, Some(key)).unwrap();
+        assert_eq!(restored.path, "b.rs");
+        intent.restore_commit(Some(key), Some(&restored));
         assert_eq!(intent.choice().unwrap().path, "b.rs");
+        let patch = workspace.file_diff(&repo.id, &sha, restored.index).unwrap();
         assert!(
-            restored.prepared.unwrap().diff.hunks[0]
+            patch.hunks[0]
                 .lines
                 .iter()
                 .any(|line| line.content.contains("second"))
         );
 
         let missing_key = "missing-file-key";
-        let super::ReadResult::Commit(_, Some(fallback)) =
-            super::read_commit_snapshot(&workspace, &repo.id, &sha, Some(missing_key)).unwrap()
-        else {
-            panic!("a missing preferred key may fall back to the first preview");
-        };
-        assert_eq!(fallback.file.path, "a.rs");
-        intent.restore_commit(Some(missing_key), Some(&fallback.file));
+        let fallback = super::preview_choice(&details, Some(missing_key)).unwrap();
+        assert_eq!(fallback.path, "a.rs");
+        intent.restore_commit(Some(missing_key), Some(&fallback));
         assert!(intent.choice().is_none());
-
-        intent.select(snapshot.file.clone(), false);
-        intent.restore_commit(None, Some(&snapshot.file));
+        intent.select(first.clone(), false);
+        intent.restore_commit(None, Some(&first));
         assert!(intent.choice().is_none());
     }
+
     #[test]
     fn token_cache_budget_stops_prefetch_before_retaining_unbounded_color_data() {
         let mut cache = DiffCache::default();

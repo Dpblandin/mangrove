@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -8,24 +9,106 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
-use git2::{Diff, DiffDelta, DiffFindOptions, DiffOptions, ErrorCode, Repository};
+use git2::{Delta, Diff, DiffDelta, DiffOptions, ErrorCode, Repository};
 
 use crate::{
     changed_file,
     model::{FileDiff, FileImageData, FileImages, WorkingTreeFile, WorkingTreeStatus},
-    render_file_diff, render_patch, Result, MAX_CHANGED_FILES, MAX_FILE_SIZE,
+    render_patch, Result, MAX_CHANGED_FILES, MAX_FILE_SIZE,
 };
 
-pub(crate) fn status(repository: &Repository) -> Result<WorkingTreeStatus> {
+const MAX_IDENTITY_BYTES: usize = 2 * 1024 * 1024;
+
+struct FileIdentity {
+    old_path: Option<Vec<u8>>,
+    new_path: Option<Vec<u8>>,
+    status: Delta,
+}
+
+impl FileIdentity {
+    fn matches(&self, delta: &DiffDelta<'_>) -> bool {
+        self.status == delta.status()
+            && self.old_path.as_deref() == delta.old_file().path_bytes()
+            && self.new_path.as_deref() == delta.new_file().path_bytes()
+    }
+}
+
+/// Only identities are retained, never libgit2's workdir diff or file contents.
+/// A selected patch rechecks the index/workdir for these literal paths.
+#[derive(Default)]
+pub(crate) struct WorkingTreeCache {
+    staged: HashMap<Vec<u8>, FileIdentity>,
+    unstaged: HashMap<Vec<u8>, FileIdentity>,
+}
+
+impl WorkingTreeCache {
+    fn area(&self, area: &str) -> Result<&HashMap<Vec<u8>, FileIdentity>> {
+        match area {
+            "staged" => Ok(&self.staged),
+            "unstaged" => Ok(&self.unstaged),
+            _ => Err("Zone de modifications invalide : staged ou unstaged attendue.".into()),
+        }
+    }
+
+    fn remember(&mut self, area: &str, diff: &Diff<'_>, flags: &IndexFlags) {
+        let mut identities = HashMap::new();
+        let mut bytes = 0usize;
+        for delta in diff
+            .deltas()
+            .filter(|delta| eligible(flags, area, delta))
+            .take(MAX_CHANGED_FILES)
+        {
+            let old_path = delta.old_file().path_bytes().map(<[u8]>::to_vec);
+            let new_path = delta.new_file().path_bytes().map(<[u8]>::to_vec);
+            let Some(path) = new_path.as_ref().or(old_path.as_ref()) else {
+                continue;
+            };
+            bytes += path.len()
+                + old_path.as_ref().map_or(0, Vec::len)
+                + new_path.as_ref().map_or(0, Vec::len);
+            if bytes > MAX_IDENTITY_BYTES {
+                break;
+            }
+            identities.insert(
+                path.clone(),
+                FileIdentity {
+                    old_path,
+                    new_path,
+                    status: delta.status(),
+                },
+            );
+        }
+        match area {
+            "staged" => self.staged = identities,
+            "unstaged" => self.unstaged = identities,
+            _ => unreachable!(),
+        }
+    }
+}
+
+pub(crate) fn status(
+    repository: &Repository,
+    cache: &mut WorkingTreeCache,
+) -> Result<WorkingTreeStatus> {
     if repository.is_bare() {
         return Ok(WorkingTreeStatus::default());
     }
     let index = read_index(repository)?;
     let flags = index_flags(&index);
-    let staged = area_diff(repository, "staged", &index)?;
-    let unstaged = area_diff(repository, "unstaged", &index)?;
+    let (staged, staged_limit) = area_diff(repository, "staged", &index, None)?;
+    let (unstaged, unstaged_limit) = area_diff(repository, "unstaged", &index, None)?;
+    cache.remember("staged", &staged, &flags);
+    cache.remember("unstaged", &unstaged, &flags);
     Ok(WorkingTreeStatus {
         available: true,
+        similarity_limited: match (staged_limit, unstaged_limit) {
+            (None, None) => None,
+            (Some(limit), None) | (None, Some(limit)) => Some(limit),
+            (Some(staged), Some(unstaged)) if staged == unstaged => Some(staged),
+            (Some(staged), Some(unstaged)) => Some(format!(
+                "Index : {staged} Modifications locales : {unstaged}"
+            )),
+        },
         staged_count: staged
             .deltas()
             .filter(|delta| eligible(&flags, "staged", delta))
@@ -96,25 +179,17 @@ fn working_file(index: usize, delta: &DiffDelta<'_>) -> WorkingTreeFile {
     }
 }
 
-pub(crate) fn diff(repository: &Repository, area: &str, key: &str) -> Result<FileDiff> {
+pub(crate) fn diff(
+    repository: &Repository,
+    area: &str,
+    key: &str,
+    cache: &mut WorkingTreeCache,
+) -> Result<FileDiff> {
     let bytes = key_bytes(key)?;
     if repository.is_bare() {
         return Err("Ce dépôt bare ne possède pas de fichiers non commités.".into());
     }
-    let git_index = read_index(repository)?;
-    let flags = index_flags(&git_index);
-    let diff = area_diff(repository, area, &git_index)?;
-    let index = diff
-        .deltas()
-        .position(|delta| {
-            eligible(&flags, area, &delta)
-                && delta
-                    .new_file()
-                    .path_bytes()
-                    .or_else(|| delta.old_file().path_bytes())
-                    .is_some_and(|path| path == bytes)
-        })
-        .ok_or("Ce fichier a changé ou n'est plus présent dans cette liste.")?;
+    let (diff, index) = selected_diff(repository, area, &bytes, cache)?;
     let delta = diff.get_delta(index).ok_or("Fichier introuvable.")?;
     let path_bytes = delta
         .new_file()
@@ -132,28 +207,21 @@ pub(crate) fn diff(repository: &Repository, area: &str, key: &str) -> Result<Fil
     if area == "unstaged" {
         return worktree_patch(repository, &delta, &path);
     }
-    render_file_diff(&diff, index)
+    crate::commit_diff::render_bounded(repository, &diff, index)
 }
 
-pub(crate) fn images(repository: &Repository, area: &str, key: &str) -> Result<FileImages> {
+pub(crate) fn images(
+    repository: &Repository,
+    area: &str,
+    key: &str,
+    cache: &mut WorkingTreeCache,
+) -> Result<FileImages> {
     let bytes = crate::file_browser::path_bytes(key)?;
     if repository.is_bare() {
         return Err("Ce dépôt bare ne possède pas de fichiers non commités.".into());
     }
-    let index = read_index(repository)?;
-    let flags = index_flags(&index);
-    let diff = area_diff(repository, area, &index)?;
-    let delta = diff
-        .deltas()
-        .find(|delta| {
-            eligible(&flags, area, delta)
-                && delta
-                    .new_file()
-                    .path_bytes()
-                    .or_else(|| delta.old_file().path_bytes())
-                    == Some(bytes.as_slice())
-        })
-        .ok_or("Ce fichier a changé ou n’est plus présent dans cette liste.")?;
+    let (diff, selected) = selected_diff(repository, area, &bytes, cache)?;
+    let delta = diff.get_delta(selected).ok_or("Fichier introuvable.")?;
     if area == "staged" {
         return crate::images::delta(repository, &delta);
     }
@@ -187,14 +255,69 @@ pub(crate) fn images(repository: &Repository, area: &str, key: &str) -> Result<F
     })
 }
 
-fn area_diff<'a>(repository: &'a Repository, area: &str, index: &git2::Index) -> Result<Diff<'a>> {
+fn selected_diff<'a>(
+    repository: &'a Repository,
+    area: &str,
+    bytes: &[u8],
+    cache: &mut WorkingTreeCache,
+) -> Result<(Diff<'a>, usize)> {
+    let index = read_index(repository)?;
+    let flags = index_flags(&index);
+    if let Some(identity) = cache.area(area)?.get(bytes) {
+        let (filtered, _) = area_diff(repository, area, &index, Some(identity))?;
+        if let Some(selected) = filtered.deltas().position(|delta| {
+            eligible(&flags, area, &delta)
+                && delta
+                    .new_file()
+                    .path_bytes()
+                    .or_else(|| delta.old_file().path_bytes())
+                    == Some(bytes)
+                && (identity.status != Delta::Renamed || identity.matches(&delta))
+        }) {
+            return Ok((filtered, selected));
+        }
+        // Renames can become additions/deletions or reuse paths after the
+        // last status read. Resolve a new full snapshot only on this miss.
+    }
+    let (diff, _) = area_diff(repository, area, &index, None)?;
+    cache.remember(area, &diff, &flags);
+    let selected = diff
+        .deltas()
+        .position(|delta| {
+            eligible(&flags, area, &delta)
+                && delta
+                    .new_file()
+                    .path_bytes()
+                    .or_else(|| delta.old_file().path_bytes())
+                    == Some(bytes)
+        })
+        .ok_or("Ce fichier a changé ou n'est plus présent dans cette liste.")?;
+    Ok((diff, selected))
+}
+
+fn area_diff<'a>(
+    repository: &'a Repository,
+    area: &str,
+    index: &git2::Index,
+    selected: Option<&FileIdentity>,
+) -> Result<(Diff<'a>, Option<String>)> {
     let mut options = DiffOptions::new();
     // Never persist the stat-cache refresh performed during a worktree diff.
     options
         .update_index(false)
         .include_typechange(true)
         .include_unreadable(true)
+        .skip_binary_check(true)
         .max_size(MAX_FILE_SIZE);
+    if let Some(identity) = selected {
+        options.disable_pathspec_match(true);
+        for path in [&identity.old_path, &identity.new_path]
+            .into_iter()
+            .flatten()
+        {
+            options.pathspec(path.as_slice());
+        }
+    }
     let mut diff = match area {
         "staged" => {
             let head = match repository.head() {
@@ -219,16 +342,15 @@ fn area_diff<'a>(repository: &'a Repository, area: &str, index: &git2::Index) ->
         _ => return Err("Zone de modifications invalide : staged ou unstaged attendue.".into()),
     }
     .map_err(|e| e.to_string())?;
-    let mut find = DiffFindOptions::new();
-    find.renames(true)
-        .for_untracked(area == "unstaged")
-        .rename_limit(200);
-    diff.find_similar(Some(&mut find))
-        .map_err(|e| e.to_string())?;
-    Ok(diff)
+    let limitation = if selected.is_none_or(|identity| identity.status == Delta::Renamed) {
+        crate::similarity::find_renames(repository, &mut diff, area == "unstaged")?
+    } else {
+        None
+    };
+    Ok((diff, limitation))
 }
 
-fn relative_path(bytes: &[u8]) -> Result<PathBuf> {
+pub(crate) fn relative_path(bytes: &[u8]) -> Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
@@ -295,17 +417,21 @@ enum WorktreeContent {
     Oversized,
 }
 
-fn worktree_content(repository: &Repository, path: &Path) -> Result<WorktreeContent> {
-    validate_relative_path(path)?;
+pub(crate) fn open_worktree(repository: &Repository) -> Result<Dir> {
     let workdir = repository.workdir().ok_or("Worktree introuvable.")?;
     let root_parent = Dir::open_ambient_dir(
         workdir.parent().ok_or("Parent du worktree introuvable.")?,
         ambient_authority(),
     )
     .map_err(|error| error.to_string())?;
-    let mut directory = root_parent
+    root_parent
         .open_dir_nofollow(workdir.file_name().ok_or("Worktree invalide.")?)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+fn worktree_content(repository: &Repository, path: &Path) -> Result<WorktreeContent> {
+    validate_relative_path(path)?;
+    let mut directory = open_worktree(repository)?;
     let mut components = path.components().peekable();
     while let Some(component) = components.next() {
         let name = component.as_os_str();
@@ -456,4 +582,21 @@ fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -
     )
     .map_err(|error| error.to_string())?;
     render_patch(patch)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_root_replaced_by_a_symlink_is_not_followed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workdir = fixture.path().join("worktree");
+        let repository = Repository::init(&workdir).unwrap();
+        assert!(open_worktree(&repository).is_ok());
+        let relocated = fixture.path().join("relocated");
+        std::fs::rename(&workdir, &relocated).unwrap();
+        std::os::unix::fs::symlink(&relocated, &workdir).unwrap();
+        assert!(open_worktree(&repository).is_err());
+    }
 }

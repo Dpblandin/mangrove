@@ -1,0 +1,1170 @@
+{
+  "revision_before": "28825b7",
+  "note": "20 fresh processes per revision, filesystem cache uncontrolled, release component probe, no UI or queueing; first sample excluded after a separate warmup",
+  "samples": {
+    "before": [
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.414208,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.889625,
+            "syntax_ms": 505.288583,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.46925,
+            "syntax_ms": 0.066791,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.333958,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.906709,
+            "syntax_ms": 515.887791,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.570041,
+            "syntax_ms": 0.077833,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.452292,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.194083,
+            "syntax_ms": 527.1150409999999,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.7775,
+            "syntax_ms": 0.078083,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.388125,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.9925839999999999,
+            "syntax_ms": 520.95025,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.640625,
+            "syntax_ms": 0.07875,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.3755,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.949333,
+            "syntax_ms": 516.4535,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.600375,
+            "syntax_ms": 0.077291,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.522083,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.2531249999999998,
+            "syntax_ms": 510.50275,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.585791,
+            "syntax_ms": 0.078417,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.380042,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.050958,
+            "syntax_ms": 526.3902919999999,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.528542,
+            "syntax_ms": 0.06945799999999999,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.294,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.908292,
+            "syntax_ms": 525.641416,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.5972500000000001,
+            "syntax_ms": 0.079584,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.324417,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.871834,
+            "syntax_ms": 521.507125,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.560625,
+            "syntax_ms": 0.07341700000000001,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.402042,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.919875,
+            "syntax_ms": 518.817833,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.5575829999999999,
+            "syntax_ms": 0.079333,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.34299999999999997,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.877458,
+            "syntax_ms": 527.0027080000001,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.5417500000000001,
+            "syntax_ms": 0.077416,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.9889580000000001,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.161083,
+            "syntax_ms": 503.249833,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.518,
+            "syntax_ms": 0.073667,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.38337499999999997,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.964584,
+            "syntax_ms": 523.965542,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.5517500000000001,
+            "syntax_ms": 0.07104200000000001,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.33258400000000005,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.9199590000000001,
+            "syntax_ms": 524.136959,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.5640000000000001,
+            "syntax_ms": 0.077292,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.2825,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.000166,
+            "syntax_ms": 502.40929199999994,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.478917,
+            "syntax_ms": 0.071917,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.408334,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.985,
+            "syntax_ms": 501.762709,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.529291,
+            "syntax_ms": 0.06883299999999999,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.28850000000000003,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.910875,
+            "syntax_ms": 522.6585,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.5815,
+            "syntax_ms": 0.073916,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.313042,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.918042,
+            "syntax_ms": 523.5035,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.590209,
+            "syntax_ms": 0.076209,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.34425,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.874125,
+            "syntax_ms": 523.626041,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.718958,
+            "syntax_ms": 0.074917,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.527292,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.193208,
+            "syntax_ms": 516.3049159999999,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 0,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.6675420000000001,
+            "syntax_ms": 0.076833,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      }
+    ],
+    "after": [
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.321,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.91475,
+            "syntax_ms": 31.807416999999997,
+            "syntax_cached_ms": 0.013666,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.434125,
+            "syntax_ms": 0.006791,
+            "syntax_cached_ms": 0.00025,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.369291,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.761833,
+            "syntax_ms": 32.319542,
+            "syntax_cached_ms": 0.013791000000000001,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.606292,
+            "syntax_ms": 0.005084,
+            "syntax_cached_ms": 0.000167,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.334292,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.069334,
+            "syntax_ms": 32.314875,
+            "syntax_cached_ms": 0.012792000000000001,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.48962500000000003,
+            "syntax_ms": 0.005167,
+            "syntax_cached_ms": 0.000125,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.38675,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 0.896917,
+            "syntax_ms": 32.428125,
+            "syntax_cached_ms": 0.013709,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.397375,
+            "syntax_ms": 0.004541,
+            "syntax_cached_ms": 0.000125,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.362125,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.014875,
+            "syntax_ms": 32.936292,
+            "syntax_cached_ms": 0.013791999999999999,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 0.47475,
+            "syntax_ms": 0.005332999999999999,
+            "syntax_cached_ms": 0.000166,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 0.403875,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.142084,
+            "syntax_ms": 44.527166,
+            "syntax_cached_ms": 0.015042,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 3.1785419999999998,
+            "syntax_ms": 0.011084,
+            "syntax_cached_ms": 0.000417,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 1.800708,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 3.89075,
+            "syntax_ms": 52.648125,
+            "syntax_cached_ms": 0.013791000000000001,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 3.229083,
+            "syntax_ms": 0.00625,
+            "syntax_cached_ms": 0.000292,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 1.4732079999999999,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 5.568209,
+            "syntax_ms": 45.095749999999995,
+            "syntax_cached_ms": 0.013625000000000002,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 7.85925,
+            "syntax_ms": 0.01275,
+            "syntax_cached_ms": 0.000375,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 2.7680830000000003,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 6.252666,
+            "syntax_ms": 52.980167,
+            "syntax_cached_ms": 0.032,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 3.6698749999999998,
+            "syntax_ms": 0.006166,
+            "syntax_cached_ms": 0.00025,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 3.7757910000000003,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 7.3725,
+            "syntax_ms": 49.236625,
+            "syntax_cached_ms": 0.013916,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 6.899125,
+            "syntax_ms": 0.011125,
+            "syntax_cached_ms": 0.00033299999999999996,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 3.915916,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 5.940959,
+            "syntax_ms": 44.112167,
+            "syntax_cached_ms": 0.01375,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 6.287541,
+            "syntax_ms": 0.005542,
+            "syntax_cached_ms": 0.000166,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 6.557167,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 4.912209,
+            "syntax_ms": 65.62774999999999,
+            "syntax_cached_ms": 0.013791999999999999,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 3.003209,
+            "syntax_ms": 0.0053750000000000004,
+            "syntax_cached_ms": 0.000167,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 6.218042,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 3.937541,
+            "syntax_ms": 60.511833,
+            "syntax_cached_ms": 0.33799999999999997,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 6.223083,
+            "syntax_ms": 0.007958000000000002,
+            "syntax_cached_ms": 0.0005,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 5.36175,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 3.944541,
+            "syntax_ms": 45.945208,
+            "syntax_cached_ms": 0.013833,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 6.603958,
+            "syntax_ms": 0.005958000000000001,
+            "syntax_cached_ms": 0.000167,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 2.5807909999999996,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 3.0931669999999998,
+            "syntax_ms": 52.626875,
+            "syntax_cached_ms": 0.033290999999999994,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 7.541499999999999,
+            "syntax_ms": 0.0077919999999999994,
+            "syntax_cached_ms": 0.00029099999999999997,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 2.071833,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 7.413167,
+            "syntax_ms": 43.516916,
+            "syntax_cached_ms": 0.013958,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 6.02775,
+            "syntax_ms": 0.007125,
+            "syntax_cached_ms": 0.00029099999999999997,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 3.077584,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 3.868541,
+            "syntax_ms": 49.622375000000005,
+            "syntax_cached_ms": 0.014375,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 1.732458,
+            "syntax_ms": 0.005625000000000001,
+            "syntax_cached_ms": 0.000166,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 7.248416,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 8.157791,
+            "syntax_ms": 51.48025,
+            "syntax_cached_ms": 0.014959,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 2.023583,
+            "syntax_ms": 0.011208000000000001,
+            "syntax_cached_ms": 0.0005,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 3.671042,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 1.921666,
+            "syntax_ms": 168.35549999999998,
+            "syntax_cached_ms": 0.01425,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 3.683834,
+            "syntax_ms": 0.006416,
+            "syntax_cached_ms": 0.000209,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      },
+      {
+        "commit": "463ee07fed4593584291c61dc7631b79624d5111",
+        "file_count": 2,
+        "details_ms": 2.5080419999999997,
+        "files": [
+          {
+            "path": "many-hunks.ts",
+            "read_ms": 8.727959,
+            "syntax_ms": 51.693166999999995,
+            "syntax_cached_ms": 0.014209000000000001,
+            "syntax_cache_reused": true,
+            "hunks": 150,
+            "lines": 1200,
+            "tokens": 3900,
+            "token_rows": 1350,
+            "truncated": false
+          },
+          {
+            "path": "settings.json5",
+            "read_ms": 5.180083000000001,
+            "syntax_ms": 0.005541,
+            "syntax_cached_ms": 0.000167,
+            "syntax_cache_reused": true,
+            "hunks": 1,
+            "lines": 2,
+            "tokens": 18,
+            "token_rows": 3,
+            "truncated": false
+          }
+        ],
+        "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+      }
+    ]
+  }
+}
