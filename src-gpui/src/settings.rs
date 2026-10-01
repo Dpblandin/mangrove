@@ -7,7 +7,7 @@ use gpui_kit::{
     base::{Button, NumberInput, StepAction, input::MaskPattern, step_value},
     component::{
         Sizable,
-        input::{Input, InputEvent, InputState},
+        input::{Escape as InputEscape, Input, InputEvent, InputState},
         scroll::Scrollbar,
     },
     prelude::*,
@@ -94,6 +94,9 @@ impl SettingsView {
             self.interval = interval;
             self.error = None;
             self.saved = true;
+            if !self.input.read(cx).focus_handle(cx).is_focused(window) {
+                self.focus(window, cx);
+            }
             cx.emit(SettingsEvent::IntervalChanged(interval));
         } else {
             self.error = Some(format!(
@@ -170,6 +173,7 @@ impl Render for SettingsView {
 
         div()
             .id("settings-view")
+            .on_action(cx.listener(|_, _: &InputEscape, _, cx| cx.emit(SettingsEvent::Back)))
             .size_full()
             .flex()
             .flex_col()
@@ -358,7 +362,10 @@ impl Render for SettingsView {
                                                             .min_w_0()
                                                             .flex()
                                                             .gap(px(12.))
-                                                            .child(settings_button("settings-reset", "Annuler les modifications", p, offset).disabled(!changed).on_click(cx.listener(|this, _, window, cx| this.set_interval(this.interval, window, cx))))
+                                                            .child(settings_button("settings-reset", "Annuler les modifications", p, offset).disabled(!changed).on_click(cx.listener(|this, _, window, cx| {
+                                                                this.set_interval(this.interval, window, cx);
+                                                                this.focus(window, cx);
+                                                            })))
                                                             .child(settings_button("settings-save", "Enregistrer", p, offset).border_color(transparent_black()).bg(rgb(p.accent)).hover(move |style| style.bg(brightened(p.accent)).border_color(transparent_black())).disabled(!changed).on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))),
                                                     ),
                                             ),
