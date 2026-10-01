@@ -35,16 +35,14 @@ impl CommitFiles {
     pub(crate) fn file_diff(
         &self,
         repository: &Repository,
-        sha: &str,
+        oid: Oid,
         index: usize,
     ) -> Result<crate::model::FileDiff> {
         let file = self
             .0
             .get(index)
             .ok_or("Fichier introuvable dans ce commit.")?;
-        let commit = repository
-            .find_commit(Oid::from_str(sha).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let commit = repository.find_commit(oid).map_err(|e| e.to_string())?;
         let tree = commit.tree().map_err(|e| e.to_string())?;
         let parent = if commit.parent_count() > 0 {
             Some(
@@ -76,7 +74,7 @@ impl CommitFiles {
         if let Some(selected) = diff.deltas().position(|delta| file.matches(&delta)) {
             return render_file_diff(&diff, selected);
         }
-        let (_, diff) = crate::commit_diff(repository, sha)?;
+        let (_, diff) = crate::commit_diff(repository, &oid.to_string())?;
         render_file_diff(&diff, index)
     }
 }
@@ -193,14 +191,14 @@ mod tests {
             let cached = cache.get(id).unwrap();
             for index in 0..full.deltas().len() {
                 let expected = render_file_diff(&full, index).unwrap();
-                let actual = cached.file_diff(&repository, &sha, index).unwrap();
+                let actual = cached.file_diff(&repository, id, index).unwrap();
                 assert_eq!(
                     serde_json::to_value(actual).unwrap(),
                     serde_json::to_value(expected).unwrap(),
                     "commit {id}, index {index}"
                 );
             }
-            assert!(cached.file_diff(&repository, &sha, usize::MAX).is_err());
+            assert!(cached.file_diff(&repository, id, usize::MAX).is_err());
         }
     }
 }

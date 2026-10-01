@@ -75,6 +75,9 @@ impl FileChoice {
     fn cache_key(&self) -> String {
         format!("{}:{}:{}", self.area, self.index, self.key)
     }
+    fn same_identity(&self, other: &Self) -> bool {
+        self.area == other.area && self.index == other.index && self.key == other.key
+    }
 }
 
 /// The user's newest file intent is independent of the displayed snapshot.
@@ -618,19 +621,18 @@ impl InspectorView {
             self.status
                 .as_ref()
                 .map_or(0, |status| status.unstaged_count),
-            self.rows("unstaged").len(),
+            self.file_rows.get("unstaged").map_or(0, |rows| rows.len()),
             -f32::from(self.scroll[0].0.borrow().base_handle.offset().y),
         )
     }
     #[cfg(feature = "app-benchmark")]
     pub fn benchmark_open_working_file(&mut self, path: &str, cx: &mut Context<Self>) -> bool {
         let file = self
-            .rows("unstaged")
-            .iter()
-            .find(|file| file.path == path)
+            .file_rows
+            .get("unstaged")
+            .and_then(|rows| rows.iter().find(|file| file.path == path))
             .cloned();
         if let Some(file) = file {
-            self.active_file[0] = file.index;
             self.choose(file, cx);
             true
         } else {
@@ -886,7 +888,7 @@ impl InspectorView {
         if let Some(position) = self
             .rows(&file.area)
             .iter()
-            .position(|row| row.cache_key() == file.cache_key())
+            .position(|row| row.same_identity(&file))
         {
             self.active_file[list] = position;
             self.scroll[list].scroll_to_item(position, ScrollStrategy::Nearest);
@@ -1274,7 +1276,7 @@ impl InspectorView {
                             && self
                                 .intent
                                 .choice()
-                                .is_some_and(|intent| intent.cache_key() == file.cache_key());
+                                .is_some_and(|intent| intent.same_identity(&file));
                         self.cache.remember(
                             file.cache_key(),
                             diff.clone(),
@@ -1624,7 +1626,7 @@ impl InspectorView {
             .filter_map(|index| files.get(index).map(|file| (index, file)))
             .map(|(index, file)| {
                 let selected = self.snapshot.as_ref().is_some_and(|s| {
-                    s.file.cache_key() == file.cache_key()
+                    s.file.same_identity(file)
                         && (!matches!(self.selection, Selection::Commit(_))
                             || self
                                 .intent
@@ -2703,6 +2705,19 @@ mod tests {
             ..a.clone()
         };
         assert_ne!(a.cache_key(), b.cache_key());
+        assert!(!a.same_identity(&b));
+        assert!(a.same_identity(&super::FileChoice {
+            path: "another display path".into(),
+            ..a.clone()
+        }));
+        assert!(!a.same_identity(&super::FileChoice {
+            area: "staged".into(),
+            ..a.clone()
+        }));
+        assert!(!a.same_identity(&super::FileChoice {
+            index: 1,
+            ..a.clone()
+        }));
     }
     #[test]
     fn initial_commit_preview_is_ready_without_selection_and_restores_only_chosen_key() {

@@ -636,7 +636,7 @@ impl Workspace {
         let oid = Oid::from_str(sha).map_err(|_| "Identifiant de commit invalide.")?;
         let files = session.commit_diffs.lock().unwrap().get(oid);
         if let Some(files) = files {
-            return files.file_diff(&repository, sha, file_index);
+            return files.file_diff(&repository, oid, file_index);
         }
         let (commit, diff) = commit_diff(&repository, sha)?;
         session

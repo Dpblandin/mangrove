@@ -29,32 +29,26 @@ pub struct Configuration {
 impl Configuration {
     pub fn from_env() -> Result<Option<Self>, String> {
         let output = std::env::var_os("MANGROVE_BENCH_OUTPUT").map(PathBuf::from);
-        if output.is_none() {
-            return Ok(None);
-        }
-        let mut configuration = Self::from_paths(
+        let Some(mut configuration) = Self::from_paths(
             output,
             std::env::var_os("MANGROVE_BENCH_REPO").map(PathBuf::from),
             std::env::var_os("MANGROVE_BENCH_CACHE").map(PathBuf::from),
-        )?;
-        if let Some(configuration) = &mut configuration {
-            for (slot, path) in configuration.syntax_files.iter_mut().enumerate() {
-                let name = format!("MANGROVE_BENCH_SYNTAX_{slot}");
-                Self::file_override(&name, path)?;
-            }
-            Self::file_override("MANGROVE_BENCH_HEAVY", &mut configuration.heavy_file)?;
-            configuration.scroll_files = match std::env::var("MANGROVE_BENCH_SCROLL_TARGET") {
-                Ok(value) if value == "unstaged-files" => true,
-                Ok(value) if value == "diff" => false,
-                Err(std::env::VarError::NotPresent) => false,
-                _ => {
-                    return Err(
-                        "MANGROVE_BENCH_SCROLL_TARGET must be diff or unstaged-files".into(),
-                    );
-                }
-            };
+        )?
+        else {
+            return Ok(None);
+        };
+        for (slot, path) in configuration.syntax_files.iter_mut().enumerate() {
+            let name = format!("MANGROVE_BENCH_SYNTAX_{slot}");
+            Self::file_override(&name, path)?;
         }
-        Ok(configuration)
+        Self::file_override("MANGROVE_BENCH_HEAVY", &mut configuration.heavy_file)?;
+        configuration.scroll_files = match std::env::var("MANGROVE_BENCH_SCROLL_TARGET") {
+            Ok(value) if value == "unstaged-files" => true,
+            Ok(value) if value == "diff" => false,
+            Err(std::env::VarError::NotPresent) => false,
+            _ => return Err("MANGROVE_BENCH_SCROLL_TARGET must be diff or unstaged-files".into()),
+        };
+        Ok(Some(configuration))
     }
 
     fn file_override(name: &str, path: &mut String) -> Result<(), String> {
