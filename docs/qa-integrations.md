@@ -146,6 +146,16 @@ Deux passes refactor backend/UI puis trois revues simplify en lecture seule (ré
 
 Avant intégration du main actualisé, les 89 tests GPUI production, Clippy GPUI strict et les formatages passent. La validation native du bundle final et la compilation de l’ensemble intégrant #13 sont consignées dans la passe suivante. Aucun consumer Bitbucket réel n’est disponible dans cette passe : le consentement, le callback enregistré et la rotation réelle restent à effectuer.
 
+## Validation finale avec main actualisé
+
+La branche intègre le main `e7b994d`, comprenant les prévisualisations d’images #13, par une fusion sans conflit. Sur cet ensemble, les formatages, Clippy strict core/remote, Clippy GPUI production et instrumenté, 73 tests core, 101 tests remote, 93 tests GPUI production et 98 instrumentés passent. Les 101 tests remote comprennent 75 unitaires, 25 fournisseurs et un doctest ; le test opt-in du coffre OS reste ignoré. Le packaging macOS release passe aussi.
+
+Le bundle production reconstruit est relancé et laissé ouvert. SHA-256 de l’exécutable : `e628e5bdc139e6f7b7a55f0114662e4fc320f0ac424799d5081ceeb43101caaf`. La rubrique Général affiche le nouveau réglage de prévisualisation d’images. Dans Intégrations, les deux éditions Bitbucket affichent leur icône bleue embarquée ; le formulaire Cloud présente la Key publique, le Secret masqué et les instructions du consumer. Le bouton de copie du callback colle exactement `http://127.0.0.1:47321/oauth/callback` dans le champ de nom temporaire, ensuite vidé. Aucun compte synthétique ni credential Bitbucket n’est enregistré.
+
+Une lecture réelle sur le compte GitLab.com existant affiche le spinner dans le Select pendant la première page, puis 49 dépôts chargés. Les champs Dossier parent et Nouveau dossier et les limites de la carte restent aux mêmes positions avant et après chargement ; Annuler et Actualiser occupent la même ligne. Le défilement avec une recherche saisie déclenche une page supplémentaire : les spinners sont visibles dans le contrôle et au bas du menu, la recherche et le menu restent ouverts, et le formulaire ne descend pas. À la fin de cette lecture, les spinners disparaissent et Actualiser revient sans déplacer le formulaire. Aucun nouveau clonage ni consentement OAuth n’est déclenché pendant cette passe.
+
+La validation Bitbucket native couvre la configuration et le rendu ; elle ne remplace pas les essais réels du consumer, du consentement et du renouvellement listés ci-dessous.
+
 ## Essais restants et statut
 
 La PR a été conservée en draft pendant les passes précédentes. Les essais suivants restent à effectuer sur leurs environnements correspondants :

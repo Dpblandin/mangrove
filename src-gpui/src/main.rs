@@ -7,6 +7,7 @@ mod format;
 mod graph;
 mod history;
 mod history_view;
+mod image_preview;
 mod inspector;
 mod integrations;
 #[cfg(feature = "app-benchmark")]

@@ -1009,7 +1009,12 @@ impl HistoryView {
         }
     }
 
-    fn menu_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn menu_rows(
+        &self,
+        range: Range<usize>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let Some(menu) = self.menu.as_ref() else {
             return Vec::new();
         };
@@ -1034,7 +1039,10 @@ impl HistoryView {
                         ))
                         .aria_position_in_set(index + 1)
                         .aria_size_of_set(menu.references.len())
-                        .when(index == selected, |style| style.aria_active_descendant())
+                        .when(
+                            index == selected && self.menu_focus.is_focused(window),
+                            |style| style.aria_active_descendant(),
+                        )
                         .h(BranchMenu::row_height(self.font_size))
                         .flex()
                         .items_center()
@@ -1132,7 +1140,9 @@ impl HistoryView {
                         uniform_list(
                             "branch-menu-references",
                             menu.references.len(),
-                            cx.processor(|view, range, _, cx| view.menu_rows(range, cx)),
+                            cx.processor(|view, range, window, cx| {
+                                view.menu_rows(range, window, cx)
+                            }),
                         )
                         .with_width_from_item(Some(menu.measure_index))
                         .track_scroll(&menu.scroll)
@@ -1435,7 +1445,11 @@ impl HistoryView {
                     .aria_selected(selected)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(self.total)
-                    .when(selected, |style| style.aria_active_descendant())
+                    // Accessible focus can land on the row itself. Only report
+                    // a descendant while focus belongs to the list container.
+                    .when(selected && self.focus.is_focused(window), |style| {
+                        style.aria_active_descendant()
+                    })
                     .flex()
                     .items_center()
                     .h(px(ROW_HEIGHT))
@@ -1696,7 +1710,6 @@ impl HistoryView {
                             )
                         },
                     );
-                let _ = window;
                 element.into_any_element()
             })
             .collect()

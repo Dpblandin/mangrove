@@ -12,7 +12,7 @@ use git2::{Diff, DiffDelta, DiffFindOptions, DiffOptions, ErrorCode, Repository}
 
 use crate::{
     changed_file,
-    model::{FileDiff, WorkingTreeFile, WorkingTreeStatus},
+    model::{FileDiff, FileImageData, FileImages, WorkingTreeFile, WorkingTreeStatus},
     render_file_diff, render_patch, Result, MAX_CHANGED_FILES, MAX_FILE_SIZE,
 };
 
@@ -133,6 +133,58 @@ pub(crate) fn diff(repository: &Repository, area: &str, key: &str) -> Result<Fil
         return worktree_patch(repository, &delta, &path);
     }
     render_file_diff(&diff, index)
+}
+
+pub(crate) fn images(repository: &Repository, area: &str, key: &str) -> Result<FileImages> {
+    let bytes = crate::file_browser::path_bytes(key)?;
+    if repository.is_bare() {
+        return Err("Ce dépôt bare ne possède pas de fichiers non commités.".into());
+    }
+    let index = read_index(repository)?;
+    let flags = index_flags(&index);
+    let diff = area_diff(repository, area, &index)?;
+    let delta = diff
+        .deltas()
+        .find(|delta| {
+            eligible(&flags, area, delta)
+                && delta
+                    .new_file()
+                    .path_bytes()
+                    .or_else(|| delta.old_file().path_bytes())
+                    == Some(bytes.as_slice())
+        })
+        .ok_or("Ce fichier a changé ou n’est plus présent dans cette liste.")?;
+    if area == "staged" {
+        return crate::images::delta(repository, &delta);
+    }
+    let before = crate::images::blob(
+        repository,
+        delta.old_file().id(),
+        delta.old_file().mode().into(),
+    )?;
+    let after = if delta.status() == git2::Delta::Deleted {
+        FileImageData::Absent
+    } else if matches!(
+        delta.new_file().mode(),
+        git2::FileMode::Link | git2::FileMode::Commit
+    ) {
+        FileImageData::Unavailable(
+            "Les liens symboliques et les sous-modules n’ont pas d’aperçu image.".into(),
+        )
+    } else {
+        let path = relative_path(&bytes)?;
+        match worktree_content(repository, &path)? {
+            WorktreeContent::Bytes(bytes) => FileImageData::Bytes(bytes),
+            WorktreeContent::Missing => {
+                return Err("Ce fichier a changé ou n’est plus présent dans cette liste.".into())
+            }
+            WorktreeContent::Oversized => crate::images::oversized(),
+        }
+    };
+    Ok(FileImages {
+        before: Some(before),
+        after,
+    })
 }
 
 fn area_diff<'a>(repository: &'a Repository, area: &str, index: &git2::Index) -> Result<Diff<'a>> {

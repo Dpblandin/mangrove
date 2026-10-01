@@ -160,6 +160,40 @@ pub struct FileContent {
     pub parent_sha: Option<String>,
 }
 
+/// The exact comparison whose image bytes should be read. Paths use the same
+/// opaque identities as file diffs, including names that are not UTF-8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileImageSource {
+    Commit {
+        sha: String,
+        file_key: String,
+        comparison: bool,
+    },
+    WorkingTree {
+        area: String,
+        file_key: String,
+    },
+    Stash {
+        sha: String,
+        area: String,
+        file_key: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum FileImageData {
+    Absent,
+    Bytes(Vec<u8>),
+    Unavailable(String),
+}
+
+#[derive(Debug)]
+pub struct FileImages {
+    /// None is a file-content view; Some compares the two sides of a diff.
+    pub before: Option<FileImageData>,
+    pub after: FileImageData,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileHistoryEntry {

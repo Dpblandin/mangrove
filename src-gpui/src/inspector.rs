@@ -8,6 +8,7 @@ use crate::{
         action, is_activate, notice, status_icon,
     },
     format::{commit_date, format_count, initials, short_sha},
+    image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax,
     theme::{MONO, Palette, icon, scrollbar_theme},
@@ -307,6 +308,7 @@ pub struct InspectorView {
     compact: bool,
     workspace_open: bool,
     viewer: Entity<CodeView>,
+    image_preview: Entity<ImagePreview>,
     browser: Entity<FileBrowser>,
     viewer_dirty: bool,
     pending: Option<ReadRequest>,
@@ -337,6 +339,7 @@ impl InspectorView {
     pub fn new(engine: Arc<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let gate = Arc::new(Mutex::new(()));
         let viewer = cx.new(|cx| CodeView::new(window, cx));
+        let image_preview = cx.new(|_| ImagePreview::new(engine.clone(), gate.clone()));
         let browser = cx.new(|cx| FileBrowser::new(engine.clone(), gate.clone(), window, cx));
         let code_subscription = cx.subscribe(&viewer, |_, _, event, cx| match event {
             CodeViewEvent::FontSizeChanged(size) => cx.emit(InspectorEvent::DiffFontChanged(*size)),
@@ -380,6 +383,7 @@ impl InspectorView {
             compact: false,
             workspace_open: false,
             viewer,
+            image_preview,
             browser,
             viewer_dirty: true,
             pending: None,
@@ -409,6 +413,7 @@ impl InspectorView {
         self.revision.repository += 1;
         self.revision.selection += 1;
         self.revision.file += 1;
+        self.clear_image_preview(cx);
         self.repository = None;
         self.selection = Selection::None;
         self.details = None;
@@ -452,6 +457,7 @@ impl InspectorView {
         self.revision.repository += 1;
         self.revision.selection += 1;
         self.revision.file += 1;
+        self.clear_image_preview(cx);
         self.repository = Some(repository);
         self.pending = None;
         self.pending_status = true;
@@ -522,6 +528,8 @@ impl InspectorView {
     pub fn set_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
         if self.preferences.font_size_offset == preferences.font_size_offset
             && self.preferences.diff_font_size == preferences.diff_font_size
+            && self.preferences.show_image_previews == preferences.show_image_previews
+            && self.preferences.theme == preferences.theme
         {
             self.preferences = preferences;
             return;
@@ -536,6 +544,10 @@ impl InspectorView {
             }
         }
         self.preferences = preferences.clone();
+        if !preferences.show_image_previews {
+            self.clear_image_preview(cx);
+        }
+        self.viewer_dirty = true;
         self.viewer
             .update(cx, |v, cx| v.set_preferences(preferences.clone(), cx));
         self.browser
@@ -655,6 +667,7 @@ impl InspectorView {
         self.status_error = None;
         if matches!(self.selection, Selection::Working) {
             self.revision.file += 1;
+            self.clear_image_preview(cx);
             self.cache.clear();
             self.preload_cursor = 0;
             self.preload_rows = Arc::default();
@@ -670,6 +683,7 @@ impl InspectorView {
     fn prepare_selection(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.revision.selection += 1;
         self.revision.file += 1;
+        self.clear_image_preview(cx);
         let keep_commit = matches!(self.selection, Selection::Commit(_))
             && matches!(selection, Selection::Commit(_));
         self.selection = selection;
@@ -880,6 +894,7 @@ impl InspectorView {
             return;
         };
         self.revision.file += 1;
+        self.clear_image_preview(cx);
         let list = match &self.selection {
             Selection::Working if file.area == "staged" => 1,
             Selection::Stash(_) => 2,
@@ -992,6 +1007,7 @@ impl InspectorView {
         self.preload_cursor = 0;
         self.preload_task = None;
         self.revision.file += 1;
+        self.clear_image_preview(cx);
         self.intent.clear();
         self.snapshot = None;
         self.diff_loading = false;
@@ -1371,6 +1387,45 @@ impl InspectorView {
         if !self.viewer_dirty {
             return;
         }
+        let image_target = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| {
+                self.preferences.show_image_previews
+                    && supports_path(&snapshot.file.path)
+                    && !self.diff_loading
+                    && !self.details_loading
+                    && snapshot.error.is_none()
+            })
+            .and_then(|snapshot| {
+                let repository = self.repository.as_ref()?;
+                let file = &snapshot.file;
+                let source = match &self.selection {
+                    Selection::Commit(sha) => FileImageSource::Commit {
+                        sha: sha.clone(),
+                        file_key: file.key.clone(),
+                        comparison: true,
+                    },
+                    Selection::Working => FileImageSource::WorkingTree {
+                        area: file.area.clone(),
+                        file_key: file.key.clone(),
+                    },
+                    Selection::Stash(sha) => FileImageSource::Stash {
+                        sha: sha.clone(),
+                        area: file.area.clone(),
+                        file_key: file.key.clone(),
+                    },
+                    Selection::None => return None,
+                };
+                Some(ImageTarget {
+                    session_id: repository.id.clone(),
+                    source,
+                })
+            });
+        self.image_preview.update(cx, |view, cx| {
+            view.set_style(&self.preferences, self.compact, cx);
+            view.present(image_target, self.revision.file, cx);
+        });
         self.viewer_dirty = false;
         let prepared = self.snapshot.as_ref().and_then(|s| s.prepared.clone());
         let path = self
@@ -1483,13 +1538,19 @@ impl InspectorView {
                     .child(div().flex_1())
                     .children(self.diff().map(|diff| diff_counts(diff, p, o))),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(render_cached_view(self.viewer.clone(), window)),
-            )
+            .child(div().flex_1().min_h_0().child(self.diff_body(window, cx)))
             .into_any_element()
+    }
+    fn diff_body(&self, window: &Window, cx: &App) -> AnyElement {
+        if self.image_preview.read(cx).has_target() {
+            render_cached_view(self.image_preview.clone(), window)
+        } else {
+            render_cached_view(self.viewer.clone(), window)
+        }
+    }
+    fn clear_image_preview(&mut self, cx: &mut Context<Self>) {
+        self.image_preview
+            .update(cx, |view, cx| view.present(None, self.revision.file, cx));
     }
     fn panel_heading(&self, text: &str, name: IconName) -> Stateful<Div> {
         div()
@@ -1853,12 +1914,7 @@ impl InspectorView {
                     )
                     .child(controls),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(render_cached_view(self.viewer.clone(), window)),
-            )
+            .child(div().flex_1().min_h_0().child(self.diff_body(window, cx)))
             .into_any_element()
     }
     fn render_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
