@@ -3,6 +3,7 @@
 use crate::{
     code_view::{CodeView, CodeViewEvent},
     format::{commit_date, short_sha},
+    image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax::{self, Tokens},
     theme::{MONO, Palette, icon},
@@ -193,6 +194,7 @@ pub struct FileBrowser {
     active: bool,
     task: Option<Task<()>>,
     viewer: Entity<CodeView>,
+    image_preview: Entity<ImagePreview>,
     viewer_dirty: bool,
     palette: Palette,
     preferences: Preferences,
@@ -213,6 +215,7 @@ impl FileBrowser {
         cx: &mut Context<Self>,
     ) -> Self {
         let viewer = cx.new(|cx| CodeView::new(window, cx));
+        let image_preview = cx.new(|_| ImagePreview::new(engine.clone(), gate.clone()));
         let subscription = cx.subscribe(&viewer, |view, _, event, cx| match event {
             CodeViewEvent::NavigateCommit(sha) => view.inspect_commit(sha.clone(), cx),
             CodeViewEvent::FontSizeChanged(size) => {
@@ -245,6 +248,7 @@ impl FileBrowser {
             active: false,
             task: None,
             viewer,
+            image_preview,
             viewer_dirty: true,
             palette: Palette::default(),
             preferences: Preferences::default(),
@@ -295,11 +299,18 @@ impl FileBrowser {
     pub fn set_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
         if self.preferences.font_size_offset == preferences.font_size_offset
             && self.preferences.diff_font_size == preferences.diff_font_size
+            && self.preferences.show_image_previews == preferences.show_image_previews
+            && self.preferences.theme == preferences.theme
         {
             self.preferences = preferences;
             return;
         }
         self.preferences = preferences.clone();
+        if !preferences.show_image_previews {
+            self.image_preview
+                .update(cx, |view, cx| view.present(None, self.generation, cx));
+        }
+        self.viewer_dirty = true;
         self.viewer
             .update(cx, |v, cx| v.set_preferences(preferences, cx));
         cx.notify();
@@ -338,6 +349,8 @@ impl FileBrowser {
         cx: &mut Context<Self>,
     ) {
         self.generation += 1;
+        self.image_preview
+            .update(cx, |view, cx| view.present(None, self.generation, cx));
         self.target = target;
         self.diff = diff;
         self.diff_tokens = None;
@@ -653,6 +666,28 @@ impl FileBrowser {
         if !self.viewer_dirty {
             return;
         }
+        let image_target = self
+            .target
+            .as_ref()
+            .filter(|target| {
+                self.preferences.show_image_previews
+                    && supports_path(&target.path)
+                    && matches!(self.mode, FileView::Diff | FileView::File)
+                    && !self.source.loading_source()
+                    && self.error.is_none()
+            })
+            .map(|target| ImageTarget {
+                session_id: target.session_id.clone(),
+                source: FileImageSource::Commit {
+                    sha: target.sha.clone(),
+                    file_key: target.file_key.clone(),
+                    comparison: self.mode == FileView::Diff,
+                },
+            });
+        self.image_preview.update(cx, |view, cx| {
+            view.set_style(&self.preferences, false, cx);
+            view.present(image_target, self.generation, cx);
+        });
         self.viewer_dirty = false;
         let mode = self.mode;
         let diff = self.diff.clone();
@@ -1176,7 +1211,12 @@ impl Render for FileBrowser {
                     root = root.child(notice(limit.clone(), p.muted, o));
                 }
             }
-            root = root.child(div().flex_1().min_h_0().child(self.viewer.clone()));
+            let preview = if self.image_preview.read(cx).has_target() {
+                self.image_preview.clone().into_any_element()
+            } else {
+                self.viewer.clone().into_any_element()
+            };
+            root = root.child(div().flex_1().min_h_0().child(preview));
         }
         root
     }

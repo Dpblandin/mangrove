@@ -3,6 +3,7 @@ mod commit_diff;
 mod fetch;
 mod file_browser;
 mod graph;
+mod images;
 pub mod model;
 mod repository_context;
 mod working_tree;
@@ -684,6 +685,26 @@ impl Workspace {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
         file_browser::content(&repository, sha, file_key)
+    }
+
+    pub fn file_images(&self, id: &str, source: &FileImageSource) -> Result<FileImages> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        match source {
+            FileImageSource::Commit {
+                sha,
+                file_key,
+                comparison,
+            } => file_browser::images(&repository, sha, file_key, *comparison),
+            FileImageSource::WorkingTree { area, file_key } => {
+                working_tree::images(&repository, area, file_key)
+            }
+            FileImageSource::Stash {
+                sha,
+                area,
+                file_key,
+            } => repository_context::stash_images(&repository, sha, area, file_key),
+        }
     }
 
     pub fn file_history(

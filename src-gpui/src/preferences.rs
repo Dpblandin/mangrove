@@ -42,6 +42,7 @@ pub struct Preferences {
     pub left_width: f32,
     pub right_width: f32,
     pub auto_fetch_interval: u32,
+    pub show_image_previews: bool,
     pub recent: Vec<RecentRepository>,
 }
 
@@ -54,6 +55,7 @@ impl Default for Preferences {
             left_width: 226.,
             right_width: 390.,
             auto_fetch_interval: DEFAULT_AUTO_FETCH_INTERVAL,
+            show_image_previews: true,
             recent: Vec::new(),
         }
     }
@@ -133,6 +135,9 @@ impl Preferences {
             && (0. ..=60.).contains(&v)
         {
             result.auto_fetch_interval = v as u32;
+        }
+        if let Some(value) = value.get("show_image_previews").and_then(Value::as_bool) {
+            result.show_image_previews = value;
         }
         if let Some(recent) = value.get("recent").and_then(Value::as_array) {
             for value in recent {
@@ -299,11 +304,21 @@ mod tests {
             });
         }
         p.theme = ThemeId::Mangrove;
+        p.show_image_previews = false;
         p.save_to(&path).unwrap();
         assert_eq!(Preferences::load_from(&path), p);
         assert_eq!(p.recent.len(), 6);
         fs::write(&path, "damaged").unwrap();
         assert_eq!(Preferences::load_from(&path), Preferences::default());
         fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn older_or_malformed_image_preferences_keep_the_default() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"show_image_previews": "false"}),
+        ] {
+            assert!(Preferences::from_value(value).show_image_previews);
+        }
     }
 }

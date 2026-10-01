@@ -322,3 +322,21 @@ pub(crate) fn stash_diff(
         .ok_or("Fichier introuvable dans cette zone du stash.")?;
     render_file_diff(&diff, index)
 }
+
+pub(crate) fn stash_images(
+    repository: &Repository,
+    sha: &str,
+    area: &str,
+    file_key: &str,
+) -> Result<FileImages> {
+    crate::file_browser::path_bytes(file_key)?;
+    let stash = stash_commit(repository, sha)?;
+    let (old, new, _, _) = trees(&stash, area)?;
+    let diff = tree_diff(repository, old.as_ref(), &new)?;
+    let delta = diff
+        .deltas()
+        .take(MAX_CHANGED_FILES)
+        .find(|delta| changed_file(0, delta).file_key == file_key)
+        .ok_or("Fichier introuvable dans cette zone du stash.")?;
+    crate::images::delta(repository, &delta)
+}

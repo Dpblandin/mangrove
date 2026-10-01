@@ -94,6 +94,7 @@ impl Chrome {
             SettingsView::new(
                 preferences.auto_fetch_interval,
                 preferences.theme,
+                preferences.show_image_previews,
                 preferences.palette(),
                 preferences.font_size_offset,
                 window,
@@ -110,6 +111,10 @@ impl Chrome {
                 }
                 SettingsEvent::IntervalChanged(value) => {
                     this.preferences.auto_fetch_interval = *value;
+                    this.preferences_changed(cx);
+                }
+                SettingsEvent::ImagePreviewsChanged(value) => {
+                    this.preferences.show_image_previews = *value;
                     this.preferences_changed(cx);
                 }
             }),
