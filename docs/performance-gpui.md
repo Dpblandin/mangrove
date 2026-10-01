@@ -4,6 +4,8 @@
 
 Le gain principal est la mémoire RSS : la médiane stable passe de **556 à 199 MiB** avec un cache neuf, et de **554 à 187 MiB** avec un cache réutilisé, soit **64 à 66 % de moins**. Les tableaux décrivent séparément la réactivité et le coût des phases : le CPU baisse dans l’historique et augmente dans le grand diff. Ces chiffres comparent les applications complètes et leurs choix de rendu, avec le même moteur Git.
 
+Ces résultats ne permettent pas de conclure que GPUI est plus fluide dans tous les parcours. La fixture inspectée comporte 46 fichiers et son grand diff revient au texte simple. Les commits réels avec beaucoup de fichiers, la navigation entre des diffs non préchargés et le défilement de grands diffs colorés demandent des contrôles distincts.
+
 Les deux artefacts mesurés étaient des builds **release avec `app-benchmark` activé**, utilisant les sources GPUI production `src-gpui` et le baseline Vue/Tauri désormais archivé. Tauri activait aussi le frontend via `VITE_APP_BENCHMARK=1`. Le coût du scénario et du profiler GPUI entre dans ces mesures. Les builds ordinaires de cette révision compilaient les interfaces sans les modules de mesure ; les noms et identifiants des bundles de benchmark étaient distincts.
 
 Les deux familles de lockfiles utilisent les mêmes versions des dépendances du moteur partagé : `git2 0.21.0`, `libgit2-sys 0.18.8+1.9.7`, `rusqlite 0.38.0`, `libsqlite3-sys 0.36.0`, `serde 1.0.229`, `serde_json 1.0.151`, `regex 1.13.1`, `chrono 0.4.45`.
@@ -132,3 +134,20 @@ La géométrie CoreGraphics enregistrée au lancement est un relevé précoce su
 ## Contrôle après la série
 
 La série de 120 lancements reste associée à la révision 77b15d5 (binaire GPUI 9be0a07486be…). Après cette série, le correctif bb1c900 refuse les résultats de coloration dont le budget de 500 ms est épuisé ; cette limite reste inchangée. Les nouveaux bundles ont passé un contrôle séparé de quatre lancements complets, avec 30 sélections de commit et 30 diffs réellement colorés par lancement, le même baseline Tauri, la même fixture et le même viewport. Leurs sources et binaires sont inchangés pendant ce contrôle. Les mesures et quantiles des 120 lancements restent inchangés ; aucun nouveau quantile de performance n’est publié. Le manifeste QA distingue les captures initiales et le contrôle natif du nouveau bundle de production.
+
+## Contrôle de lecture sur un commit réel
+
+Le 1er octobre 2026, le commit `941b0ed433a990a81418508280955425ce788dde` (145 fichiers) a été examiné sur la même machine, en release, à partir de la base `3c53e09`. La sonde `inspect-latency` utilise les lectures Git et la coloration de production, mais exclut le rendu, les files d’attente de l’interface et le défilement. Cinq nouveaux processus ont été lancés avant et cinq après le correctif du cache des identités de fichiers ; le cache filesystem n’était pas contrôlé et les autres applications sont restées ouvertes. Les résultats bruts locaux sont conservés dans `.mangrove-dev/performance/before-*.json` et `after-*.json` du worktree du correctif.
+
+Avant le correctif, la médiane de lecture de chacun des six fichiers sondés était comprise entre **82,7 et 83,5 ms** : chaque patch recalculait la détection des renommages de l’ensemble du commit. Après le correctif, qui réutilise les identités résolues puis compare seulement les chemins sélectionnés, ces médianes sont comprises entre **0,6 et 1,1 ms**. La lecture initiale de la liste reste autour de **84 ms** ; la coloration reste autour de **9 à 31 ms**. Les fichiers sondés sont `.github/workflows/ci.yml`, `src-gpui/src/code_view.rs`, `file_browser.rs`, `history.rs`, `inspector.rs` et `syntax.rs`.
+
+Ce correctif porte sur le moteur partagé : il profite à GPUI et à tout consommateur du moteur mis à jour. Le build Tauri historique reste inchangé. Ces mesures établissent un gain de lecture des patches après chargement de la liste ; elles ne mesurent pas la latence clic→affichage et ne prouvent pas une amélioration du scroll, ni une supériorité globale sur Tauri. Une inspection native du diff coloré de `code_view.rs` (1 619 lignes) a été réalisée en release ; le profil d’échantillonnage ne fournit pas les intervalles de frame nécessaires pour quantifier les saccades.
+
+```sh
+cargo run --release --locked --manifest-path src-gpui/Cargo.toml \
+  --example inspect-latency -- /chemin/du/depot \
+  941b0ed433a990a81418508280955425ce788dde \
+  .github/workflows/ci.yml src-gpui/src/code_view.rs \
+  src-gpui/src/file_browser.rs src-gpui/src/history.rs \
+  src-gpui/src/inspector.rs src-gpui/src/syntax.rs
+```
