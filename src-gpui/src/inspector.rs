@@ -11,7 +11,7 @@ use crate::{
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax,
-    theme::{MONO, Palette, icon, scrollbar_theme},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
     view_cache::render_cached_view,
 };
 use accesskit::Role;
@@ -1995,7 +1995,7 @@ impl InspectorView {
                     .w_full()
                     .px(px(10.))
                     .py(px(4.))
-                    .rounded(px(5.))
+                    .rounded(RADIUS_MD)
                     .border_1()
                     .border_color(rgb(if selected { p.accent_border } else { p.panel }))
                     .bg(rgb(if selected { p.accent_soft } else { p.panel }))
@@ -2308,7 +2308,7 @@ impl InspectorView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(10.))
+                                .rounded_full()
                                 .bg(rgb(p.accent_soft))
                                 .text_color(rgb(p.accent))
                                 .text_size(px(11. + o))
@@ -2352,7 +2352,7 @@ impl InspectorView {
                         .items_center()
                         .gap(px(12.))
                         .px(px(11.))
-                        .rounded(px(6.))
+                        .rounded(RADIUS_MD)
                         .bg(rgb(p.bg))
                         .text_size(px(10. + o))
                         .cursor_pointer()
@@ -2434,7 +2434,7 @@ impl InspectorView {
                                 div()
                                     .h(px(17.))
                                     .px(px(5.))
-                                    .rounded(px(4.))
+                                    .rounded(RADIUS_SM)
                                     .bg(rgb(p.surface))
                                     .text_size(px(9. + o))
                                     .text_color(rgb(p.muted))
@@ -2533,7 +2533,7 @@ impl InspectorView {
                     .child(
                         div()
                             .px(px(5.))
-                            .rounded(px(4.))
+                            .rounded(RADIUS_SM)
                             .bg(rgb(p.surface))
                             .text_size(px(9. + o))
                             .text_color(rgb(p.muted))
@@ -2797,7 +2797,7 @@ fn mode_button(
         .focusable()
         .px(px(8.))
         .py(px(4.))
-        .rounded(px(4.))
+        .rounded(RADIUS_MD)
         .border_1()
         .border_color(rgb(if selected { p.accent_border } else { p.panel }))
         .bg(rgb(if selected { p.accent_soft } else { p.panel }))

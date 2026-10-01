@@ -2,7 +2,7 @@
 use crate::{
     file_browser::ReadGate,
     preferences::Preferences,
-    theme::{Palette, icon},
+    theme::{Palette, RADIUS_LG, icon},
 };
 use gpui_kit::{assets::IconName, prelude::*, *};
 use image::{ImageDecoder, ImageReader};
@@ -266,7 +266,7 @@ impl ImagePreview {
             .flex_col()
             .border_1()
             .border_color(rgb(p.border))
-            .rounded(px(6.))
+            .rounded(RADIUS_LG)
             .overflow_hidden()
             .bg(rgb(p.panel))
             .child(header)

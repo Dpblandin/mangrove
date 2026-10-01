@@ -33,7 +33,7 @@ use std::{
 use crate::{
     format::{commit_date, format_count, short_sha},
     repository_context::RepositoryContextState,
-    theme::{MONO, Palette, SANS, icon, scrollbar_theme},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::VirtualScrollHandle,
 };
 
@@ -1031,7 +1031,7 @@ impl SidebarView {
                                 .justify_center()
                                 .w(px(24.))
                                 .h(px(26.))
-                                .rounded(px(4.))
+                                .rounded(RADIUS_SM)
                                 .cursor_pointer()
                                 .text_color(rgb(p.muted))
                                 .opacity(0.)
@@ -1222,7 +1222,7 @@ impl SidebarView {
                     .tooltip(move |window, cx| {
                         Tooltip::new(tooltip_message.clone()).build(window, cx)
                     })
-                    .rounded(px(4.))
+                    .rounded(RADIUS_MD)
                     .cursor_pointer()
                     .text_color(rgb(p.text))
                     .when(sha == self.selected_stash, |this| {
@@ -1322,7 +1322,7 @@ impl Render for SidebarView {
                 .children("ESPACE DE TRAVAIL".chars().map(|character|div().child(character.to_string()))))
             .when(self.repository.is_some(), |this| this
                 .child(div().mx(px(15.)).mb(px(18.)).px(px(8.)).py(px(7.))
-                    .flex().items_center().gap(px(7.)).border_1().border_color(rgb(p.border)).rounded(px(5.))
+                    .flex().items_center().gap(px(7.)).border_1().border_color(rgb(p.border)).rounded(RADIUS_MD)
                     .child(icon(IconName::Search,13.,p.muted)).child(filter_input))
                 .child(div().relative().flex_1().min_h_0().w_full().flex().flex_col()
                     .child(wheel_capture)

@@ -2,6 +2,7 @@
 //! work remain owned by the parent view.
 use super::*;
 use crate::format::initials;
+use crate::theme::{RADIUS_LG, RADIUS_MD, RADIUS_SM};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::spinner::Spinner;
 
@@ -93,7 +94,7 @@ impl IntegrationsView {
                                     .py(px(6.))
                                     .border_1()
                                     .border_color(rgb(p.border))
-                                    .rounded(px(4.))
+                                    .rounded(RADIUS_MD)
                                     .bg(rgb(p.bg))
                                     .text_color(rgb(p.text))
                                     .text_size(px(12. + offset))
@@ -271,7 +272,7 @@ impl IntegrationsView {
                     .w_full()
                     .min_w_0()
                     .p(px(16.))
-                    .rounded(px(8.))
+                    .rounded(RADIUS_LG)
                     .border_1()
                     .border_color(rgb(if active { p.accent_border } else { p.border }))
                     .bg(rgb(if active { p.accent_soft } else { p.panel }))
@@ -496,7 +497,7 @@ impl IntegrationsView {
                     .py(px(10.))
                     .gap(px(10.))
                     .justify_start()
-                    .rounded(px(6.))
+                    .rounded(RADIUS_MD)
                     .text_color(rgb(if selected { p.text } else { p.muted }))
                     .text_size(px(12. + self.offset))
                     .bg(rgb(if selected { p.selection } else { p.panel }))
@@ -850,7 +851,7 @@ impl IntegrationsView {
                     .flex_col()
                     .gap(px(12.))
                     .p(px(16.))
-                    .rounded(px(6.))
+                    .rounded(RADIUS_LG)
                     .border_1()
                     .border_color(rgb(p.border))
                     .child(note("Code à saisir dans GitHub", p))
@@ -1082,7 +1083,7 @@ impl IntegrationsView {
                 .px(px(10.))
                 .py(px(12.))
                 .gap(px(10.))
-                .rounded(px(6.))
+                .rounded(RADIUS_MD)
                 .justify_start()
                 .bg(rgb(if self.direct_clone {
                     p.selection
@@ -1112,7 +1113,7 @@ impl IntegrationsView {
                     .px(px(10.))
                     .py(px(12.))
                     .gap(px(10.))
-                    .rounded(px(6.))
+                    .rounded(RADIUS_MD)
                     .justify_start()
                     .bg(rgb(if self.selected_account.as_ref() == Some(&id) {
                         p.selection
@@ -1465,7 +1466,7 @@ impl Render for IntegrationsView {
                                                 .p(px(14.))
                                                 .border_1()
                                                 .border_color(rgb(p.danger).opacity(0.4))
-                                                .rounded(px(6.))
+                                                .rounded(RADIUS_MD)
                                                 .bg(rgb(p.danger).opacity(0.07))
                                                 .child(note(&error, p).text_color(rgb(p.danger))),
                                         )
@@ -1539,7 +1540,7 @@ fn card(p: Palette) -> Div {
         .p(px(22.))
         .border_1()
         .border_color(rgb(p.border))
-        .rounded(px(10.))
+        .rounded(RADIUS_LG)
         .bg(rgb(p.panel))
 }
 
@@ -1548,7 +1549,7 @@ fn badge(label: &str, color: u32, background: u32) -> Div {
         .flex_none()
         .px(px(8.))
         .py(px(3.))
-        .rounded(px(4.))
+        .rounded(RADIUS_SM)
         .text_size(px(10.))
         .text_color(rgb(color))
         .bg(rgb(background))
@@ -1577,7 +1578,7 @@ fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(5.))
+        .rounded(RADIUS_SM)
         .border_1()
         .border_color(rgb(p.border))
         .text_color(rgb(p.muted))
@@ -1640,7 +1641,7 @@ fn action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> 
         .py(px(8.))
         .border_1()
         .border_color(rgb(p.border))
-        .rounded(px(5.))
+        .rounded(RADIUS_MD)
         .text_size(px(12. + offset))
         .text_color(rgb(p.text))
         .cursor_pointer()
@@ -1687,7 +1688,7 @@ fn input_control(
         .py_0()
         .border_1()
         .border_color(rgb(p.border))
-        .rounded(px(4.))
+        .rounded(RADIUS_MD)
         .bg(rgb(p.bg))
         .text_color(rgb(p.text))
         .text_size(px(12. + offset))

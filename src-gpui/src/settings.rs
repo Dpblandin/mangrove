@@ -1,7 +1,7 @@
 use crate::{
     integrations::{IntegrationsSection, IntegrationsView},
     preferences::{MAX_AUTO_FETCH_INTERVAL, parse_auto_fetch_interval},
-    theme::{Palette, ThemeId, icon, scrollbar_theme},
+    theme::{Palette, RADIUS_LG, RADIUS_MD, RADIUS_SM, ThemeId, icon, scrollbar_theme},
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
@@ -227,7 +227,7 @@ impl Render for SettingsView {
             .w(px(120.))
             .h(px(36.))
             .flex_none()
-            .rounded(px(4.))
+            .rounded(RADIUS_MD)
             .border_1()
             .border_color(rgb(if focused { p.accent } else { p.border }))
             .bg(rgb(p.bg))
@@ -301,7 +301,7 @@ impl Render for SettingsView {
                             .px(px(8.))
                             .py(px(8.))
                             .gap(px(8.))
-                            .rounded(px(4.))
+                            .rounded(RADIUS_MD)
                             .cursor_pointer()
                             .text_size(px(16. + offset))
                             .line_height(relative(1.5))
@@ -316,7 +316,7 @@ impl Render for SettingsView {
                                     .ml(px(8.))
                                     .border_1()
                                     .border_color(rgb(p.border))
-                                    .rounded(px(4.))
+                                    .rounded(RADIUS_SM)
                                     .px(px(5.))
                                     .py(px(2.))
                                     .text_size(px(9. + offset))
@@ -360,7 +360,7 @@ impl Render for SettingsView {
                                     .py(px(12.))
                                     .justify_start()
                                     .gap(px(12.))
-                                    .rounded(px(6.))
+                                    .rounded(RADIUS_MD)
                                     .when(self.section == SettingsSection::General, |button| button.bg(rgb(p.accent).opacity(0.1)))
                                     .text_color(rgb(p.text))
                                     .text_size(px(16. + offset))
@@ -374,7 +374,7 @@ impl Render for SettingsView {
                                     .on_click(cx.listener(|this, _, window, cx| this.select_section(SettingsSection::General, window, cx))),
                             )
                             .children([(SettingsSection::Profiles, "settings-profiles", "Profils", IconName::Users), (SettingsSection::Ssh, "settings-ssh", "SSH", IconName::ShieldCheck), (SettingsSection::Integrations, "settings-integrations", "Intégrations", IconName::Plug)].into_iter().map(|(section, id, label, glyph)| {
-                                Button::new(id).w_full().mt(px(4.)).px(px(16.)).py(px(12.)).justify_start().rounded(px(6.))
+                                Button::new(id).w_full().mt(px(4.)).px(px(16.)).py(px(12.)).justify_start().rounded(RADIUS_MD)
                                     .when(self.section == section, |button| button.bg(rgb(p.accent).opacity(0.1)))
                                     .text_color(rgb(p.text)).text_size(px(16. + offset)).cursor_pointer().accessibility_label(label)
                                     .focus_visible(move |style| style.bg(rgb(p.selection)))
@@ -415,7 +415,7 @@ impl Render for SettingsView {
                                                     .w_full()
                                                     .min_w_0()
                                                     .p(px(24.))
-                                                    .rounded(px(12.))
+                                                    .rounded(RADIUS_LG)
                                                     .border_1()
                                                     .border_color(rgb(p.border))
                                                     .bg(rgb(p.panel))
@@ -441,7 +441,7 @@ impl Render for SettingsView {
                                                                             .py(px(6.))
                                                                             .border_1()
                                                                             .border_color(rgb(p.border))
-                                                                            .rounded(px(4.))
+                                                                            .rounded(RADIUS_MD)
                                                                             .bg(rgb(p.bg))
                                                                             .text_color(rgb(p.text))
                                                                             .text_size(px(12. + offset))
@@ -458,7 +458,7 @@ impl Render for SettingsView {
                                                     .w_full()
                                                     .min_w_0()
                                                     .p(px(24.))
-                                                    .rounded(px(12.))
+                                                    .rounded(RADIUS_LG)
                                                     .border_1()
                                                     .border_color(rgb(p.border))
                                                     .bg(rgb(p.panel))
@@ -484,7 +484,7 @@ impl Render for SettingsView {
                                                     .w_full()
                                                     .min_w_0()
                                                     .p(px(24.))
-                                                    .rounded(px(12.))
+                                                    .rounded(RADIUS_LG)
                                                     .border_1()
                                                     .border_color(rgb(p.border))
                                                     .bg(rgb(p.panel))
@@ -569,7 +569,7 @@ fn settings_button(id: &'static str, label: &'static str, p: Palette, offset: f3
         .px(px(14.))
         .border_1()
         .border_color(rgb(p.border))
-        .rounded(px(6.))
+        .rounded(RADIUS_MD)
         .text_size(px(12. + offset))
         .line_height(px(16. + 2. * offset))
         .font_weight(FontWeight::MEDIUM)

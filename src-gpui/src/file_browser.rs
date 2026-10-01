@@ -6,7 +6,7 @@ use crate::{
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax::{self, Tokens},
-    theme::{MONO, Palette, icon},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon},
     view_cache::render_cached_view,
 };
 use accesskit::Role;
@@ -1040,7 +1040,7 @@ impl Render for FileBrowser {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.))
+                            .rounded(RADIUS_SM)
                             .cursor_pointer()
                             .hover(move |s| s.bg(rgb(p.surface)))
                             .child(icon(IconName::X, 16., p.muted))
@@ -1403,7 +1403,7 @@ pub fn action(
         .gap(px(6.))
         .px(px(7.))
         .py(px(4.))
-        .rounded(px(4.))
+        .rounded(RADIUS_MD)
         .border_1()
         .border_color(rgb(if selected { p.accent } else { p.border }))
         .bg(rgb(p.surface))

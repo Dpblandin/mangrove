@@ -2,7 +2,7 @@
 
 Application native de Mangrove, construite avec GPUI et le moteur `mangrove-core`. Ce dossier possède son propre workspace Cargo, son lockfile et son répertoire `target` ; le workspace principal contient le moteur et ses benchmarks.
 
-Les couleurs et polices sont définies dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans [l’issue #9](https://github.com/Dpblandin/mangrove/issues/9) et le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
+Les couleurs, arrondis et polices sont définis dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans [l’issue #9](https://github.com/Dpblandin/mangrove/issues/9) et le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
 
 ## Lancer
 
@@ -39,7 +39,7 @@ Le fetch manuel récupère les références de tous les remotes du dépôt actif
 ## Fonctionnalités
 
 - Accueil, sélecteur natif de dossier, recherche/suppression des dépôts récents, onglets de dépôts, barre supérieure, erreurs et paramètres d’auto-fetch.
-- Trois thèmes Classique, Mangrove et Macchiato dans **Paramètres → Général → Apparence**, appliqués et mémorisés immédiatement ; zoom de l’interface, taille de police des diffs, panneaux redimensionnables à la souris et au clavier, remise à zéro par double clic et préférences persistantes.
+- Quatre thèmes Classique, Mangrove, Macchiato et Ardoise dans **Paramètres → Général → Apparence**, appliqués et mémorisés immédiatement ; zoom de l’interface, taille de police des diffs, panneaux redimensionnables à la souris et au clavier, remise à zéro par double clic et préférences persistantes.
 - Références locales, distantes et tags avec dossiers repliables, filtre, tri français et numérique, sélection dans l’historique et Solo. Worktrees et stashes sont lus à la demande ; un worktree peut être ouvert et un stash inspecté.
 - Historique virtualisé, recherche par message/auteur/SHA/référence, navigation au clavier, graphe de branches et merges avec les mêmes voies du moteur et défilement horizontal du graphe.
 - Inspection des commits, métadonnées et parents, copie du SHA, liste des fichiers, compteurs, changements locaux staged/unstaged et groupes de fichiers des stashes.

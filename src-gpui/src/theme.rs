@@ -1,13 +1,21 @@
 //! Mangrove's CSS tokens, shared by every native view.
 use gpui_kit::{
-    App, SharedString, Styled,
+    App, Pixels, SharedString, Styled,
     component::{
         Icon, Sizable, Theme, ThemeMode,
         scroll::{Scrollbar, ScrollbarMode},
     },
-    rgb,
+    px, rgb,
 };
 use serde::{Deserialize, Serialize};
+
+// Corner radii shared by every theme and by Kit controls.
+/// Badges, chips, keycaps, icon-only buttons and items inside a padded menu.
+pub const RADIUS_SM: Pixels = px(4.);
+/// Inputs, selects, text buttons, list rows, menus and banners.
+pub const RADIUS_MD: Pixels = px(6.);
+/// Cards, panels, framed containers and tile buttons.
+pub const RADIUS_LG: Pixels = px(8.);
 
 pub const SANS: &str = ".SystemUIFont";
 // Match the browser's installed monospace fallback, rather than a display name
@@ -26,15 +34,22 @@ pub enum ThemeId {
     Classic,
     Mangrove,
     Macchiato,
+    Ardoise,
 }
 
 impl ThemeId {
-    pub const ALL: [Self; 3] = [Self::Classic, Self::Mangrove, Self::Macchiato];
+    pub const ALL: [Self; 4] = [
+        Self::Classic,
+        Self::Mangrove,
+        Self::Macchiato,
+        Self::Ardoise,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Self::Classic => "Classique",
             Self::Mangrove => "Mangrove",
             Self::Macchiato => "Catppuccin Macchiato",
+            Self::Ardoise => "Ardoise",
         }
     }
 }
@@ -60,6 +75,9 @@ pub struct Palette {
     pub accent_soft: u32,
     pub accent_border: u32,
     pub hover: u32,
+    pub hunk_bg: u32,
+    pub addition_gutter: u32,
+    pub deletion_gutter: u32,
     pub graph: [u32; 8],
     /// keyword, string, comment, number, type, function, punctuation, property.
     pub syntax: [u32; 8],
@@ -67,7 +85,7 @@ pub struct Palette {
 
 impl Default for Palette {
     fn default() -> Self {
-        Self::for_theme(ThemeId::Classic)
+        Self::for_theme(ThemeId::default())
     }
 }
 
@@ -109,9 +127,37 @@ impl Palette {
             accent_soft: 0,
             accent_border: 0,
             hover: 0,
+            hunk_bg: 0,
+            addition_gutter: 0,
+            deletion_gutter: 0,
         };
         match theme {
             ThemeId::Classic => {}
+            // Reading-first slate: off-white text avoids halation, and every
+            // text or status color keeps about 7:1 contrast on panels.
+            ThemeId::Ardoise => {
+                palette.bg = 0x161b21;
+                palette.reading_bg = 0x1f252e;
+                palette.panel = 0x1e232c;
+                palette.surface = 0x272d39;
+                palette.border = 0x363e4c;
+                palette.text = 0xe4e9f0;
+                palette.muted = 0xadb8c9;
+                palette.accent = 0x72bbf5;
+                palette.success = 0x78d6a0;
+                palette.danger = 0xf5908b;
+                palette.warning = 0xf2c76c;
+                palette.renamed = 0x9db4ff;
+                palette.addition_bg = 0x234532;
+                palette.deletion_bg = 0x4c2a31;
+                palette.on_accent = 0x0d1724;
+                palette.graph = [
+                    0x72bbf5, 0x8bd99a, 0xc7a2f4, 0xe9c37a, 0xee9eab, 0x77d0d6, 0xf2b088, 0xb9adf6,
+                ];
+                palette.syntax = [
+                    0x8ab9f8, 0xa9d9a2, 0xa1adbf, 0xf2bb86, 0x80d4d1, 0xe5cc94, 0xb3bccb, 0xd6dce6,
+                ];
+            }
             ThemeId::Mangrove => {
                 palette.bg = 0x101719;
                 palette.reading_bg = palette.bg;
@@ -157,6 +203,9 @@ impl Palette {
         palette.accent_soft = mix(palette.accent, palette.bg, 0.10);
         palette.accent_border = mix(palette.accent, palette.border, 0.28);
         palette.hover = mix(palette.text, palette.bg, 0.06);
+        palette.hunk_bg = mix(palette.accent, palette.reading_bg, 0.12);
+        palette.addition_gutter = mix(palette.success, palette.addition_bg, 0.10);
+        palette.deletion_gutter = mix(palette.danger, palette.deletion_bg, 0.10);
         palette
     }
 
@@ -170,6 +219,8 @@ impl Palette {
             // The CSS root keeps rem at 16px; zoom changes text, never panel spacing.
             theme.font_size = gpui_kit::px(16.);
             theme.mono_font_family = SharedString::from(MONO);
+            theme.radius = RADIUS_MD;
+            theme.radius_lg = RADIUS_LG;
             let c = &mut theme.colors;
             c.background = rgb(self.bg).into();
             c.foreground = rgb(self.text).into();
