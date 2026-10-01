@@ -12,6 +12,7 @@
 //! ```
 
 pub mod clone;
+pub mod github_oauth;
 mod model;
 pub mod oauth;
 mod profiles;

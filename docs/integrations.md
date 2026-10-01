@@ -7,7 +7,7 @@ Changer de profil annule les lectures distantes, retire leurs pages affichées e
 ## Parcours
 
 1. Dans Profils, sélectionner un contexte et ajouter éventuellement un chemin local ou une URL aux favoris. Le bouton Ouvrir d’un favori local ouvre le dépôt existant ; un favori distant ne déclenche aucun clone.
-2. Dans Intégrations, choisir une édition dans la navigation verticale : GitLab.com ou auto-hébergé, GitHub.com ou Enterprise, Bitbucket Cloud ou Data Center. La fiche affiche les comptes connectés du profil, leur identité disponible et leur serveur. Le formulaire apparaît lors d’un ajout. GitLab propose une connexion navigateur ou un token personnel ; les autres fournisseurs utilisent un token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
+2. Dans Intégrations, choisir une édition dans la navigation verticale : GitLab.com ou auto-hébergé, GitHub.com ou Enterprise, Bitbucket Cloud ou Data Center. La fiche affiche les comptes connectés du profil, leur identité disponible et leur serveur. Le formulaire apparaît lors d’un ajout. GitLab et GitHub proposent une connexion navigateur ou un token personnel ; Bitbucket utilise un token. Bitbucket Cloud attend une URL contenant le workspace ; voir [la configuration et les droits minimaux](integrations-providers.md).
 3. Connecter vérifie l’utilisateur authentifié pour GitLab/GitHub, ou la première page de dépôts pour Bitbucket sans élargir les permissions, puis conserve les identifiants dans le coffre de l’OS. Aucun dépôt n’est affiché dans les paramètres. Dans **Nouvel onglet → Cloner**, choisir un compte et un dossier parent, puis rechercher et sélectionner un dépôt dans le menu déroulant. Le sélecteur groupe les dépôts par namespace et ajoute les résultats suivants lorsque le bas de la liste devient visible, avec un indicateur de chargement. La recherche filtre les dépôts déjà chargés et continue à chercher dans les pages suivantes quand aucun résultat ne correspond. Le menu, sa position, la recherche et la sélection sont conservés lors de l’ajout. Une erreur interrompt le chargement automatique ; **Réessayer** reprend la page concernée en conservant les résultats. La sélection remplit le nom du nouveau dossier et rend le clonage disponible ; **Consulter les PR/MR** charge leurs données séparément, puis leurs discussions et statuts CI sont consultables dans cet écran dédié.
 4. Les PR/MR, commentaires et statuts CI conservent leurs boutons de pagination ; chaque page remplace la précédente. Le chargement progressif des dépôts utilise les mêmes curseurs liés au compte et à la ressource. Les collections restent bornées et un changement de compte ou de profil libère les résultats accumulés.
 5. Déconnecter retire le token du coffre et le compte du profil. Un token expiré, révoqué ou privé de droits produit une erreur ; reconnecter avec un token valide après déconnexion. Les erreurs de réseau, de coffre, de permissions et de limite d’API sont affichées au niveau de l’action concernée.
@@ -39,13 +39,35 @@ Une application OAuth doit d’abord être enregistrée sur le serveur utilisé.
 
 Après **Save application**, copier **Application ID** dans le champ de Mangrove, puis choisir **Se connecter avec GitLab**. Le champ **Secret** n’est pas utilisé. L’ID désigne l’application OAuth, et non un token personnel ; les utilisateurs d’une même application enregistrée peuvent utiliser son ID. Sur une instance auto-hébergée, enregistrer l’application sur cette instance.
 
-`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. Quand l’ID est configuré, le bouton de connexion reste visible et les instructions sont repliées sous **Configurer l’application GitLab**.
+`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. Quand l’ID est configuré, le bouton de connexion reste visible et les instructions sont repliées sous **Configuration OAuth**.
 
 Le renouvellement des tokens OAuth s’effectue avant les lectures quand leur expiration approche ; l’accès et le refresh token restent dans une seule entrée du coffre du compte. Déconnecter supprime cette entrée locale. Pour retirer aussi l’autorisation côté GitLab, révoquer Mangrove dans **Authorized applications** sur GitLab. Mangrove ne génère ni n’ajoute de clés SSH ; il utilise les clés ou agents déjà disponibles.
 
 Les renouvellements concurrents d’un compte sont coordonnés dans le processus Mangrove. La comparaison avant remplacement du coffre protège une déconnexion concurrente dans cette instance ; les coffres OS ne fournissent pas cette garantie entre plusieurs processus. Une annulation réseau ou un échec de stockage après une rotation côté GitLab peut nécessiter une reconnexion.
 
 Sources : [création d’application et droits](https://docs.gitlab.com/integration/oauth_provider/), [PKCE, renouvellement et authentification Bearer](https://docs.gitlab.com/api/oauth2/).
+
+## Connexion GitHub dans le navigateur
+
+Mangrove utilise le **Device Flow** : GitHub s’ouvre dans le navigateur système, puis vous saisissez le code temporaire affiché dans Mangrove et autorisez l’application. Aucun mot de passe ni secret d’application n’est demandé dans Mangrove. Le code peut être copié ou la page GitHub rouverte depuis la carte d’autorisation ; annuler ou changer de contexte termine l’attente et retire ce code de l’écran.
+
+Dans **Intégrations → GitHub.com**, ouvrir la configuration puis **Créer l’application dans GitHub**, ou [New OAuth App](https://github.com/settings/applications/new) :
+
+- **Application name** : `Mangrove`.
+- **Homepage URL** : `https://github.com/Dpblandin/mangrove`.
+- **Authorization callback URL** : `http://127.0.0.1:47321/oauth/callback`. GitHub demande ce champ lors de l’inscription ; le Device Flow ne l’utilise pas et n’ouvre aucun listener local.
+- **Enable Device Flow** : activé.
+- **Expire user access tokens** : peut rester activé ; les tokens expirants et leur renouvellement sont pris en charge.
+
+Enregistrer l’application, puis recopier son **Client ID** public dans Mangrove. Le **Client secret** n’est pas utilisé. Choisir **Se connecter avec GitHub**, saisir le code dans GitHub, puis revenir dans Mangrove ; l’identité du compte est vérifiée avant l’enregistrement dans le coffre.
+
+La case **Inclure les dépôts privés** est décochée par défaut. Sans cette option, Mangrove ne demande aucun scope de dépôt privé. Avec elle, l’OAuth App demande `repo` : GitHub accorde aussi des droits d’écriture, même si les adaptateurs Mangrove consultent uniquement les données. Pour des droits limités à la lecture de dépôts choisis, le formulaire de PAT fine-grained reste disponible. Les restrictions d’organisation et SSO continuent de s’appliquer.
+
+`MANGROVE_GITHUB_CLIENT_ID` préremplit le Client ID public au lancement. Un compte GitHub.com OAuth du profil actif peut aussi le fournir. Ces IDs ne sont pas réutilisés pour GitLab ou une instance Enterprise. Pour GitHub Enterprise Server, saisir la racine HTTPS et enregistrer une application sur cette instance, avec Device Flow activé et pris en charge par sa version.
+
+L’attente respecte l’intervalle fourni par GitHub, augmente le délai sur `slow_down` et s’arrête au refus, à l’expiration ou à l’annulation. Les tokens d’accès et de renouvellement éventuels restent dans une seule entrée opaque du coffre, liée au profil, au compte, à l’instance et au Client ID. Les tokens expirants sont renouvelés avant les lectures ; une déconnexion concurrente empêche leur réenregistrement. La révocation côté GitHub se fait dans **Settings → Applications → Authorized OAuth Apps**.
+
+Sources : [création de l’application](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app), [Device Flow et renouvellement](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps), [scopes OAuth](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
 
 ## Stockage et secrets
 

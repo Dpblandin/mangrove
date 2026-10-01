@@ -28,7 +28,7 @@ const CALLBACK_PORT: u16 = 47321;
 const CALLBACK_PATH: &str = "/oauth/callback";
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CALLBACK_BYTES: usize = 8192;
-const MAX_TOKEN_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_TOKEN_BYTES: usize = 16 * 1024;
 const VAULT_PREFIX: &str = "mangrove-oauth-v1:";
 type RefreshLocks = HashMap<(String, String), Weak<Mutex<()>>>;
 static REFRESH_LOCKS: LazyLock<Mutex<RefreshLocks>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -406,6 +406,7 @@ pub fn account_client(
 enum AccountCredentials {
     PersonalToken(SecretToken),
     OAuth(OAuthCredentials),
+    GitHub(crate::github_oauth::GitHubCredentials),
 }
 impl AccountCredentials {
     #[cfg(test)]
@@ -413,6 +414,7 @@ impl AccountCredentials {
         match self {
             Self::PersonalToken(token) => token.clone(),
             Self::OAuth(credentials) => credentials.access_token(),
+            Self::GitHub(credentials) => credentials.access_token(),
         }
     }
     fn provider_client<T: Transport>(
@@ -423,6 +425,7 @@ impl AccountCredentials {
         match self {
             Self::PersonalToken(token) => ProviderClient::new(transport, account, token.clone()),
             Self::OAuth(credentials) => credentials.provider_client(transport, account),
+            Self::GitHub(credentials) => credentials.provider_client(transport, account),
         }
     }
 }
@@ -452,11 +455,19 @@ fn read_credentials_with(
         let token = vault
             .read(profile_id, &account.id)?
             .ok_or(RemoteError::CredentialsExpired)?;
-        if token.expose_secret().starts_with(VAULT_PREFIX) {
+        if token.expose_secret().starts_with(VAULT_PREFIX)
+            || crate::github_oauth::is_credential_packet(&token)
+        {
             return Err(RemoteError::InvalidConfiguration);
         }
         cancel.check()?;
         return Ok(AccountCredentials::PersonalToken(token));
+    }
+    if matches!(account.authentication, Authentication::GitHubOAuth { .. }) {
+        return crate::github_oauth::read_credentials_with(
+            vault, profile_id, account, cancel, transport,
+        )
+        .map(AccountCredentials::GitHub);
     }
     if account.provider != Provider::GitLab {
         return Err(RemoteError::InvalidConfiguration);
@@ -502,7 +513,7 @@ fn read_credentials_with(
     Ok(AccountCredentials::OAuth(rotated))
 }
 
-fn refresh_lock(profile_id: &str, account_id: &str) -> Result<Arc<Mutex<()>>> {
+pub(crate) fn refresh_lock(profile_id: &str, account_id: &str) -> Result<Arc<Mutex<()>>> {
     let mut locks = REFRESH_LOCKS
         .lock()
         .map_err(|_| RemoteError::VaultUnavailable)?;
@@ -516,18 +527,26 @@ fn refresh_lock(profile_id: &str, account_id: &str) -> Result<Arc<Mutex<()>>> {
     Ok(lock)
 }
 
-struct TokenRequest<'a> {
-    endpoint: &'a Url,
-    fields: Vec<(&'static str, SecretToken)>,
+pub(crate) struct TokenRequest<'a> {
+    pub(crate) endpoint: &'a Url,
+    pub(crate) fields: Vec<(&'static str, SecretToken)>,
 }
-trait TokenTransport: Send + Sync {
+pub(crate) trait TokenTransport: Send + Sync {
     fn post(
         &self,
         request: &TokenRequest<'_>,
         cancel: &CancellationToken,
     ) -> Result<Zeroizing<Vec<u8>>>;
+    fn post_until(
+        &self,
+        request: &TokenRequest<'_>,
+        cancel: &CancellationToken,
+        _deadline: Instant,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.post(request, cancel)
+    }
 }
-struct HttpTokenTransport;
+pub(crate) struct HttpTokenTransport;
 impl TokenTransport for HttpTokenTransport {
     fn post(
         &self,
@@ -539,13 +558,31 @@ impl TokenTransport for HttpTokenTransport {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => Err(RemoteError::Cancelled),
-                result = post_token(request) => result,
+                result = post_token(request, false) => result,
+            }
+        })
+    }
+    fn post_until(
+        &self,
+        request: &TokenRequest<'_>,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        cancel.check()?;
+        runtime()?.block_on(async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Err(RemoteError::Cancelled),
+                result = tokio::time::timeout(
+                    deadline.saturating_duration_since(Instant::now()),
+                    post_token(request, true),
+                ) => result.map_err(|_| RemoteError::Timeout)?,
             }
         })
     }
 }
 
-async fn post_token(request: &TokenRequest<'_>) -> Result<Zeroizing<Vec<u8>>> {
+async fn post_token(request: &TokenRequest<'_>, oauth_errors: bool) -> Result<Zeroizing<Vec<u8>>> {
     // SafeApiUrl is constructed above, and the OAuth-only POST boundary never
     // accepts redirects or resource writes. No client secret is sent or needed.
     let client = reqwest::Client::builder()
@@ -575,8 +612,10 @@ async fn post_token(request: &TokenRequest<'_>) -> Result<Zeroizing<Vec<u8>>> {
         .send()
         .await
         .map_err(token_network_error)?;
-    match response.status().as_u16() {
+    let status = response.status().as_u16();
+    match status {
         200 => {}
+        400 | 401 | 403 if oauth_errors => {}
         400 | 401 | 403 => return Err(RemoteError::CredentialsExpired),
         429 => {
             return Err(RemoteError::RateLimited {
@@ -598,6 +637,18 @@ async fn post_token(request: &TokenRequest<'_>) -> Result<Zeroizing<Vec<u8>>> {
         }
         bytes.extend_from_slice(&chunk);
     }
+    if status != 200 {
+        #[derive(Deserialize)]
+        struct OAuthError<'a> {
+            #[serde(borrow)]
+            error: &'a str,
+        }
+        if serde_json::from_slice::<OAuthError<'_>>(&bytes)
+            .map_or(true, |response| response.error.is_empty())
+        {
+            return Err(RemoteError::CredentialsExpired);
+        }
+    }
     Ok(bytes)
 }
 
@@ -609,7 +660,7 @@ fn token_network_error(error: reqwest::Error) -> RemoteError {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -672,10 +723,10 @@ fn parse_credentials(
         client_id,
     })
 }
-fn valid_secret(value: &str) -> bool {
+pub(crate) fn valid_secret(value: &str) -> bool {
     !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
 }
-fn now() -> Result<u64> {
+pub(crate) fn now() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| RemoteError::InvalidResponse)?
@@ -1296,6 +1347,27 @@ mod tests {
         assert_eq!(protected.items[0].name, "Project [redacted]");
         assert!(protected.items[0].web_url.is_none());
         assert!(!format!("{protected:?}").contains("original-refresh"));
+    }
+
+    #[test]
+    fn token_request_deadline_reports_a_network_timeout() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = Url::parse(&format!(
+            "https://{}/oauth/token",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        assert!(matches!(
+            HttpTokenTransport.post_until(
+                &TokenRequest {
+                    endpoint: &endpoint,
+                    fields: vec![("client_id", SecretToken::from("public-id"))],
+                },
+                &CancellationToken::new(),
+                Instant::now() + Duration::from_millis(50),
+            ),
+            Err(RemoteError::Timeout)
+        ));
     }
 
     #[test]

@@ -536,7 +536,9 @@ impl IntegrationsView {
                         .filter(|_| account.provider != Provider::BitbucketCloud)
                 });
             let method = match account.authentication {
-                Authentication::GitLabOAuth { .. } => "Connexion par navigateur",
+                Authentication::GitLabOAuth { .. } | Authentication::GitHubOAuth { .. } => {
+                    "Connexion par navigateur"
+                }
                 Authentication::PersonalToken => "Token personnel",
             };
             content = content.child(
@@ -705,23 +707,10 @@ impl IntegrationsView {
                 offset,
             ));
         }
-        if self.edition.provider() == Provider::GitLab && self.gitlab_browser {
-            form = form.child(note("Autorisez Mangrove dans votre navigateur. La connexion est conservée dans le coffre sécurisé du système.", p))
-                .child(div().flex().child(primary_action("gitlab-browser-connect", "Se connecter avec GitLab", p, offset)
-                    .disabled(self.pending.is_some()).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx)))))
-                .child(div().flex().flex_wrap().gap(px(8.))
-                    .child(link_action("gitlab-application-config", if self.gitlab_config_open { "Masquer la configuration OAuth" } else { "Configuration OAuth" }, p, offset)
-                        .disabled(self.pending.is_some()).on_click(cx.listener(|this, _, _, cx| { this.gitlab_config_open = !this.gitlab_config_open; cx.notify(); })))
-                    .child(link_action("gitlab-personal-token", "Utiliser un token personnel", p, offset).disabled(self.pending.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| this.set_gitlab_browser(false, window, cx)))));
-            if self.gitlab_config_open {
-                form = form.child(div().flex().flex_col().gap(px(12.)).pt(px(16.)).border_t_1().border_color(rgb(p.border))
-                    .child(field(&self.client_id, "gitlab-client-id", "Application ID public", p, offset))
-                    .child(note("Créez une application Mangrove non confidentielle dans GitLab, avec l’autorisation read_api. Aucun secret d’application n’est nécessaire.", p))
-                    .child(div().flex().child(action("gitlab-create-application", "Créer l’application dans GitLab", p, offset)
-                        .disabled(self.pending.is_some()).on_click(cx.listener(|this, _, _, cx| this.open_gitlab_application_settings(cx)))))
-                    .child(note(&format!("URL de redirection : {}", oauth::REDIRECT_URI), p).text_size(px(11. + offset))));
-            }
+        if matches!(self.edition.provider(), Provider::GitLab | Provider::GitHub)
+            && self.browser_connection
+        {
+            form = form.child(self.browser_connection_form(cx));
         } else {
             let permissions = match self.edition.provider() {
                 Provider::GitLab => "GitLab : autorisation read_api.",
@@ -752,20 +741,25 @@ impl IntegrationsView {
                                     cx.listener(|this, _, window, cx| this.connect(window, cx)),
                                 ),
                         )
-                        .when(self.edition.provider() == Provider::GitLab, |view| {
-                            view.child(
-                                link_action(
-                                    "gitlab-browser-mode",
-                                    "Connexion par navigateur",
-                                    p,
-                                    offset,
+                        .when(
+                            matches!(self.edition.provider(), Provider::GitLab | Provider::GitHub),
+                            |view| {
+                                view.child(
+                                    link_action(
+                                        "oauth-browser-mode",
+                                        "Connexion par navigateur",
+                                        p,
+                                        offset,
+                                    )
+                                    .disabled(self.pending.is_some())
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.set_browser_connection(true, window, cx)
+                                        },
+                                    )),
                                 )
-                                .disabled(self.pending.is_some())
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| this.set_gitlab_browser(true, window, cx),
-                                )),
-                            )
-                        }),
+                            },
+                        ),
                 )
                 .child(
                     div()
@@ -779,6 +773,185 @@ impl IntegrationsView {
                 );
         }
         content.child(form)
+    }
+
+    fn browser_connection_form(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let github = self.edition.provider() == Provider::GitHub;
+        let provider = provider_label(self.edition.provider());
+        let mut content = div().flex().flex_col().gap(px(12.)).child(note(
+            if github {
+                "Mangrove ouvrira GitHub dans votre navigateur. Saisissez le code temporaire affiché ici pour autoriser la connexion."
+            } else {
+                "Autorisez Mangrove dans votre navigateur. La connexion est conservée dans le coffre sécurisé du système."
+            },
+            p,
+        ));
+        if github {
+            content = content.child(
+                gpui_kit::component::checkbox::Checkbox::new("github-private-repositories")
+                    .label("Inclure les dépôts privés")
+                    .checked(self.github_private_repos)
+                    .disabled(self.pending.is_some())
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.github_private_repos = *checked;
+                        cx.notify();
+                    })),
+            ).child(note(
+                if self.github_private_repos {
+                    "GitHub demande une autorisation qui inclut l’écriture pour accéder aux dépôts privés. Mangrove utilise ces accès pour la consultation."
+                } else {
+                    "L’accès aux dépôts privés n’est pas demandé."
+                },
+                p,
+            ));
+        }
+        if let Some(authorization) = &self.github_authorization {
+            let generation = self.generation;
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .p(px(16.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .child(note("Code à saisir dans GitHub", p))
+                    .child(
+                        div()
+                            .text_size(px(24. + offset))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(authorization.user_code.expose_secret().to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(10.))
+                            .child(
+                                action("github-device-copy", "Copier le code", p, offset).on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        if this.generation != generation {
+                                            return;
+                                        }
+                                        let Some(authorization) = &this.github_authorization else {
+                                            return;
+                                        };
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            authorization.user_code.expose_secret().to_string(),
+                                        ));
+                                    }),
+                                ),
+                            )
+                            .child(
+                                action("github-device-open", "Ouvrir GitHub", p, offset).on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        if this.generation != generation {
+                                            return;
+                                        }
+                                        if let Some(authorization) = &this.github_authorization {
+                                            cx.open_url(&authorization.verification_url);
+                                        }
+                                    }),
+                                ),
+                            ),
+                    )
+                    .child(note(
+                        "En attente de votre autorisation. Ce code expire après quelques minutes.",
+                        p,
+                    )),
+            );
+        }
+        content = content
+            .child(
+                div().flex().child(
+                    primary_action(
+                        "oauth-browser-connect",
+                        &format!("Se connecter avec {provider}"),
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .child(
+                        link_action(
+                            "oauth-application-config",
+                            if self.oauth_config_open {
+                                "Masquer la configuration OAuth"
+                            } else {
+                                "Configuration OAuth"
+                            },
+                            p,
+                            offset,
+                        )
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.oauth_config_open = !this.oauth_config_open;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        link_action(
+                            "oauth-personal-token",
+                            "Utiliser un token personnel",
+                            p,
+                            offset,
+                        )
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_browser_connection(false, window, cx)
+                        })),
+                    ),
+            );
+        if self.oauth_config_open {
+            let mut configuration = div().flex().flex_col().gap(px(12.)).pt(px(16.))
+                .border_t_1().border_color(rgb(p.border))
+                .child(field(&self.client_id, "oauth-client-id", if github { "Client ID public" } else { "Application ID public" }, p, offset))
+                .child(note(
+                    if github {
+                        "Créez une OAuth App Mangrove dans GitHub, puis activez « Enable Device Flow » et recopiez son Client ID. Aucun secret d’application n’est nécessaire."
+                    } else {
+                        "Créez une application Mangrove non confidentielle dans GitLab, avec l’autorisation read_api. Aucun secret d’application n’est nécessaire."
+                    },
+                    p,
+                ))
+                .child(div().flex().child(action("oauth-create-application", &format!("Créer l’application dans {provider}"), p, offset)
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.open_application_settings(cx)))));
+            if github {
+                configuration = configuration
+                    .child(
+                        note("Homepage URL : https://github.com/Dpblandin/mangrove", p)
+                            .text_size(px(11. + offset)),
+                    )
+                    .child(
+                        note(
+                            &format!(
+                                "Authorization callback URL : {} · inutilisée par ce parcours",
+                                oauth::REDIRECT_URI
+                            ),
+                            p,
+                        )
+                        .text_size(px(11. + offset)),
+                    );
+            } else {
+                configuration = configuration.child(
+                    note(&format!("URL de redirection : {}", oauth::REDIRECT_URI), p)
+                        .text_size(px(11. + offset)),
+                );
+            }
+            content = content.child(configuration);
+        }
+        content
     }
 
     fn accounts_rail(&self, cx: &mut Context<Self>) -> Div {

@@ -3,7 +3,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{
     base::Button,
     component::{
-        Sizable,
+        Disableable, Sizable,
         input::{Input, InputEvent, InputState},
         scroll::Scrollbar,
         searchable_list::{SearchableGroup, SearchableListDelegate, SearchableListItem},
@@ -13,8 +13,9 @@ use gpui_kit::{
     *,
 };
 use mangrove_remote::{
-    Account, Authentication, CancellationToken, CredentialVault, HttpTransport, OsCredentialVault,
-    Profile, ProfileSession, Provider, SecretToken, SessionTicket,
+    Account, Authentication, CancellationToken, CredentialVault, ExposeSecret, HttpTransport,
+    OsCredentialVault, Profile, ProfileSession, Provider, SecretToken, SessionTicket,
+    github_oauth::{self, GitHubCredentials, GitHubDeviceFlow},
     oauth::{self, GitLabOAuth, OAuthCredentials},
     providers::{
         AccountIdentity, ChangeRequest, CiStatus, Discussion, Page, PageCursor, ProviderClient,
@@ -184,17 +185,25 @@ enum PathPickerTarget {
 
 enum ConnectionRequest {
     PersonalToken(SecretToken),
-    GitLabBrowser { client_id: String },
+    GitLabBrowser {
+        client_id: String,
+    },
+    GitHubBrowser {
+        client_id: String,
+        private_repos: bool,
+    },
 }
 
 enum ConnectionCredentials {
     PersonalToken(SecretToken),
     GitLabBrowser(GitLabOAuth),
+    GitHubBrowser(GitHubDeviceFlow),
 }
 
 enum ConnectedCredentials {
     PersonalToken(SecretToken),
     GitLabOAuth(OAuthCredentials),
+    GitHubOAuth(GitHubCredentials),
 }
 
 impl ConnectedCredentials {
@@ -206,6 +215,7 @@ impl ConnectedCredentials {
         match self {
             Self::PersonalToken(token) => ProviderClient::new(transport, account, token.clone()),
             Self::GitLabOAuth(credentials) => credentials.provider_client(transport, account),
+            Self::GitHubOAuth(credentials) => credentials.provider_client(transport, account),
         }
     }
 
@@ -218,6 +228,7 @@ impl ConnectedCredentials {
         match self {
             Self::PersonalToken(token) => vault.store(profile_id, account_id, token),
             Self::GitLabOAuth(credentials) => credentials.store(vault, profile_id, account_id),
+            Self::GitHubOAuth(credentials) => credentials.store(vault, profile_id, account_id),
         }
     }
 }
@@ -227,6 +238,11 @@ enum ReadResponse {
     Changes(Page<ChangeRequest>),
     Discussions(Page<Discussion>),
     Statuses(Page<CiStatus>),
+}
+
+struct GitHubAuthorization {
+    user_code: SecretToken,
+    verification_url: String,
 }
 
 /// Bounded remote collections are retained only for the active profile/account.
@@ -247,8 +263,10 @@ pub struct IntegrationsView {
     username: Entity<InputState>,
     token: Entity<InputState>,
     client_id: Entity<InputState>,
-    gitlab_browser: bool,
-    gitlab_config_open: bool,
+    browser_connection: bool,
+    oauth_config_open: bool,
+    github_private_repos: bool,
+    github_authorization: Option<GitHubAuthorization>,
     key_path: Entity<InputState>,
     favorite: Entity<InputState>,
     ssh_remote: Entity<InputState>,
@@ -318,8 +336,8 @@ impl IntegrationsView {
                 input.set_value(path.to_string_lossy().to_string(), window, cx)
             });
         }
-        let client_id = configured_gitlab_client_id(&profile);
-        let gitlab_config_open = client_id.is_empty();
+        let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
+        let oauth_config_open = client_id.is_empty();
         let repository_menu_data = Rc::new(RefCell::new(RepositoryMenuData::default()));
         let options = RepositoryMenu::new(
             repository_menu_data.clone(),
@@ -388,11 +406,13 @@ impl IntegrationsView {
             }),
             client_id: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("Application ID public de Mangrove")
+                    .placeholder("ID public de l’application Mangrove")
                     .default_value(client_id)
             }),
-            gitlab_browser: true,
-            gitlab_config_open,
+            browser_connection: true,
+            oauth_config_open,
+            github_private_repos: false,
+            github_authorization: None,
             key_path,
             favorite: text_input("Chemin local ou URL d’un dépôt", window, cx),
             ssh_remote: text_input("ssh://git@serveur/groupe/depot.git", window, cx),
@@ -535,9 +555,10 @@ impl IntegrationsView {
                     cx,
                 )
             });
-            self.gitlab_browser = true;
-            let client_id = configured_gitlab_client_id(&profile);
-            self.gitlab_config_open = client_id.is_empty();
+            self.browser_connection = true;
+            self.github_private_repos = false;
+            let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
+            self.oauth_config_open = client_id.is_empty();
             self.client_id
                 .update(cx, |input, cx| input.set_value(client_id, window, cx));
             self.server.update(cx, |input, cx| {
@@ -585,6 +606,7 @@ impl IntegrationsView {
         self.pending = None;
         self.picker_task = None;
         self.picking_path = false;
+        self.github_authorization = None;
         self.repository_select_dirty = true;
     }
 
@@ -625,19 +647,16 @@ impl IntegrationsView {
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.edition = edition;
         self.adding_account = false;
-        self.gitlab_browser = true;
+        self.browser_connection = true;
+        self.github_private_repos = false;
         self.server.update(cx, |input, cx| {
             input.set_value(edition.server(), window, cx)
         });
         for input in [&self.label, &self.username, &self.token] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
-        let client_id = if edition == ProviderEdition::GitLab {
-            configured_gitlab_client_id(&self.profile)
-        } else {
-            String::new()
-        };
-        self.gitlab_config_open = client_id.is_empty();
+        let client_id = configured_browser_client_id(&self.profile, edition);
+        self.oauth_config_open = client_id.is_empty();
         self.client_id
             .update(cx, |input, cx| input.set_value(client_id, window, cx));
         self.message = None;
@@ -645,17 +664,27 @@ impl IntegrationsView {
         cx.notify();
     }
 
-    fn set_gitlab_browser(&mut self, browser: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.gitlab_browser = browser;
+    fn set_browser_connection(
+        &mut self,
+        browser: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_connection = browser;
         self.token
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.error = None;
         cx.notify();
     }
 
-    fn open_gitlab_application_settings(&mut self, cx: &mut Context<Self>) {
+    fn open_application_settings(&mut self, cx: &mut Context<Self>) {
         let server_url = self.server.read(cx).value().trim().to_string();
-        match oauth::application_settings_url(&server_url) {
+        let result = match self.edition.provider() {
+            Provider::GitHub => github_oauth::application_settings_url(&server_url),
+            Provider::GitLab => oauth::application_settings_url(&server_url),
+            _ => return,
+        };
+        match result {
             Ok(url) => cx.open_url(&url),
             Err(error) => {
                 self.error = Some(error.to_string());
@@ -679,23 +708,35 @@ impl IntegrationsView {
             return;
         }
         let provider = self.edition.provider();
-        let browser = provider == Provider::GitLab && self.gitlab_browser;
+        let browser =
+            matches!(provider, Provider::GitLab | Provider::GitHub) && self.browser_connection;
         let (request, authentication) = if browser {
             let client_id = self.client_id.read(cx).value().trim().to_string();
             if client_id.is_empty() {
-                self.gitlab_config_open = true;
-                self.error = Some(
-                    "Créez une application GitLab puis saisissez son Application ID public.".into(),
-                );
+                self.oauth_config_open = true;
+                self.error = Some(format!(
+                    "Créez une application {} puis saisissez son ID public.",
+                    provider_label(provider)
+                ));
                 cx.notify();
                 return;
             }
-            (
-                ConnectionRequest::GitLabBrowser {
-                    client_id: client_id.clone(),
-                },
-                Authentication::GitLabOAuth { client_id },
-            )
+            if provider == Provider::GitHub {
+                (
+                    ConnectionRequest::GitHubBrowser {
+                        client_id: client_id.clone(),
+                        private_repos: self.github_private_repos,
+                    },
+                    Authentication::GitHubOAuth { client_id },
+                )
+            } else {
+                (
+                    ConnectionRequest::GitLabBrowser {
+                        client_id: client_id.clone(),
+                    },
+                    Authentication::GitLabOAuth { client_id },
+                )
+            }
         } else {
             let draft = self.token.read(cx).value();
             let token: SecretToken = draft.to_string().into();
@@ -734,7 +775,7 @@ impl IntegrationsView {
         self.pending = Some(PendingOperation::Connect);
         self.error = None;
         self.message = Some(if browser {
-            "Ouverture de GitLab dans votre navigateur…".into()
+            format!("Préparation de la connexion {}…", provider_label(provider))
         } else {
             "Vérification du compte…".into()
         });
@@ -748,6 +789,7 @@ impl IntegrationsView {
         // written credential if cancellation races with the secure vault.
         cx.spawn(async move |this, cx| {
             let preparation_account = worker_account.clone();
+            let preparation_cancel = worker_ticket.cancellation.clone();
             let credentials = cx
                 .background_executor()
                 .spawn(async move {
@@ -759,6 +801,14 @@ impl IntegrationsView {
                         ConnectionRequest::GitLabBrowser { client_id } => {
                             GitLabOAuth::begin(&preparation_account.server_url, &client_id)
                                 .map(ConnectionCredentials::GitLabBrowser)
+                        }
+                        ConnectionRequest::GitHubBrowser { client_id, private_repos } => {
+                            GitHubDeviceFlow::begin(
+                                &preparation_account.server_url,
+                                &client_id,
+                                private_repos,
+                                &preparation_cancel,
+                            ).map(ConnectionCredentials::GitHubBrowser)
                         }
                     }
                 })
@@ -775,6 +825,15 @@ impl IntegrationsView {
                         view.message = Some(
                             "Autorisez Mangrove dans votre navigateur, puis revenez ici.".into(),
                         );
+                        cx.notify();
+                    }
+                    if let Ok(ConnectionCredentials::GitHubBrowser(flow)) = &credentials {
+                        view.github_authorization = Some(GitHubAuthorization {
+                            user_code: flow.user_code().into(),
+                            verification_url: flow.verification_url().to_string(),
+                        });
+                        cx.open_url(flow.verification_url());
+                        view.message = Some("Saisissez le code affiché ci-dessous dans GitHub, puis autorisez Mangrove.".into());
                         cx.notify();
                     }
                     true
@@ -794,6 +853,9 @@ impl IntegrationsView {
                             ConnectedCredentials::GitLabOAuth(
                                 flow.finish(&worker_ticket.cancellation)?,
                             )
+                        }
+                        ConnectionCredentials::GitHubBrowser(flow) => {
+                            ConnectedCredentials::GitHubOAuth(flow.finish(&worker_ticket.cancellation)?)
                         }
                     };
                     let client = credentials.provider_client(worker_account.clone())?;
@@ -819,6 +881,7 @@ impl IntegrationsView {
                         return false;
                     }
                     view.pending = None;
+                    view.github_authorization = None;
                     match result {
                         Ok(identity) => {
                             let mut account = account.clone();
@@ -1533,20 +1596,25 @@ fn fresh_account_id() -> String {
     )
 }
 
-fn configured_gitlab_client_id(profile: &Profile) -> String {
+fn configured_browser_client_id(profile: &Profile, edition: ProviderEdition) -> String {
+    let variable = match edition {
+        ProviderEdition::GitLab => "MANGROVE_GITLAB_CLIENT_ID",
+        ProviderEdition::GitHub => "MANGROVE_GITHUB_CLIENT_ID",
+        _ => return String::new(),
+    };
     profile
         .accounts
         .iter()
-        .filter(|account| {
-            account.provider == Provider::GitLab
-                && account.server_url.trim_end_matches('/') == "https://gitlab.com"
-        })
-        .find_map(|account| match &account.authentication {
-            Authentication::GitLabOAuth { client_id } => Some(client_id.clone()),
-            Authentication::PersonalToken => None,
+        .filter(|account| edition.matches(account))
+        .find_map(|account| match (&account.authentication, edition) {
+            (Authentication::GitLabOAuth { client_id }, ProviderEdition::GitLab)
+            | (Authentication::GitHubOAuth { client_id }, ProviderEdition::GitHub) => {
+                Some(client_id.clone())
+            }
+            _ => None,
         })
         .unwrap_or_else(|| {
-            std::env::var("MANGROVE_GITLAB_CLIENT_ID")
+            std::env::var(variable)
                 .unwrap_or_default()
                 .trim()
                 .to_string()
@@ -1605,8 +1673,8 @@ fn clone_directory_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IntegrationsEvent, accepts_response, bounded, configured_gitlab_client_id,
-        disconnect_completion,
+        IntegrationsEvent, ProviderEdition, accepts_response, bounded,
+        configured_browser_client_id, disconnect_completion,
     };
     use mangrove_remote::{
         Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
@@ -1719,9 +1787,12 @@ mod tests {
             "https://gitlab.com",
             "professional-id",
         ));
-        assert_eq!(configured_gitlab_client_id(&personal), "personal-id");
         assert_eq!(
-            configured_gitlab_client_id(&professional),
+            configured_browser_client_id(&personal, ProviderEdition::GitLab),
+            "personal-id"
+        );
+        assert_eq!(
+            configured_browser_client_id(&professional, ProviderEdition::GitLab),
             "professional-id"
         );
     }
@@ -1758,6 +1829,57 @@ mod tests {
         assert_eq!(
             failed.current_result,
             Some(Err(RemoteError::VaultUnavailable))
+        );
+    }
+
+    #[test]
+    fn github_application_id_does_not_reuse_gitlab_or_enterprise_configuration() {
+        let mut profile = Profile::new("personal", "Personnel");
+        for (id, provider, server, authentication) in [
+            (
+                "gitlab",
+                Provider::GitLab,
+                "https://gitlab.com",
+                Authentication::GitLabOAuth {
+                    client_id: "gitlab-id".into(),
+                },
+            ),
+            (
+                "enterprise",
+                Provider::GitHub,
+                "https://github.example.com",
+                Authentication::GitHubOAuth {
+                    client_id: "enterprise-id".into(),
+                },
+            ),
+            (
+                "github",
+                Provider::GitHub,
+                "https://github.com/",
+                Authentication::GitHubOAuth {
+                    client_id: "github-id".into(),
+                },
+            ),
+        ] {
+            profile.accounts.push(Account {
+                id: id.into(),
+                label: "Compte".into(),
+                provider,
+                server_url: server.into(),
+                username: None,
+                authentication,
+            });
+        }
+        assert_eq!(
+            configured_browser_client_id(&profile, ProviderEdition::GitHub),
+            "github-id"
+        );
+        assert_eq!(
+            configured_browser_client_id(&profile, ProviderEdition::GitLab),
+            "gitlab-id"
+        );
+        assert!(
+            configured_browser_client_id(&profile, ProviderEdition::GitHubEnterprise).is_empty()
         );
     }
 

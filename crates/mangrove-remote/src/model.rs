@@ -13,6 +13,8 @@ pub enum RemoteError {
     InvalidConfiguration,
     Network,
     OAuthPortInUse,
+    OAuthAccessDenied,
+    OAuthDeviceFlowDisabled,
     Timeout,
     CredentialsExpired,
     RateLimited { retry_after_seconds: Option<u64> },
@@ -38,6 +40,8 @@ impl fmt::Display for RemoteError {
             Self::InvalidConfiguration => "Configuration distante invalide.",
             Self::Network => "Connexion au serveur impossible.",
             Self::OAuthPortInUse => "Le port local de connexion est déjà utilisé. Terminez l’autre connexion puis réessayez.",
+            Self::OAuthAccessDenied => "L’autorisation a été refusée dans le navigateur.",
+            Self::OAuthDeviceFlowDisabled => "Activez Enable Device Flow dans les paramètres de l’application GitHub.",
             Self::Timeout => "Le serveur n’a pas répondu dans le délai imparti.",
             Self::CredentialsExpired => "Identifiants expirés ou révoqués.",
             Self::RateLimited { .. } => "Limite de l’API atteinte. Réessayez plus tard.",
@@ -78,6 +82,9 @@ pub enum Authentication {
     GitLabOAuth {
         client_id: String,
     },
+    GitHubOAuth {
+        client_id: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,11 +121,20 @@ impl Account {
         if let Some(username) = &self.username {
             validate_text(username, 256)?;
         }
-        if let Authentication::GitLabOAuth { client_id } = &self.authentication {
-            if self.provider != Provider::GitLab {
-                return Err(RemoteError::InvalidConfiguration);
+        match &self.authentication {
+            Authentication::PersonalToken => {}
+            Authentication::GitLabOAuth { client_id } => {
+                if self.provider != Provider::GitLab {
+                    return Err(RemoteError::InvalidConfiguration);
+                }
+                crate::oauth::validate_client_id(client_id)?;
             }
-            crate::oauth::validate_client_id(client_id)?;
+            Authentication::GitHubOAuth { client_id } => {
+                if self.provider != Provider::GitHub {
+                    return Err(RemoteError::InvalidConfiguration);
+                }
+                crate::oauth::validate_client_id(client_id)?;
+            }
         }
         Ok(())
     }
