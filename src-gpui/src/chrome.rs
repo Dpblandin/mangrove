@@ -278,7 +278,7 @@ impl Chrome {
             cx.notify();
         }
     }
-    fn remove_recent(&mut self, path: &str, cx: &mut Context<Self>) {
+    pub fn remove_recent(&mut self, path: &str, cx: &mut Context<Self>) {
         self.recent_metadata.invalidate(path);
         self.preferences.remove_recent(path);
         self.preferences_changed(cx);
@@ -310,6 +310,13 @@ impl Chrome {
     }
     pub fn zoom(&mut self, delta: Option<i32>, cx: &mut Context<Self>) {
         self.preferences.font_shortcut(delta);
+        self.preferences_changed(cx);
+    }
+    pub fn select_theme(&mut self, theme: ThemeId, window: &mut Window, cx: &mut Context<Self>) {
+        self.preferences.theme = theme;
+        self.settings.update(cx, |settings, cx| {
+            settings.set_selected_theme(theme, window, cx)
+        });
         self.preferences_changed(cx);
     }
     fn preferences_changed(&mut self, cx: &mut Context<Self>) {

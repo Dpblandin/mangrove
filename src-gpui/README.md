@@ -40,6 +40,7 @@ Le fetch manuel récupère les références de tous les remotes du dépôt actif
 
 - Accueil, sélecteur natif de dossier, recherche/suppression des dépôts récents, onglets de dépôts, barre supérieure, erreurs et paramètres d’auto-fetch.
 - Quatre thèmes Classique, Mangrove, Macchiato et Ardoise dans **Paramètres → Général → Apparence**, appliqués et mémorisés immédiatement ; zoom de l’interface, taille de police des diffs, panneaux redimensionnables à la souris et au clavier, remise à zéro par double clic et préférences persistantes.
+- Palette globale **Cmd/Ctrl + P**, également dans le menu **View → Palette de commandes…** : recherche sans distinction de casse ni d’accents, raccourcis indiqués, choix des thèmes et commandes contextuelles. **↑ / ↓** sélectionnent, **Entrée** exécute, **Échap** ferme et restitue le focus. [Inventaire des commandes](../docs/command-palette.md).
 - Références locales, distantes et tags avec dossiers repliables, filtre, tri français et numérique, sélection dans l’historique et Solo. Worktrees et stashes sont lus à la demande ; un worktree peut être ouvert et un stash inspecté.
 - Historique virtualisé, recherche par message/auteur/SHA/référence, navigation au clavier, graphe de branches et merges avec les mêmes voies du moteur et défilement horizontal du graphe.
 - Inspection des commits, métadonnées et parents, copie du SHA, liste des fichiers, compteurs, changements locaux staged/unstaged et groupes de fichiers des stashes.

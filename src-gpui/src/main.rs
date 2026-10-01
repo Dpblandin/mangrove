@@ -1,6 +1,7 @@
 mod app;
 mod chrome;
 mod code_view;
+mod command_palette;
 mod diff;
 mod file_browser;
 mod format;
