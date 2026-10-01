@@ -87,7 +87,7 @@ def render(report):
             memory_rows.append(f"| {label}, {tag} | {pair(a)} | {pair(b)} |")
     sections.append("## Mémoire de l’application entière\n\nEn MiB, **p50 / p95 entre les lancements**. Tauri inclut son processus et les trois XPC WebKit attribués par PID responsable exact : WebContent, GPU et Networking. GPUI inclut le moteur et ses threads natifs. Le stable est la médiane de la phase inactive après exclusion des premières 500 ms ; le pic est le maximum simultané observé par lancement.\n\n| Condition et mesure | Vue/Tauri | GPUI |\n| --- | ---: | ---: |\n" + "\n".join(memory_rows))
     footprint_gains = [reduction(mode, "physical_footprint_mib", "idle") for mode in (cold, warm)]
-    sections.append(f"L’empreinte physique stable baisse de **{number(min(footprint_gains), 0)} à {number(max(footprint_gains), 0)} %**, et son pic observé d’environ **{number(reduction(cold, 'peak_physical_footprint_mib'), 0)} %**. RSS et empreinte physique sont distincts ; une somme de RSS peut compter des pages partagées plusieurs fois. WindowServer et les pilotes GPU globaux ne sont pas attribués. Les prélèvements de 100 ms commencent au retour du PID LaunchServices et peuvent manquer un pic avant ce retour ou entre deux lectures.")
+    sections.append(f"L’empreinte physique stable baisse de **{number(min(footprint_gains))} à {number(max(footprint_gains))} %**, et son pic observé d’environ **{number(reduction(cold, 'peak_physical_footprint_mib'), 0)} %**. RSS et empreinte physique sont distincts ; une somme de RSS peut compter des pages partagées plusieurs fois. WindowServer et les pilotes GPU globaux ne sont pas attribués. Les prélèvements de 100 ms commencent au retour du PID LaunchServices et peuvent manquer un pic avant ce retour ou entre deux lectures.")
     cpu_items = [(f"{label}, {tag}", mode, phase)
                  for label, phase in (("Historique", "history_scroll"), ("Grand diff", "diff_scroll"), ("Repos", "idle"))
                  for mode, tag in ((cold, "cache neuf"), (warm, "cache réutilisé"))]
@@ -115,6 +115,9 @@ def render(report):
         size = f"{artifact['bytes']:,}".replace(",", " ")
         artifact_rows.append(f"| {label} | {size} octets | `{artifact['sha256']}` |")
     sections.append(f"## Artefacts mesurés\n\nLes binaires et les **{provenance['source_files_hashed']} fichiers source/manifeste/harness sélectionnés** sont inchangés pendant les 120 lancements. Le contexte conserve leur méthode de hash, les hashes du helper LaunchServices source/compilé, le matériel et la calibration.\n\n| Artefact | Taille de l’exécutable | SHA-256 |\n| --- | ---: | --- |\n" + "\n".join(artifact_rows) + f"\n\nLes tailles décrivent les exécutables, pas les bundles avec leurs ressources.\n\n- Révision Git au début : `{provenance.get('git_revision_at_start', provenance['base_git_revision'])}` ; au terme : `{provenance.get('git_revision_at_end', provenance['base_git_revision'])}`. Les sources sélectionnées sont identifiées par hash.\n- Hash des sources sélectionnées : `{provenance['uncommitted_source_tree_sha256']}`.\n- Runner exécuté : `{context['runner_source_sha256']}`.\n- Contexte gelé : `{provenance['captured_at_utc']}`.\n\nLa géométrie CoreGraphics enregistrée au lancement est un relevé précoce susceptible de refléter l’animation d’ouverture AppKit. Le viewport de contenu de 1440 × 888 est celui réellement validé ; GPUI attend cette taille avant le démarrage prêt et la relève pendant le scénario.")
+    follow_up = context.get("post_series_validation", {}).get("note")
+    if follow_up:
+        sections.append("## Contrôle après la série\n\n" + follow_up)
     return "\n\n".join(sections) + "\n"
 
 

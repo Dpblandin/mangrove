@@ -1,9 +1,9 @@
 {
-  "verified_at": "2026-09-30T23:45:30.480195+00:00",
+  "verified_at": "2026-10-01T00:02:10.732786+00:00",
   "platform": "macOS ARM64",
-  "gpui_binary_sha256": "24eb109989353cb753dbc74768ce205fed4a20a87264302ad46c8748f94e2148",
-  "gpui_test_count": 74,
-  "gpui_benchmark_test_count": 79,
+  "gpui_binary_sha256": "eb4bf4aaec84ef2aa30b80610bbc8fc9f5fcdd5924e547ee632c74f5c527d1e3",
+  "gpui_test_count": 75,
+  "gpui_benchmark_test_count": 80,
   "core_test_count": 70,
   "vue_test_count": 327,
   "fixture_test_count": 8,
@@ -117,5 +117,26 @@
     "sha256": "db026cdaeddc53e99622342c0f2f5a8302b7ee9ed5f890143fc037076ee441ba",
     "dimensions": [64, 64],
     "observed_bundle_identifier": "dev.mangrove.gpui"
+  },
+  "full_native_qa_verified_at": "2026-09-30T23:45:30.480195+00:00",
+  "post_series_regression_validation": {
+    "verified_at": "2026-09-30T23:59:36.294870+00:00",
+    "source_git_revision": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
+    "production_binary_sha256": "eb4bf4aaec84ef2aa30b80610bbc8fc9f5fcdd5924e547ee632c74f5c527d1e3",
+    "configuration": "release, default features, production bundle",
+    "checks": [
+      "75 production and 80 instrumented tests pass; clippy release all-targets -D warnings passes in both configurations",
+      "expired syntax deadline deterministically returns None for parser and lexical fallback; semantic tests use a separate 30-second budget",
+      "new production bundle: native TypeScript diff and file content remain colored and lossless",
+      "bundle Info.plist passes plutil and packaged icon bytes equal the original Mangrove icon"
+    ],
+    "capture": {
+      "file": "post-fix-diff.jpg",
+      "sha256": "83febbb967c0f591cd351d0dd83ab01dcdde2f2b96b37e789bc258bc30cbdb96",
+      "dimensions": [2880, 1840]
+    },
+    "benchmark_control_completed_at": "2026-10-01T00:01:06.765634+00:00",
+    "validated_benchmark_launches": 4,
+    "ci_run": "https://github.com/Dpblandin/mangrove/actions/runs/36793683102"
   }
 }

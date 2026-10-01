@@ -119,8 +119,114 @@
     "launch_window_geometry_note": "CGWindow rectangle recorded early during foreground activation may include opening animation; workload viewport is the actual validated 1440x888 content size. GPUI startup CPU-ready requires this viewport and records it throughout the scenario.",
     "series_started_at_utc": "2026-09-30T23:14:34.101389+00:00",
     "validation_completed_at_utc": "2026-09-30T23:40:38.976022+00:00",
-    "report_generator_source_sha256": "65d98c60207d2012888ddc9994f2055bbed76c64ac58696905d71542d1401dc0",
-    "report_generator_post_measurement_change": "After source/binary attestation and CPU calibration only: correct committed-source wording, display start/end Git revisions and shared dependency versions; measured runs/summary and application sources unchanged."
+    "report_generator_source_sha256": "697938fb90cc0afb243c44356c174499f5bf15525c2939e787ce95b1e6bf0ffb",
+    "report_generator_post_measurement_change": "After original source/binary attestation: correct committed-source wording, display start/end revisions and shared dependencies, use one decimal for physical-footprint gains, and display separately attested post-series correctness validation. Historical measurements and summary remain unchanged; post-series app source revision and hashes are recorded separately.",
+    "post_series_validation": {
+      "note": "La série de 120 lancements reste associée à la révision 77b15d5 (binaire GPUI 9be0a07486be…). Après cette série, le correctif bb1c900 refuse les résultats de coloration dont le budget de 500 ms est épuisé ; cette limite reste inchangée. Les nouveaux bundles ont passé un contrôle séparé de quatre lancements complets, avec 30 sélections de commit et 30 diffs réellement colorés par lancement, le même baseline Tauri, la même fixture et le même viewport. Leurs sources et binaires sont inchangés pendant ce contrôle. Les mesures et quantiles des 120 lancements restent inchangés ; aucun nouveau quantile de performance n’est publié. Le manifeste QA distingue les captures initiales et le contrôle natif du nouveau bundle de production.",
+      "started_at_utc": "2026-09-30T23:59:45.839609+00:00",
+      "completed_at_utc": "2026-10-01T00:01:06.765634+00:00",
+      "git_revision_at_start": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
+      "git_revision_at_end": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
+      "source_files_hashed": 130,
+      "source_sha256_at_start": "aae562cbef34b78a4e98b4b9089e95213cfdfc141cd5b8444623bc485f7ab3ec",
+      "source_sha256_at_end": "aae562cbef34b78a4e98b4b9089e95213cfdfc141cd5b8444623bc485f7ab3ec",
+      "source_hash_algorithm": "sorted selected git tracked/untracked nonignored app source/assets/package scripts, manifests/locks/configs and benchmark/fixture scripts; SHA256(path UTF8 + NUL + bytes + NUL)",
+      "source_hash_before_after_identical": true,
+      "binary_hashes_before_after_identical": true,
+      "historical_measurements_unchanged": true,
+      "artifacts": {
+        "gpui": {
+          "relative_executable_path": "src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app/Contents/MacOS/mangrove-gpui",
+          "sha256": "58f44b0868cadb4da573f9375a6f125819bb04189cce2de19939be8482b11224",
+          "bytes": 65420432
+        },
+        "tauri": {
+          "relative_executable_path": "target/release/bundle/macos/Mangrove Tauri Benchmark.app/Contents/MacOS/mangrove-desktop",
+          "sha256": "024d8b1fb388806c11885fe6e3ac7815f44bce0a288e59ab041d0bc12c7708f7",
+          "bytes": 13499472
+        }
+      },
+      "build_configuration": {
+        "gpui": {
+          "cargo_profile": "release",
+          "cargo_features": ["app-benchmark"],
+          "package_command": "sh src-gpui/scripts/package-macos.sh --benchmark",
+          "bundle_identifier": "dev.mangrove.gpui.benchmark"
+        },
+        "tauri": {
+          "cargo_profile": "release",
+          "cargo_features": ["app-benchmark"],
+          "frontend_env": {
+            "VITE_APP_BENCHMARK": "1"
+          },
+          "config_override": "src-tauri/benchmark/tauri.conf.json",
+          "bundle_identifier": "dev.mangrove.desktop.benchmark"
+        }
+      },
+      "validation_scope": "4 full-workload launches only; not a new performance distribution; historical 120 runs unchanged",
+      "expected_workload": {
+        "changed_files": 46,
+        "heavy_diff_colored": 0,
+        "heavy_diff_rows": 2000,
+        "history_total": 10007,
+        "scroll_duration_ms": 3000,
+        "scroll_speed_px_s": 2400,
+        "selection_samples": 30,
+        "syntax_samples": 30,
+        "viewport_height": 888,
+        "viewport_width": 1440
+      },
+      "validated_launches": 4,
+      "validations": [
+        {
+          "implementation": "tauri",
+          "cache_mode": "cold_app_cache",
+          "status": "ok",
+          "selection_samples": 30,
+          "syntax_colored_samples": 30,
+          "viewport": [1440, 888],
+          "history_frame_observations": 180,
+          "diff_frame_observations": 180,
+          "webview_processes_observed": 3
+        },
+        {
+          "implementation": "gpui",
+          "cache_mode": "cold_app_cache",
+          "status": "ok",
+          "selection_samples": 30,
+          "syntax_colored_samples": 30,
+          "viewport": [1440, 888],
+          "history_frame_observations": 360,
+          "diff_frame_observations": 360,
+          "webview_processes_observed": 0
+        },
+        {
+          "implementation": "tauri",
+          "cache_mode": "warm_app_cache",
+          "status": "ok",
+          "selection_samples": 30,
+          "syntax_colored_samples": 30,
+          "viewport": [1440, 888],
+          "history_frame_observations": 180,
+          "diff_frame_observations": 180,
+          "webview_processes_observed": 3
+        },
+        {
+          "implementation": "gpui",
+          "cache_mode": "warm_app_cache",
+          "status": "ok",
+          "selection_samples": 30,
+          "syntax_colored_samples": 30,
+          "viewport": [1440, 888],
+          "history_frame_observations": 360,
+          "diff_frame_observations": 356,
+          "webview_processes_observed": 0
+        }
+      ],
+      "production_binary_sha256": "eb4bf4aaec84ef2aa30b80610bbc8fc9f5fcdd5924e547ee632c74f5c527d1e3",
+      "ci_run": "https://github.com/Dpblandin/mangrove/actions/runs/36793683102"
+    },
+    "html_generator_source_sha256": "5bfd98acbc4b285a72604a70eebb38b42cbd7065fc1c2f012c46dc83aaa7ac26"
   },
   "summary": {
     "cold_app_cache": {

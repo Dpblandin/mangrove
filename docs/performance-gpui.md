@@ -75,7 +75,7 @@ En MiB, **p50 / p95 entre les lancements**. Tauri inclut son processus et les tr
 | Pic empreinte physique, cache neuf         | 547,0 / 585,0 | 252,7 / 259,7 |
 | Pic empreinte physique, cache réutilisé    | 564,6 / 575,6 | 251,0 / 253,5 |
 
-L’empreinte physique stable baisse de **13 à 13 %**, et son pic observé d’environ **54 %**. RSS et empreinte physique sont distincts ; une somme de RSS peut compter des pages partagées plusieurs fois. WindowServer et les pilotes GPU globaux ne sont pas attribués. Les prélèvements de 100 ms commencent au retour du PID LaunchServices et peuvent manquer un pic avant ce retour ou entre deux lectures.
+L’empreinte physique stable baisse de **12,5 à 13,5 %**, et son pic observé d’environ **54 %**. RSS et empreinte physique sont distincts ; une somme de RSS peut compter des pages partagées plusieurs fois. WindowServer et les pilotes GPU globaux ne sont pas attribués. Les prélèvements de 100 ms commencent au retour du PID LaunchServices et peuvent manquer un pic avant ce retour ou entre deux lectures.
 
 ## CPU et cadence de défilement
 
@@ -126,3 +126,7 @@ Les tailles décrivent les exécutables, pas les bundles avec leurs ressources.
 - Contexte gelé : `2026-09-30T23:14:34.101389+00:00`.
 
 La géométrie CoreGraphics enregistrée au lancement est un relevé précoce susceptible de refléter l’animation d’ouverture AppKit. Le viewport de contenu de 1440 × 888 est celui réellement validé ; GPUI attend cette taille avant le démarrage prêt et la relève pendant le scénario.
+
+## Contrôle après la série
+
+La série de 120 lancements reste associée à la révision 77b15d5 (binaire GPUI 9be0a07486be…). Après cette série, le correctif bb1c900 refuse les résultats de coloration dont le budget de 500 ms est épuisé ; cette limite reste inchangée. Les nouveaux bundles ont passé un contrôle séparé de quatre lancements complets, avec 30 sélections de commit et 30 diffs réellement colorés par lancement, le même baseline Tauri, la même fixture et le même viewport. Leurs sources et binaires sont inchangés pendant ce contrôle. Les mesures et quantiles des 120 lancements restent inchangés ; aucun nouveau quantile de performance n’est publié. Le manifeste QA distingue les captures initiales et le contrôle natif du nouveau bundle de production.
