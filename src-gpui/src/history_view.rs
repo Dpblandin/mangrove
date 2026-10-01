@@ -1,4 +1,5 @@
 use crate::{
+    command_palette::shortcut_label,
     format::format_count,
     graph::{self, ROW_HEIGHT},
     history::{
@@ -2259,11 +2260,11 @@ impl Render for HistoryView {
                             .gap(px(6.))
                             .opacity(0.7)
                             .child(theme::icon(IconName::Command, 11., palette.muted))
-                            .child(if cfg!(target_os = "macos") {
-                                "⌘ K pour rechercher"
-                            } else {
-                                "Ctrl K pour rechercher"
-                            }),
+                            .child(format!(
+                                "{} Rechercher · {} Commandes",
+                                shortcut_label("K"),
+                                shortcut_label("P"),
+                            )),
                     ),
             )
             .children(self.menu_element(window, cx))

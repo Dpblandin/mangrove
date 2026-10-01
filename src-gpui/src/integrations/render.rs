@@ -1610,7 +1610,7 @@ fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
 }
 
 fn primary_action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
-    action(id, label, p, offset)
+    action_base(id, label, p, offset)
         .bg(rgb(p.accent))
         .border_color(rgb(p.accent))
         .text_color(rgb(p.on_accent))
@@ -1636,6 +1636,10 @@ fn note(label: &str, p: Palette) -> Div {
 }
 
 fn action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
+    action_base(id, label, p, offset).hover(move |style| style.bg(rgb(p.hover)))
+}
+
+fn action_base(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
     Button::new(id.into())
         .px(px(12.))
         .py(px(8.))
@@ -1646,7 +1650,6 @@ fn action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> 
         .text_color(rgb(p.text))
         .cursor_pointer()
         .accessibility_label(label.to_string())
-        .hover(move |style| style.bg(rgb(p.hover)))
         .focus_visible(move |style| style.border_color(rgb(p.accent)))
         .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_default()))
         .child(div().min_w_0().whitespace_normal().child(label.to_string()))

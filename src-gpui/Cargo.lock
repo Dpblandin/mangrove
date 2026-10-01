@@ -4178,6 +4178,7 @@ dependencies = [
  "dirs 6.0.0",
  "gpui-kit",
  "icu_collator",
+ "icu_normalizer",
  "image",
  "mangrove-core",
  "mangrove-remote",

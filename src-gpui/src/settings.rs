@@ -26,8 +26,8 @@ pub enum SettingsEvent {
     ImagePreviewsChanged(bool),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SettingsSection {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsSection {
     General,
     Profiles,
     Ssh,
@@ -118,7 +118,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn select_section(
+    pub fn select_section(
         &mut self,
         section: SettingsSection,
         window: &mut Window,
@@ -179,6 +179,10 @@ impl SettingsView {
         });
         self.error = None;
         self.saved = false;
+        cx.notify();
+    }
+    pub fn set_image_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.show_image_previews = enabled;
         cx.notify();
     }
     pub fn set_selected_theme(

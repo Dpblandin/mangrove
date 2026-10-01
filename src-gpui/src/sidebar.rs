@@ -336,6 +336,32 @@ pub struct SidebarView {
 impl EventEmitter<SidebarEvent> for SidebarView {}
 
 impl SidebarView {
+    pub fn focus_references(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        self.filter_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+    pub fn show_context(&mut self, worktrees: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        if worktrees && !self.context.worktrees_expanded {
+            self.toggle_worktrees(cx);
+        } else if !worktrees && !self.context.stashes_expanded {
+            self.toggle_stashes(cx);
+        }
+        let index = self.rows.iter().position(|row| {
+            if worktrees {
+                matches!(row, SidebarRow::Worktrees { .. })
+            } else {
+                matches!(row, SidebarRow::Stashes { .. })
+            }
+        });
+        if let Some(index) = index {
+            self.list_state.scroll_to_reveal_item(index);
+        }
+        self.filter_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
     pub fn new(engine: Arc<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filtrer les références"));

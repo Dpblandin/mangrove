@@ -245,6 +245,9 @@ pub struct FileBrowser {
 impl EventEmitter<FileBrowserEvent> for FileBrowser {}
 
 impl FileBrowser {
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus.focus(window, cx);
+    }
     pub fn new(
         engine: Arc<Workspace>,
         gate: ReadGate,

@@ -3,6 +3,7 @@
 use crate::perf::{Configuration, PerfAction, PerfSession, PerfSnapshot};
 use crate::{
     chrome::{Chrome, ChromeEvent},
+    command_palette::{CommandPalette, PaletteEvent},
     history_view::{HistoryEvent, HistoryView},
     inspector::{InspectorEvent, InspectorView},
     preferences::{Pane, Preferences},
@@ -18,6 +19,8 @@ use mangrove_core::{Workspace, model::RepositoryInfo};
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 
+mod commands;
+
 actions!(
     mangrove,
     [
@@ -26,6 +29,7 @@ actions!(
         NewTab,
         CloseTab,
         ShowSettings,
+        ShowCommandPalette,
         Escape,
         Search,
         ZoomIn,
@@ -43,6 +47,7 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new(&format!("{modifier}-t"), NewTab, None),
             KeyBinding::new(&format!("{modifier}-w"), CloseTab, None),
             KeyBinding::new(&format!("{modifier}-,"), ShowSettings, None),
+            KeyBinding::new(&format!("{modifier}-p"), ShowCommandPalette, None),
             KeyBinding::new(&format!("{modifier}-k"), Search, None),
             KeyBinding::new(&format!("{modifier}-f"), Search, None),
             KeyBinding::new(&format!("{modifier}-="), ZoomIn, None),
@@ -71,6 +76,8 @@ pub fn bind_keys(cx: &mut App) {
             MenuItem::action("Tout sélectionner", SelectAll),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Palette de commandes…", ShowCommandPalette),
+            MenuItem::separator(),
             MenuItem::action("Rechercher des commits", Search),
             MenuItem::separator(),
             MenuItem::action("Agrandir le texte", ZoomIn),
@@ -96,6 +103,9 @@ pub struct Mangrove {
     refresh_queued: bool,
     pending_navigation: Option<String>,
     focus: FocusHandle,
+    command_palette: Entity<CommandPalette>,
+    palette_open: bool,
+    palette_previous_focus: Option<FocusHandle>,
     open_task: Option<Task<()>>,
     open_lane: RepositoryOpenLane,
     fetch_task: Option<Task<()>>,
@@ -130,7 +140,19 @@ impl Mangrove {
         let sidebar = cx.new(|cx| SidebarView::new(engine.clone(), window, cx));
         let inspector = cx.new(|cx| InspectorView::new(engine.clone(), window, cx));
         let chrome = cx.new(|cx| Chrome::new(preferences, window, cx));
+        let command_palette = cx.new(|cx| CommandPalette::new(window, cx));
         let subscriptions = vec![
+            cx.subscribe_in(
+                &command_palette,
+                window,
+                |view, _, event, window, cx| match event {
+                    PaletteEvent::Close => view.close_palette(window, cx),
+                    PaletteEvent::Execute(entry) => view.execute_command(entry, window, cx),
+                },
+            ),
+            cx.observe(&inspector, |view, _, cx| view.sync_palette(cx)),
+            cx.observe(&sidebar, |view, _, cx| view.sync_palette(cx)),
+            cx.observe(&chrome, |view, _, cx| view.sync_palette(cx)),
             cx.subscribe_in(&history, window, |this, _, event, window, cx| {
                 this.history_event(event, window, cx)
             }),
@@ -173,6 +195,9 @@ impl Mangrove {
             refresh_queued: false,
             pending_navigation: None,
             focus: cx.focus_handle(),
+            command_palette,
+            palette_open: false,
+            palette_previous_focus: None,
             open_task: None,
             open_lane: RepositoryOpenLane::default(),
             fetch_task: None,
@@ -291,7 +316,9 @@ impl Mangrove {
     }
 
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chrome.read(cx).repository_browser_open() {
+        if self.palette_open {
+            self.close_palette(window, cx);
+        } else if self.chrome.read(cx).repository_browser_open() {
             self.chrome_event(&ChromeEvent::CloseRepositoryBrowser, window, cx);
         } else if self.settings {
             self.chrome_event(&ChromeEvent::BackToWorkspace, window, cx);
@@ -455,6 +482,7 @@ impl Mangrove {
         let path = self.tabs.activate(id);
         self.clear_workspace(cx);
         self.leave_settings(window, cx);
+        self.focus.focus(window, cx);
         if let Some(path) = path {
             self.open(path, true, None, window, cx);
         }
@@ -469,6 +497,7 @@ impl Mangrove {
         if active {
             let path = self.tabs.active_tab().and_then(|tab| tab.path.clone());
             self.clear_workspace(cx);
+            self.focus.focus(window, cx);
             if let Some(path) = path {
                 self.open(path, true, None, window, cx);
             }
@@ -481,6 +510,7 @@ impl Mangrove {
         self.tabs.create();
         self.leave_settings(window, cx);
         self.clear_workspace(cx);
+        self.focus.focus(window, cx);
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self
@@ -666,7 +696,12 @@ impl Mangrove {
     ) {
         match event {
             InspectorEvent::ModeChanged(active) => {
-                if !active && !self.settings && !self.chrome.read(cx).choosing_repository() {
+                if !active
+                    && !self.palette_open
+                    && !self.settings
+                    && self.repository.is_some()
+                    && !self.chrome.read(cx).choosing_repository()
+                {
                     self.history
                         .update(cx, |history, cx| history.focus_list(window, cx));
                 }
@@ -1018,6 +1053,19 @@ impl Render for Mangrove {
             .text_size(px(16. + prefs.font_size_offset))
             .font_weight(FontWeight::NORMAL)
             .line_height(relative(1.5))
+            .capture_action(cx.listener(|view, _: &ShowCommandPalette, window, cx| {
+                view.open_palette(window, cx);
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(Self::guard_palette::<OpenRepository>))
+            .capture_action(cx.listener(Self::guard_palette::<NewTab>))
+            .capture_action(cx.listener(Self::guard_palette::<CloseTab>))
+            .capture_action(cx.listener(Self::guard_palette::<ShowSettings>))
+            .capture_action(cx.listener(Self::guard_palette::<Search>))
+            .capture_action(cx.listener(Self::guard_palette::<ZoomIn>))
+            .capture_action(cx.listener(Self::guard_palette::<ZoomOut>))
+            .capture_action(cx.listener(Self::guard_palette::<ZoomReset>))
+            .capture_action(cx.listener(Self::guard_palette::<Quit>))
             .on_action(
                 cx.listener(|view, _: &OpenRepository, window, cx| {
                     view.pick_repository(window, cx)
@@ -1045,6 +1093,7 @@ impl Render for Mangrove {
                 // event; focus the search after that event and the view switch.
                 cx.on_next_frame(window, |view, window, cx| {
                     if !view.settings
+                        && !view.palette_open
                         && !view.chrome.read(cx).repository_browser_open()
                         && view.repository.is_some()
                         && !view.inspector.read(cx).central_active()
@@ -1069,6 +1118,9 @@ impl Render for Mangrove {
             }))
             .on_action(cx.listener(|view, _: &Escape, window, cx| view.escape(window, cx)))
             .on_action(cx.listener(|view, _: &InputEscape, window, cx| view.escape(window, cx)));
+        let root = root.when(self.palette_open, |root| {
+            root.child(deferred(self.command_palette.clone()).with_priority(100))
+        });
         if self.settings {
             return root.child(self.chrome.read(cx).settings.clone());
         }

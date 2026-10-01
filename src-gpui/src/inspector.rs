@@ -4,8 +4,8 @@
 use crate::{
     code_view::{CodeView, CodeViewEvent},
     file_browser::{
-        FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, PreparedDiff, ReadGate,
-        action, is_activate, notice, status_icon,
+        FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
+        ReadGate, action, is_activate, notice, status_icon,
     },
     format::{commit_date, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
@@ -629,6 +629,46 @@ impl InspectorView {
     }
     pub fn central_active(&self) -> bool {
         !self.compact && self.workspace_open
+    }
+    pub fn compact(&self) -> bool {
+        self.compact
+    }
+    pub fn command_revision(&self) -> [u64; 2] {
+        [self.revision.selection, self.revision.file]
+    }
+    pub fn command_file(&self) -> Option<(&str, bool)> {
+        let choice = self.intent.choice()?;
+        if self.details_loading || self.diff_loading || self.status_loading {
+            return None;
+        }
+        self.snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.file.same_identity(choice))?;
+        Some((&choice.path, matches!(self.selection, Selection::Commit(_))))
+    }
+    pub fn command_parents(&self) -> Vec<String> {
+        self.details
+            .as_ref()
+            .filter(|details| self.selection_sha() == Some(details.sha.as_str()))
+            .map(|details| details.parents.clone())
+            .unwrap_or_default()
+    }
+    pub fn show_file_view(&mut self, mode: FileView, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, commit)) = self.command_file() else {
+            return;
+        };
+        if !commit && mode != FileView::Diff {
+            return;
+        }
+        self.set_compact(false, cx);
+        if commit {
+            self.browser.update(cx, |view, cx| {
+                view.show(mode, cx);
+                view.focus(window, cx);
+            });
+        } else {
+            self.viewer.read(cx).focus_handle(cx).focus(window, cx);
+        }
     }
     pub fn selection_sha(&self) -> Option<&str> {
         if let Selection::Commit(sha) = &self.selection {
