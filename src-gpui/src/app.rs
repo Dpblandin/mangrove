@@ -779,15 +779,7 @@ impl Mangrove {
         let inspector = self.inspector.read(cx);
         let (diff_ready, syntax_ready, diff_rows) = inspector.benchmark_readiness(cx);
         let file = inspector.selected_file_path();
-        let syntax_target = file.and_then(|path| {
-            if path.ends_with("composables/useDiff.ts") {
-                Some(0)
-            } else if path.ends_with("stores/repositories.ts") {
-                Some(1)
-            } else {
-                None
-            }
-        });
+        let syntax_target = file.and_then(|path| self.perf.as_ref()?.syntax_target(path));
         PerfSnapshot {
             history_ready: !inspector.central_active() && history.visible_loaded_rows() >= 10,
             index_complete: history.index_complete(),
@@ -799,7 +791,11 @@ impl Mangrove {
             syntax_ready,
             selected_index: history.selected_index(),
             syntax_target,
-            heavy_diff: file.is_some_and(|path| path.ends_with("generated/catalog.ts")),
+            heavy_diff: file.is_some_and(|path| {
+                self.perf
+                    .as_ref()
+                    .is_some_and(|perf| path.ends_with(perf.heavy_file()))
+            }),
             file_count: inspector.details().map_or(0, |details| details.files.len()),
             history_total: history.total(),
             diff_rows,
@@ -831,20 +827,20 @@ impl Mangrove {
             f32::from(viewport.width) as usize,
             f32::from(viewport.height) as usize,
         );
+        perf.set_accessibility_active(window.is_a11y_active());
         let action = perf.tick(snapshot);
         match action {
             Some(PerfAction::SelectCommit(index)) => self
                 .history
                 .update(cx, |view, cx| view.select_index(index, window, cx)),
-            Some(PerfAction::OpenSyntaxFile(slot)) => self.perf_open_file(
-                if slot == 0 {
-                    "composables/useDiff.ts"
-                } else {
-                    "stores/repositories.ts"
-                },
-                cx,
-            ),
-            Some(PerfAction::OpenHeavyDiff) => self.perf_open_file("generated/catalog.ts", cx),
+            Some(PerfAction::OpenSyntaxFile(slot)) => {
+                let path = self.perf.as_ref().unwrap().syntax_file(slot).to_owned();
+                self.perf_open_file(&path, cx);
+            }
+            Some(PerfAction::OpenHeavyDiff) => {
+                let path = self.perf.as_ref().unwrap().heavy_file().to_owned();
+                self.perf_open_file(&path, cx);
+            }
             Some(PerfAction::CloseDiff) => self
                 .inspector
                 .update(cx, |view, cx| view.close_workspace(cx)),
@@ -883,8 +879,20 @@ impl Mangrove {
             self.inspector
                 .update(cx, |view, cx| view.select_file(index, cx));
         } else if let Some(perf) = self.perf.as_mut() {
-            perf.fail("Synthetic benchmark file is missing".into());
+            perf.fail("Benchmark file is missing".into());
         }
+    }
+}
+
+fn render_pane<T: Render + 'static>(view: Entity<T>, window: &Window) -> AnyElement {
+    // gpui-pre 0.3.7 replays cached paint/input records, but not accessibility
+    // nodes. Build the full subtree while assistive technology is connected.
+    // GPUI forces a redraw when accessibility becomes active.
+    if window.is_a11y_active() {
+        view.into_any_element()
+    } else {
+        view.cached(StyleRefinement::default().size_full())
+            .into_any_element()
     }
 }
 
@@ -976,7 +984,7 @@ impl Render for Mangrove {
             .chrome
             .update(cx, |chrome, cx| chrome.render_topbar(window, cx));
         let sidebar = if self.repository.is_some() {
-            self.sidebar.clone().into_any_element()
+            render_pane(self.sidebar.clone(), window)
         } else {
             self.chrome
                 .read(cx)
@@ -991,7 +999,7 @@ impl Render for Mangrove {
             self.inspector
                 .update(cx, |view, cx| view.render_workspace(window, cx))
         } else if self.repository.is_some() {
-            self.history.clone().into_any_element()
+            render_pane(self.history.clone(), window)
         } else if self.opening {
             div().flex_1().into_any_element()
         } else {

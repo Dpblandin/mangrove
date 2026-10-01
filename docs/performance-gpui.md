@@ -151,3 +151,29 @@ cargo run --release --locked --manifest-path src-gpui/Cargo.toml \
   src-gpui/src/file_browser.rs src-gpui/src/history.rs \
   src-gpui/src/inspector.rs src-gpui/src/syntax.rs
 ```
+
+## Scroll du grand diff coloré
+
+Un second contrôle porte sur `src-gpui/src/code_view.rs` au même commit : **1 619 lignes avec coloration**, fenêtre de contenu 1440 × 888, cinq paires de nouveaux processus release avec `app-benchmark`, cache SQLite réutilisé et ordre avant/après alterné. Les deux binaires utilisent le moteur corrigé ; seuls les caches de vue autour de la sidebar et de l’historique changent dans le renderer. LaunchServices atteste l’activation sur l’écran principal pour chaque lancement retenu. Trois lancements dont l’activation n’a pas été attestée sont exclus. Les essais exploratoires précédents sont distincts de cette série. Les [relevés par lancement, hashes et critères](performance-scroll-gpui.json) permettent de vérifier les agrégats ; les rapports de frames bruts restent locaux dans `.mangrove-dev/performance/scroll-panels-verified-*.json`.
+
+La **médiane des médianes de dessin CPU par frame passe de 2,709 à 2,498 ms**, soit **7,8 % de moins**. La médiane des p95 passe de 3,409 à 3,248 ms. Les intervalles de soumission médians restent autour de **8,32 ms** ; la médiane de leurs p95 passe de 8,96 à 9,18 ms. Un pic de 49,5 ms existe après le changement. Cette petite série établit un coût de dessin réduit dans ce scénario, mais ne démontre ni une cadence écran améliorée, ni l’absence de saccades, ni un avantage sur Tauri. La charge de fond n’est pas neutralisée et les trois secondes à 2400 pixels/s sont une commande de scroll, pas un relevé de distance parcourue.
+
+L’optimisation réutilise les panneaux inchangés via `Entity::cached`, avec une boîte de layout de taille définie, lorsque l’accessibilité n’est pas active. GPUI 0.3.7 ne rejoue pas les nœuds AccessKit de ces sous-arbres : une consultation native a fait disparaître l’historique de l’arbre d’accessibilité après filtrage de la sidebar. Le rendu complet est donc conservé quand `window.is_a11y_active()` est vrai ; GPUI force un redraw à l’activation de l’accessibilité. Les mesures ci-dessus décrivent la branche sans accessibilité active et précèdent cet ajout du garde. Les changements de données et de thème notifient déjà ces vues ; le cache GPUI tient aussi compte des bounds, du clipping et du style hérité. Ce choix suit le [guide officiel des caches de vue GPUI Kit](https://gpui-kit.com/docs/view-cache/). Le cache expérimental des styles de lignes a été retiré : ses cinq paires exploratoires n’ont pas montré de gain net.
+
+Le harness accepte désormais des cibles explicites, uniquement quand `MANGROVE_BENCH_OUTPUT` active le benchmark. Pour reproduire le scénario, utiliser une copie bare du dépôt dont la seule branche pointe sur `941b0ed433a990a81418508280955425ce788dde`, puis :
+
+```sh
+sh src-gpui/scripts/package-macos.sh --benchmark
+MANGROVE_BENCH_REPO=/chemin/absolu/fixture.git \
+MANGROVE_BENCH_CACHE=/chemin/absolu/cache \
+MANGROVE_BENCH_OUTPUT=/chemin/absolu/report.json \
+MANGROVE_BENCH_SAMPLES=2 \
+MANGROVE_BENCH_SYNTAX_0=src-gpui/src/history.rs \
+MANGROVE_BENCH_SYNTAX_1=src-gpui/src/inspector.rs \
+MANGROVE_BENCH_HEAVY=src-gpui/src/code_view.rs \
+'src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app/Contents/MacOS/mangrove-gpui'
+```
+
+La commande directe reproduit la charge dans l’application ; pour la série contrôlée, les bundles figés avant/après sont lancés avec `scripts/benchmark-launch.swift` afin d’attester l’activation et l’écran. Le baseline reprend `1b7d8d0` avec les mêmes cibles de benchmark, sans les deux frontières `cached` ; leurs binaires sont identifiés dans le relevé JSON. Les cibles historiques restent les valeurs par défaut.
+
+Le build final a passé les 77 tests de production et les 82 tests avec `app-benchmark`, Clippy sur toutes les cibles avec `-D warnings`, le formatage et le packaging release. Un lancement fonctionnel après ajout du garde valide à nouveau les 145 fichiers, les 1 619 lignes colorées et `accessibility_active=false` ; ce lancement est hors série quantitative. Le contrôle natif avec accessibilité active conserve l’historique après filtrage, restaure les références et permet de changer de commit.

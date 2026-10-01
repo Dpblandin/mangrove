@@ -21,6 +21,8 @@ pub struct Configuration {
     pub output: PathBuf,
     pub repository: String,
     pub cache: PathBuf,
+    pub syntax_files: [String; 2],
+    pub heavy_file: String,
 }
 
 impl Configuration {
@@ -29,11 +31,28 @@ impl Configuration {
         if output.is_none() {
             return Ok(None);
         }
-        Self::from_paths(
+        let mut configuration = Self::from_paths(
             output,
             std::env::var_os("MANGROVE_BENCH_REPO").map(PathBuf::from),
             std::env::var_os("MANGROVE_BENCH_CACHE").map(PathBuf::from),
-        )
+        )?;
+        if let Some(configuration) = &mut configuration {
+            for (slot, path) in configuration.syntax_files.iter_mut().enumerate() {
+                let name = format!("MANGROVE_BENCH_SYNTAX_{slot}");
+                Self::file_override(&name, path)?;
+            }
+            Self::file_override("MANGROVE_BENCH_HEAVY", &mut configuration.heavy_file)?;
+        }
+        Ok(configuration)
+    }
+
+    fn file_override(name: &str, path: &mut String) -> Result<(), String> {
+        match std::env::var(name) {
+            Ok(value) if !value.is_empty() => *path = value,
+            Err(std::env::VarError::NotPresent) => {}
+            _ => return Err(format!("{name} must be a nonempty UTF-8 file path")),
+        }
+        Ok(())
     }
 
     fn from_paths(
@@ -56,6 +75,11 @@ impl Configuration {
             output,
             repository,
             cache,
+            syntax_files: [
+                "composables/useDiff.ts".into(),
+                "stores/repositories.ts".into(),
+            ],
+            heavy_file: "generated/catalog.ts".into(),
         }))
     }
 
@@ -119,6 +143,7 @@ struct Report {
 
 #[derive(Serialize, Default)]
 struct Workload {
+    accessibility_active: bool,
     history_total: usize,
     changed_files: usize,
     heavy_diff_rows: usize,
@@ -146,6 +171,8 @@ enum Stage {
 }
 
 pub struct PerfSession {
+    syntax_files: [String; 2],
+    heavy_file: String,
     output: PathBuf,
     phase_path: PathBuf,
     started: Instant,
@@ -189,6 +216,8 @@ impl PerfSession {
         profiler::set_trace_enabled(true);
         let phase_path = output.with_extension("phase");
         let mut session = Self {
+            syntax_files: configuration.syntax_files,
+            heavy_file: configuration.heavy_file,
             output,
             phase_path,
             started,
@@ -329,6 +358,24 @@ impl PerfSession {
     pub fn set_viewport(&mut self, width: usize, height: usize) {
         self.report.workload.viewport_width = width;
         self.report.workload.viewport_height = height;
+    }
+
+    pub fn set_accessibility_active(&mut self, active: bool) {
+        self.report.workload.accessibility_active |= active;
+    }
+
+    pub fn syntax_target(&self, path: &str) -> Option<usize> {
+        self.syntax_files
+            .iter()
+            .position(|file| path.ends_with(file))
+    }
+
+    pub fn syntax_file(&self, slot: usize) -> &str {
+        &self.syntax_files[slot]
+    }
+
+    pub fn heavy_file(&self) -> &str {
+        &self.heavy_file
     }
 
     pub fn tick(&mut self, snapshot: PerfSnapshot) -> Option<PerfAction> {
