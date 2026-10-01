@@ -99,7 +99,7 @@ pub struct Mangrove {
     open_lane: RepositoryOpenLane,
     fetch_task: Option<Task<()>>,
     fetch_timer: Option<Task<()>>,
-    dialog_task: Option<Task<()>>,
+    picker_task: Option<Task<()>>,
     recent_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     #[cfg(feature = "app-benchmark")]
@@ -143,7 +143,7 @@ impl Mangrove {
                 this.chrome_event(event, window, cx)
             }),
             cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
+                if window.is_window_active() && !this.chrome.read(cx).choosing_repository() {
                     #[cfg(feature = "app-benchmark")]
                     if this.perf.is_some() {
                         return;
@@ -176,7 +176,7 @@ impl Mangrove {
             open_lane: RepositoryOpenLane::default(),
             fetch_task: None,
             fetch_timer: None,
-            dialog_task: None,
+            picker_task: None,
             recent_task: None,
             _subscriptions: subscriptions,
             #[cfg(feature = "app-benchmark")]
@@ -317,7 +317,6 @@ impl Mangrove {
         self.fetch_timer = None;
         if !refresh {
             self.settings = false;
-            self.chrome.update(cx, |chrome, cx| chrome.close_dialog(cx));
         }
         if !same_path {
             self.repository = None;
@@ -447,25 +446,45 @@ impl Mangrove {
         self.clear_workspace(cx);
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.chrome
-            .update(cx, |chrome, cx| chrome.set_choosing(true, cx));
-        self.dialog_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let folder = rfd::AsyncFileDialog::new()
-                .set_title("Ouvrir un dépôt Git")
-                .pick_folder()
-                .await;
+        if !self
+            .chrome
+            .update(cx, |chrome, cx| chrome.begin_repository_picker(cx))
+        {
+            return;
+        }
+        let previous_focus = if self.settings {
+            Some(self.focus.clone())
+        } else {
+            window.focused(cx)
+        };
+        self.settings = false;
+        let picker = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_title("Ouvrir un dépôt Git");
+        cx.notify();
+        self.picker_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let folder = picker.pick_folder().await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |view, cx| {
-                    view.chrome.update(cx, |chrome, cx| {
-                        chrome.set_choosing(false, cx);
-                        if let Some(folder) = folder {
-                            chrome.set_chosen_path(
-                                folder.path().to_string_lossy().into_owned(),
-                                window,
-                                cx,
-                            );
-                        }
-                    });
+                    view.picker_task = None;
+                    view.chrome
+                        .update(cx, |chrome, cx| chrome.finish_repository_picker(cx));
+                    if let Some(folder) = folder {
+                        view.focus.focus(window, cx);
+                        view.open(
+                            folder.path().to_string_lossy().into_owned(),
+                            false,
+                            None,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        previous_focus
+                            .as_ref()
+                            .unwrap_or(&view.focus)
+                            .focus(window, cx);
+                    }
+                    cx.notify();
                 });
             });
         }));
@@ -600,7 +619,7 @@ impl Mangrove {
     ) {
         match event {
             InspectorEvent::ModeChanged(active) => {
-                if !active && !self.settings && !self.chrome.read(cx).dialog_open() {
+                if !active && !self.settings && !self.chrome.read(cx).choosing_repository() {
                     self.history
                         .update(cx, |history, cx| history.focus_list(window, cx));
                 }
@@ -653,9 +672,15 @@ impl Mangrove {
             ChromeEvent::CloseTab(id) => self.close_tab(*id, window, cx),
             ChromeEvent::NewTab => self.new_tab(cx),
             ChromeEvent::ShowSettings => {
+                if self.settings {
+                    return;
+                }
+                let chrome = self.chrome.read(cx);
+                let settings = chrome.settings.clone();
+                let interval = chrome.preferences.auto_fetch_interval;
+                settings.update(cx, |view, cx| view.set_interval(interval, window, cx));
+                self.focus.focus(window, cx);
                 self.settings = true;
-                let settings = self.chrome.read(cx).settings.clone();
-                settings.update(cx, |view, cx| view.focus(window, cx));
                 cx.notify();
             }
             ChromeEvent::BackToWorkspace => {
@@ -867,6 +892,76 @@ impl Render for Mangrove {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prefs = self.chrome.read(cx).preferences.clone();
         let p = prefs.palette();
+        let root =
+            div()
+                .id("mangrove-app")
+                .track_focus(&self.focus)
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .bg(rgb(p.bg))
+                .text_color(rgb(p.text))
+                .font_family(SANS)
+                .text_size(px(16. + prefs.font_size_offset))
+                .font_weight(FontWeight::NORMAL)
+                .line_height(relative(1.5))
+                .on_action(cx.listener(|view, _: &OpenRepository, window, cx| {
+                    view.pick_repository(window, cx)
+                }))
+                .on_action(cx.listener(|view, _: &NewTab, _, cx| view.new_tab(cx)))
+                .on_action(cx.listener(|view, _: &CloseTab, window, cx| {
+                    if let Some(id) = view.tabs.active {
+                        view.close_tab(id, window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
+                    view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
+                }))
+                .on_action(cx.listener(|view, _: &Search, window, cx| {
+                    if view.repository.is_none() {
+                        return;
+                    }
+                    view.settings = false;
+                    view.inspector
+                        .update(cx, |inspector, cx| inspector.close_workspace(cx));
+                    // ModeChanged restores the list focus through a queued
+                    // event; focus the search after that event and the view switch.
+                    cx.on_next_frame(window, |view, window, cx| {
+                        if !view.settings
+                            && view.repository.is_some()
+                            && !view.inspector.read(cx).central_active()
+                            && !view.chrome.read(cx).choosing_repository()
+                        {
+                            view.history
+                                .update(cx, |history, cx| history.focus_search(window, cx));
+                        }
+                    });
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|view, _: &ZoomIn, _, cx| {
+                    view.chrome
+                        .update(cx, |chrome, cx| chrome.zoom(Some(1), cx))
+                }))
+                .on_action(cx.listener(|view, _: &ZoomOut, _, cx| {
+                    view.chrome
+                        .update(cx, |chrome, cx| chrome.zoom(Some(-1), cx))
+                }))
+                .on_action(cx.listener(|view, _: &ZoomReset, _, cx| {
+                    view.chrome.update(cx, |chrome, cx| chrome.zoom(None, cx))
+                }))
+                .on_action(cx.listener(|view, _: &Escape, window, cx| {
+                    if view.settings {
+                        view.chrome_event(&ChromeEvent::BackToWorkspace, window, cx);
+                    } else if view.inspector.read(cx).central_active() {
+                        view.inspector
+                            .update(cx, |inspector, cx| inspector.close_workspace(cx));
+                    }
+                }));
+        if self.settings {
+            return root.child(self.chrome.read(cx).settings.clone());
+        }
         let width = f32::from(window.viewport_size().width);
         let layout = prefs.pane_layout(width);
         self.sidebar
@@ -892,9 +987,7 @@ impl Render for Mangrove {
         let left_divider = self.chrome.update(cx, |chrome, cx| {
             chrome.render_divider(Pane::Left, width, window, cx)
         });
-        let center = if self.settings {
-            self.chrome.read(cx).settings.clone().into_any_element()
-        } else if self.repository.is_some() && self.inspector.read(cx).central_active() {
+        let center = if self.repository.is_some() && self.inspector.read(cx).central_active() {
             self.inspector
                 .update(cx, |view, cx| view.render_workspace(window, cx))
         } else if self.repository.is_some() {
@@ -908,119 +1001,61 @@ impl Render for Mangrove {
         let right_divider = self.chrome.update(cx, |chrome, cx| {
             chrome.render_divider(Pane::Right, width, window, cx)
         });
-        let dialog = self
-            .chrome
-            .update(cx, |chrome, cx| chrome.render_dialog(window, cx));
-        div()
-            .id("mangrove-app")
-            .track_focus(&self.focus)
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(rgb(p.bg))
-            .text_color(rgb(p.text))
-            .font_family(SANS)
-            .text_size(px(16. + prefs.font_size_offset))
-            .font_weight(FontWeight::NORMAL)
-            .line_height(relative(1.5))
-            .on_action(cx.listener(|view, _: &OpenRepository, window, cx| {
-                view.chrome
-                    .update(cx, |chrome, cx| chrome.show_repository_dialog(window, cx))
-            }))
-            .on_action(cx.listener(|view, _: &NewTab, _, cx| view.new_tab(cx)))
-            .on_action(cx.listener(|view, _: &CloseTab, window, cx| {
-                if let Some(id) = view.tabs.active {
-                    view.close_tab(id, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
-                view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
-            }))
-            .on_action(cx.listener(|view, _: &Search, window, cx| {
-                view.history
-                    .update(cx, |history, cx| history.focus_search(window, cx))
-            }))
-            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| {
-                view.chrome
-                    .update(cx, |chrome, cx| chrome.zoom(Some(1), cx))
-            }))
-            .on_action(cx.listener(|view, _: &ZoomOut, _, cx| {
-                view.chrome
-                    .update(cx, |chrome, cx| chrome.zoom(Some(-1), cx))
-            }))
-            .on_action(cx.listener(|view, _: &ZoomReset, _, cx| {
-                view.chrome.update(cx, |chrome, cx| chrome.zoom(None, cx))
-            }))
-            .on_action(cx.listener(|view, _: &Escape, _, cx| {
-                if view.chrome.read(cx).dialog_open() {
-                    view.chrome.update(cx, |chrome, cx| chrome.close_dialog(cx));
-                } else if view.settings {
-                    view.settings = false;
-                    cx.notify();
-                } else if view.inspector.read(cx).central_active() {
-                    view.inspector
-                        .update(cx, |inspector, cx| inspector.close_workspace(cx));
-                }
-            }))
-            .child(tabs)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .w(px(layout.left))
-                            .flex_shrink_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .bg(rgb(p.panel))
-                            .child(div().flex_1().min_h_0().child(sidebar))
-                            .child(footer),
-                    )
-                    .child(left_divider)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(topbar)
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_hidden()
-                                    .child(
+        root.child(tabs).child(
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w(px(layout.left))
+                        .flex_shrink_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .bg(rgb(p.panel))
+                        .child(div().flex_1().min_h_0().child(sidebar))
+                        .child(footer),
+                )
+                .child(left_divider)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(topbar)
+                        .child(
+                            div()
+                                .relative()
+                                .flex()
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .h_full()
+                                        .flex()
+                                        .flex_col()
+                                        .child(center),
+                                )
+                                .when(self.repository.is_some(), |view| {
+                                    view.child(right_divider).child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .min_h_0()
+                                            .w(px(layout.right))
                                             .h_full()
-                                            .flex()
-                                            .flex_col()
-                                            .child(center),
+                                            .flex_shrink_0()
+                                            .child(self.inspector.clone()),
                                     )
-                                    .when(self.repository.is_some() && !self.settings, |view| {
-                                        view.child(right_divider).child(
-                                            div()
-                                                .w(px(layout.right))
-                                                .h_full()
-                                                .flex_shrink_0()
-                                                .child(self.inspector.clone()),
-                                        )
-                                    })
-                                    .children(error_toast),
-                            ),
-                    ),
-            )
-            .children(dialog)
+                                })
+                                .children(error_toast),
+                        ),
+                ),
+        )
     }
 }

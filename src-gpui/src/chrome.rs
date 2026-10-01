@@ -3,7 +3,7 @@ use crate::{
     preferences::{Pane, Preferences, RecentRepository},
     recent_repositories::{RecentMetadata, RecentNamesRequest},
     settings::{SettingsEvent, SettingsView},
-    theme::{MONO, Palette, ThemeId, icon, mix, scrollbar_theme},
+    theme::{Palette, ThemeId, icon, mix, scrollbar_theme},
 };
 use gpui_kit::{
     assets::IconName,
@@ -79,12 +79,8 @@ pub struct Chrome {
     choosing: bool,
     fetching: bool,
     error: Option<String>,
-    dialog: bool,
-    validation_error: Option<String>,
-    path_input: Entity<InputState>,
     recent_filter: Entity<InputState>,
     welcome_scroll: ScrollHandle,
-    dialog_scroll: ScrollHandle,
     theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     separator_focus: [FocusHandle; 2],
     resize: Option<Resize>,
@@ -95,8 +91,6 @@ impl EventEmitter<ChromeEvent> for Chrome {}
 
 impl Chrome {
     pub fn new(preferences: Preferences, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let path_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("/Users/vous/Developer/mon-projet"));
         let recent_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Rechercher un dépôt récent…"));
         let initial_theme = ThemeId::ALL
@@ -121,18 +115,6 @@ impl Chrome {
             )
         });
         let subscriptions = vec![
-            cx.subscribe_in(
-                &path_input,
-                window,
-                |this, _, event, window, cx| match event {
-                    InputEvent::Change => {
-                        this.validation_error = None;
-                        cx.notify();
-                    }
-                    InputEvent::PressEnter { .. } => this.submit_path(window, cx),
-                    _ => {}
-                },
-            ),
             cx.subscribe(&recent_filter, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&theme_select, |this, _, event, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event
@@ -167,12 +149,8 @@ impl Chrome {
             choosing: false,
             fetching: false,
             error: None,
-            dialog: false,
-            validation_error: None,
-            path_input,
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
-            dialog_scroll: ScrollHandle::default(),
             theme_select,
             separator_focus: [cx.focus_handle(), cx.focus_handle()],
             resize: None,
@@ -275,42 +253,23 @@ impl Chrome {
         self.preferences.remove_recent(path);
         self.preferences_changed(cx);
     }
-    pub fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn begin_repository_picker(&mut self, cx: &mut Context<Self>) -> bool {
         if self.busy || self.choosing || self.resize.is_some() {
-            return;
+            return false;
         }
-        self.dialog = true;
-        self.validation_error = None;
-        self.path_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.choosing = true;
         cx.notify();
+        true
     }
-    pub fn show_repository_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_dialog(window, cx);
+    pub fn choosing_repository(&self) -> bool {
+        self.choosing
+    }
+    pub fn finish_repository_picker(&mut self, cx: &mut Context<Self>) {
+        self.choosing = false;
+        cx.notify();
     }
     pub fn prefs_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.preferences_changed(cx);
-    }
-    pub fn close_dialog(&mut self, cx: &mut Context<Self>) {
-        if !self.busy && !self.choosing {
-            self.dialog = false;
-            cx.notify();
-        }
-    }
-    pub fn dialog_open(&self) -> bool {
-        self.dialog
-    }
-    pub fn set_choosing(&mut self, choosing: bool, cx: &mut Context<Self>) {
-        self.choosing = choosing;
-        cx.notify();
-    }
-    pub fn set_chosen_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.path_input.update(cx, |input, cx| {
-            input.set_value(path, window, cx);
-            input.focus(window, cx)
-        });
-        self.validation_error = None;
-        cx.notify();
     }
     pub fn zoom(&mut self, delta: Option<i32>, cx: &mut Context<Self>) {
         self.preferences.font_shortcut(delta);
@@ -331,22 +290,6 @@ impl Chrome {
         });
         cx.emit(ChromeEvent::PreferencesChanged);
         cx.notify();
-    }
-    fn submit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || self.choosing {
-            return;
-        }
-        let path = self.path_input.read(cx).value().trim().to_string();
-        if path.is_empty() {
-            self.validation_error =
-                Some("Indiquez le chemin du dossier qui contient votre dépôt Git.".into());
-            self.path_input
-                .update(cx, |input, cx| input.focus(window, cx));
-            cx.notify();
-        } else {
-            self.validation_error = None;
-            cx.emit(ChromeEvent::OpenRepository(path));
-        }
     }
     fn tab_key(
         &mut self,
@@ -588,7 +531,7 @@ impl Chrome {
                             .accessibility_label("Paramètres")
                             .tooltip("Paramètres · ⌘ ,")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.dialog && this.resize.is_none() {
+                                if !this.choosing && this.resize.is_none() {
                                     cx.emit(ChromeEvent::ShowSettings)
                                 }
                             })),
@@ -599,11 +542,11 @@ impl Chrome {
                             .w(px(28.))
                             .h(px(28.))
                             .icon(icon(IconName::FolderOpen, 17., p.muted))
-                            .disabled(self.busy)
+                            .disabled(self.busy || self.choosing)
                             .accessibility_label("Ouvrir un dépôt")
                             .tooltip("Ouvrir un dépôt · ⌘ O")
                             .on_click(
-                                cx.listener(|this, _, window, cx| this.open_dialog(window, cx)),
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository)),
                             ),
                     ),
             )
@@ -769,8 +712,8 @@ impl Chrome {
                             .ml(px(14.))
                             .child(icon(IconName::ArrowRight, 15., p.on_accent)),
                     )
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx))),
+                    .disabled(self.busy || self.choosing)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository))),
             )
             .child(
                 div()
@@ -791,19 +734,16 @@ impl Chrome {
                         offset,
                     )),
             )
-            .when_some(
-                self.error.clone().filter(|_| !self.dialog),
-                |view, error| {
-                    view.child(
-                        div()
-                            .mt(px(15.))
-                            .max_w(px(450.))
-                            .text_size(px(11. + offset))
-                            .text_color(rgb(p.danger))
-                            .child(error),
-                    )
-                },
-            )
+            .when_some(self.error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .mt(px(15.))
+                        .max_w(px(450.))
+                        .text_size(px(11. + offset))
+                        .text_color(rgb(p.danger))
+                        .child(error),
+                )
+            })
             .when(!self.preferences.recent.is_empty(), |view| {
                 view.child(
                     div()
@@ -979,38 +919,6 @@ impl Chrome {
             ))
             .into_any_element()
     }
-    pub fn render_dialog(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.dialog {
-            return None;
-        }
-        let p = self.preferences.palette();
-        let offset = self.preferences.font_size_offset;
-        let error = self.validation_error.clone().or_else(|| self.error.clone());
-        Some(div().id("repository-dialog-overlay").absolute().inset_0().flex().items_center().justify_center().bg(rgb(p.bg).opacity(0.85)).occlude()
-            .on_mouse_down(MouseButton::Left,cx.listener(|this,_,_,cx|this.close_dialog(cx)))
-            .child(div().id("repository-dialog").w(px(480.)).max_w_full().max_h_full().overflow_y_scroll().track_scroll(&self.dialog_scroll).relative().p(px(30.)).rounded(px(14.)).border_1().border_color(rgb(p.border)).bg(rgb(p.panel)).text_color(rgb(p.text))
-                .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
-                .on_key_down(cx.listener(|this,event: &KeyDownEvent,_,cx|if event.keystroke.key=="escape"{this.close_dialog(cx);cx.stop_propagation()}))
-                .child(Button::new("dialog-close").ghost().absolute().top(px(16.)).right(px(16.)).w(px(28.)).h(px(28.)).icon(icon(IconName::X,17.,p.muted)).disabled(self.busy||self.choosing).accessibility_label("Fermer").on_click(cx.listener(|this,_,_,cx|this.close_dialog(cx))))
-                .child(div().size(px(50.)).mb(px(21.)).flex().items_center().justify_center().rounded(px(12.)).border_1().border_color(rgb(p.accent_border)).bg(rgb(mix(p.accent,p.panel,0.09))).child(icon(IconName::FolderOpen,25.,p.accent)))
-                .child(div().text_size(px(9.+offset)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(p.accent)).child("VOTRE HISTORIQUE, EN CLAIR"))
-                .child(div().mt(px(9.)).mb(px(10.)).text_size(px(25.+offset)).font_weight(FontWeight::MEDIUM).child("Ouvrir un dépôt"))
-                .child(div().mb(px(26.)).text_size(px(12.+offset)).line_height(px((12.+offset)*1.8)).text_color(rgb(p.muted)).child("Explorez les branches, les commits et les modifications d’un dépôt Git présent sur votre ordinateur."))
-                .child(div().mb(px(9.)).text_size(px(11.+offset)).font_weight(FontWeight::MEDIUM).child("Chemin du dépôt"))
-                .child(Input::new(&self.path_input).h(px(44.)).text_size(px(11.+offset)).font_family(MONO).disabled(self.busy||self.choosing)
-                    .prefix(icon(IconName::FolderOpen,16.,p.muted))
-                    .suffix(Button::new("dialog-browse").outline().h(px(27.)).px(px(7.)).text_size(px(10.+offset)).label(if self.choosing{"…"}else{"Parcourir"}).disabled(self.busy||self.choosing).on_click(cx.listener(|_,_,_,cx|cx.emit(ChromeEvent::PickRepository)))))
-                .child(div().mt(px(9.)).text_size(px(if error.is_some(){11.}else{10.}+offset)).line_height(px(18.)).text_color(rgb(if error.is_some(){p.danger}else{p.muted})).child(error.unwrap_or_else(||"Choisissez le dossier du projet. Les dépôts bare et les worktrees sont aussi pris en charge.".into())))
-                .child(div().mt(px(23.)).p(px(14.)).flex().items_start().gap(px(10.)).rounded(px(7.)).border_1().border_color(rgb(p.border)).bg(rgb(mix(p.accent,p.panel,0.03)))
-                    .child(icon(IconName::ShieldCheck,16.,p.accent))
-                    .child(div().flex_1().text_size(px(11.+offset)).line_height(px(18.)).child("Vos fichiers restent intacts.").child(div().text_size(px(10.+offset)).text_color(rgb(p.muted)).child("Mangrove ne modifie ni vos fichiers ni votre index. L’auto-fetch actualise les références distantes selon l’intervalle choisi dans les paramètres."))))
-                .child(div().mt(px(25.)).flex().items_center().justify_end().gap(px(10.))
-                    .child(Button::new("dialog-cancel").outline().h(px(37.)).px(px(14.)).text_size(px(11.+offset)).label("Annuler").disabled(self.busy||self.choosing).on_click(cx.listener(|this,_,_,cx|this.close_dialog(cx))))
-                    .child(Button::new("dialog-submit").primary().h(px(37.)).px(px(14.)).text_size(px(11.+offset)).label(if self.busy_visible{"Ouverture…"}else{"Explorer le dépôt"}).icon(icon(if self.busy_visible{IconName::LoaderCircle}else{IconName::ArrowRight},15.,p.on_accent)).disabled(self.busy||self.choosing)
-                        .on_click(cx.listener(|this,_,window,cx|this.submit_path(window,cx)))))
-                .child(scrollbar_theme(Scrollbar::vertical(&self.dialog_scroll).id("repository-dialog-scrollbar"))))
-            .into_any_element())
-    }
     /// Place in the relative workspace content, beside history and inspector.
     pub fn render_error(
         &mut self,
@@ -1018,7 +926,7 @@ impl Chrome {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.dialog || self.name.is_none() || self.busy {
+        if self.name.is_none() || self.busy {
             return None;
         }
         let error = self.error.clone()?;

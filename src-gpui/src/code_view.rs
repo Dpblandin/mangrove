@@ -1407,51 +1407,65 @@ impl Render for CodeView {
             .w_full()
             .min_w(px(self.content_width))
             .h_full();
-            root = root.child(
+            let viewport = div()
+                .id("code-scroll-viewport")
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .overflow_hidden()
+                .child(wheel_capture)
+                .child(
+                    div()
+                        .id("code-horizontal-scroll")
+                        .size_full()
+                        .overflow_x_scroll()
+                        .track_scroll(&self.horizontal)
+                        .child(code),
+                )
+                // These overlays are siblings of the scrolled content:
+                // the vertical track stays at the visible right edge when
+                // long lines are scrolled horizontally.
+                .child(
+                    div().absolute().inset_0().child(scrollbar_theme(
+                        Scrollbar::new(&self.scroll)
+                            .id("code-scrollbars")
+                            .viewport_from_layout(),
+                    )),
+                );
+            let notice = self.notice.as_ref().map(|notice| {
                 div()
-                    .id("code-scroll-viewport")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
+                    .flex()
+                    .flex_shrink_0()
                     .w_full()
-                    .overflow_hidden()
-                    .child(wheel_capture)
+                    .min_w_0()
+                    .items_start()
+                    .gap(px(8.))
+                    .px(px(17.))
+                    .py(px(13.))
+                    .font_family(SANS)
+                    .text_size(px(10. + self.ui_offset))
+                    .line_height(relative(1.625))
+                    .text_color(rgb(p.warning))
+                    .child(
+                        icon(IconName::CircleAlert, 14., p.warning)
+                            .flex_shrink_0()
+                            .mt(px(2.)),
+                    )
                     .child(
                         div()
-                            .id("code-horizontal-scroll")
-                            .size_full()
-                            .overflow_x_scroll()
-                            .track_scroll(&self.horizontal)
-                            .child(code),
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(notice.clone()),
                     )
-                    // These overlays are siblings of the scrolled content:
-                    // the vertical track stays at the visible right edge when
-                    // long lines are scrolled horizontally.
-                    .child(
-                        div().absolute().inset_0().child(scrollbar_theme(
-                            Scrollbar::new(&self.scroll)
-                                .id("code-scrollbars")
-                                .viewport_from_layout(),
-                        )),
-                    ),
-            );
-            if let Some(notice) = &self.notice {
-                root = root.child(
-                    div()
-                        .flex()
-                        .flex_shrink_0()
-                        .items_start()
-                        .gap(px(8.))
-                        .px(px(17.))
-                        .py(px(13.))
-                        .font_family(SANS)
-                        .text_size(px(10. + self.ui_offset))
-                        .text_color(rgb(p.warning))
-                        .child(icon(IconName::CircleAlert, 14., p.warning))
-                        .child(notice.clone()),
-                );
-            }
+            });
+            root = if self.rows.is_empty() {
+                root.children(notice).child(viewport)
+            } else {
+                root.child(viewport).children(notice)
+            };
         }
         if self.loading {
             root = root.opacity(0.65);

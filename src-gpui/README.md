@@ -22,7 +22,7 @@ cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- .mangrove-de
 
 La configuration actuelle de GPUI Kit active `runtime_shaders` : les shaders Metal sont compilés à l’exécution. La CI vérifie Xcode complet avec `xcode-select -p` et `xcodebuild -version` ; le composant optionnel Metal Toolchain n’est pas un prérequis de ce build.
 
-Le chemin du dépôt est le seul argument. L’accueil permet aussi de saisir un chemin, de choisir un dossier avec le dialogue natif ou de rouvrir un dépôt récent. Fermer la dernière fenêtre ou utiliser Cmd/Ctrl + Q quitte l’application.
+Le chemin du dépôt est le seul argument. Le bouton d’ouverture et Cmd/Ctrl + O ouvrent directement le sélecteur natif de dossier. L’accueil permet aussi de rouvrir un dépôt récent. Fermer la dernière fenêtre ou utiliser Cmd/Ctrl + Q quitte l’application.
 
 Le cache GPUI est distinct du cache Tauri, dans le répertoire de cache utilisateur de l’OS sous `dev.mangrove.gpui`. Les préférences sont enregistrées dans le répertoire de configuration utilisateur sous `mangrove-gpui/preferences.json` : thème, polices, largeurs des panneaux, intervalle d’auto-fetch et dépôts récents. `MANGROVE_GPUI_PREFERENCES=/chemin/absolu/preferences.json` permet de choisir un autre fichier, notamment pour une session de QA isolée. Les préférences Vue ne sont pas importées automatiquement.
 
@@ -30,7 +30,7 @@ Comme dans Vue, le fetch manuel récupère les références de tous les remotes 
 
 ## Périmètre porté
 
-- Accueil, dialogue d’ouverture, recherche/suppression des dépôts récents, onglets de dépôts, barre supérieure, erreurs et paramètres d’auto-fetch.
+- Accueil, sélecteur natif de dossier, recherche/suppression des dépôts récents, onglets de dépôts, barre supérieure, erreurs et paramètres d’auto-fetch.
 - Trois thèmes Classique, Mangrove et Macchiato, zoom de l’interface, taille de police des diffs, panneaux redimensionnables à la souris et au clavier, remise à zéro par double clic et préférences persistantes.
 - Références locales, distantes et tags avec dossiers repliables, filtre, tri français et numérique, sélection dans l’historique et Solo. Worktrees et stashes sont lus à la demande ; un worktree peut être ouvert et un stash inspecté.
 - Historique virtualisé, recherche par message/auteur/SHA/référence, navigation au clavier, graphe de branches et merges avec les mêmes voies du moteur et défilement horizontal du graphe.
@@ -61,11 +61,14 @@ cargo test --locked --manifest-path src-gpui/Cargo.toml
 
 Les tests protègent notamment les caches bornés, la progression de l’index, les graphes, les filtres et la coloration, ainsi que les bornes et la persistance des préférences. Les tests de `mangrove-core` se lancent depuis le workspace principal.
 
-La QA interactive réalisée les 30 septembre et 1er octobre 2026 porte sur macOS ARM, avec les fixtures synthétiques et un binaire release. Elle couvre l’historique, les diffs, le contenu/historique/blame des fichiers, les thèmes, les menus de copie/sélection, les panneaux et leurs remises à zéro. Les captures du portage sont dans [screenshots](screenshots/), notamment `full-history.jpg`, `full-diff.jpg`, `full-welcome.jpg`, `full-mangrove.jpg`, `full-macchiato.jpg` et `full-blame.jpg`. Le manifeste des captures identifie le binaire production vérifié et les fichiers correspondants. Les captures Vue/Tauri sont réalisées sur le bundle de mesure final en mode d’interface normal et identifiées séparément. La configuration normale passe 74 tests ; la configuration instrumentée en passe 79.
+La QA interactive réalisée les 30 septembre et 1er octobre 2026 porte sur macOS ARM, avec les fixtures synthétiques et un binaire release. Elle couvre l’historique, les diffs, le contenu/historique/blame des fichiers, les thèmes, les menus de copie/sélection, les panneaux et leurs remises à zéro. Les captures du portage sont dans [screenshots](screenshots/), notamment `full-history.jpg`, `full-diff.jpg`, `full-welcome.jpg`, `full-mangrove.jpg`, `full-macchiato.jpg` et `full-blame.jpg`. Le manifeste des captures identifie le binaire production vérifié et les fichiers correspondants. Les captures Vue/Tauri sont réalisées sur le bundle de mesure final en mode d’interface normal et identifiées séparément. La configuration normale passe 75 tests ; la configuration instrumentée en passe 80.
 
 La dernière passe vérifie aussi les corrections signalées pendant la comparaison :
 
-- Accueil : bouton principal accentué, champ de recherche bordé, récents et ouverture du dialogue depuis le bouton.
+- Accueil : bouton principal accentué, champ de recherche bordé, récents et ouverture directe du sélecteur natif depuis le bouton.
+- Ouverture native depuis la barre, le menu et Cmd/Ctrl + O : annulation sans perdre le dépôt consulté, ouverture immédiate du dossier choisi et erreur visible pour un dossier sans Git.
+- Paramètres sur toute la fenêtre, sans onglets ni barres du workspace : styles du menu et des boutons, champ sombre avec flèches bornées à 0–60, validation, enregistrement, annulation et réinitialisation du brouillon à la réouverture. Retour et Escape retrouvent le workspace ; Cmd/Ctrl + K affiche sa recherche. Capture : [post-comparison-settings.jpg](screenshots/post-comparison-settings.jpg).
+- Aperçu volumineux sans lignes affichées : avertissement sous les onglets, avec texte lisible dans un panneau étroit. Capture : [post-comparison-large-file.jpg](screenshots/post-comparison-large-file.jpg).
 - Barres de défilement visibles lorsqu’il existe un débordement, avec accès au dernier des 10 007 commits, aux derniers fichiers et à la fin du grand diff. Le défilement horizontal du code est vérifié après réduction de la largeur du panneau.
 - Molette après déplacement lointain de la poignée : dans le code, passage de la ligne 1 488 à 1 537 ; dans la sidebar de 10 000 références, passage de `qa-05026` à `qa-05055`, puis retour à `qa-05026` en sens inverse. Les tests couvrent également les hauteurs aux échelles physiques 1×/2× et le zoom.
 - Menu d’historique avec 51 références : hauteur bornée à la fenêtre, barre visible et sélection révélée avec Home/End. Blame rouvert après une inspection de commit sans perdre son contenu.
