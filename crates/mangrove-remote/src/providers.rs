@@ -253,6 +253,9 @@ impl<T: Transport> ProviderClient<T> {
         let items = raw
             .items
             .iter()
+            .filter(|v| {
+                self.account.provider != Provider::GitLab || !gitlab_scheduled_for_deletion(v)
+            })
             .map(|v| self.repository(v))
             .collect::<Result<_>>()?;
         Ok(Page {
@@ -1076,6 +1079,35 @@ impl<T: Transport> ProviderClient<T> {
             web_url: web,
         })
     }
+}
+
+fn gitlab_scheduled_for_deletion(project: &Value) -> bool {
+    if ["marked_for_deletion_on", "marked_for_deletion_at"]
+        .iter()
+        .any(|field| match project.get(*field) {
+            None | Some(Value::Null) => false,
+            Some(Value::String(date)) => !date.trim().is_empty(),
+            Some(_) => true,
+        })
+    {
+        return true;
+    }
+    // A parent group can be pending deletion while the project has no deletion
+    // date. Match GitLab's generated path suffix on every namespace segment.
+    project
+        .get("path_with_namespace")
+        .and_then(Value::as_str)
+        .is_some_and(|path| {
+            path.split('/').any(|segment| {
+                segment
+                    .rsplit_once("-deletion_scheduled-")
+                    .is_some_and(|(name, id)| {
+                        !name.is_empty()
+                            && !id.is_empty()
+                            && id.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
+        })
 }
 
 fn next_link(link: &str) -> Option<&str> {

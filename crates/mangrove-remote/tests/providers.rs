@@ -602,6 +602,91 @@ fn bitbucket_server_reads_project_repos_nested_comments_and_repository_builds() 
 }
 
 #[test]
+fn gitlab_hides_pending_deletions_without_stopping_pagination_or_hiding_archived_projects() {
+    let mut first = response(json!([
+        {"id":1,"name":"dated","path_with_namespace":"group/dated","marked_for_deletion_on":"2026-10-08"},
+        {"id":2,"name":"legacy","path_with_namespace":"group/legacy","marked_for_deletion_at":"2026-10-08"},
+        {"id":3,"name":"renamed","path_with_namespace":"group/renamed-deletion_scheduled-3"},
+        {"id":4,"name":"child","path_with_namespace":"mcp-deletion_scheduled-141/subgroup/child","marked_for_deletion_on":null},
+        {"id":5,"name":"nested","path_with_namespace":"group/skills-deletion_scheduled-142/nested","marked_for_deletion_on":null,"marked_for_deletion_at":null}
+    ]));
+    first.headers.insert("X-Next-Page".into(), "2".into());
+    let visible = json!([
+        {"id":6,"name":"archived","path_with_namespace":"group/archived","archived":true,"marked_for_deletion_on":null,"marked_for_deletion_at":null},
+        {"id":7,"name":"ordinary","path_with_namespace":"group/ordinary"},
+        {"id":8,"name":"word","path_with_namespace":"deletion_scheduled-tools/word","marked_for_deletion_on":""},
+        {"id":9,"name":"nonnumeric","path_with_namespace":"group-deletion_scheduled-custom/nonnumeric"},
+        {"id":10,"name":"continued","path_with_namespace":"group/continued-deletion_scheduled-123-backup"},
+        {"id":11,"name":"no-id","path_with_namespace":"group/no-id-deletion_scheduled-"},
+        {"id":12,"name":"no-base","path_with_namespace":"-deletion_scheduled-123/no-base"}
+    ]);
+    let transport = MockTransport::new(vec![first, response(visible)]);
+    let client = client(Provider::GitLab, "https://gitlab.com", transport.clone());
+    let cancel = CancellationToken::new();
+    let first = client.repositories(None, &cancel).unwrap();
+    assert!(first.items.is_empty());
+    assert!(first.next.is_some());
+    let second = client.repositories(first.next.as_ref(), &cancel).unwrap();
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|repo| repo.id.as_str())
+            .collect::<Vec<_>>(),
+        ["6", "7", "8", "9", "10", "11", "12"]
+    );
+    assert!(second.next.is_none());
+    assert_eq!(
+        transport.urls(),
+        [
+            "https://gitlab.com/api/v4/projects?membership=true&per_page=50",
+            "https://gitlab.com/api/v4/projects?membership=true&per_page=50&page=2"
+        ]
+    );
+}
+
+#[test]
+fn gitlab_deletion_markers_do_not_hide_repositories_on_other_providers() {
+    let full_name = "group-deletion_scheduled-141/app-deletion_scheduled-42";
+    for (provider, server, page) in [
+        (
+            Provider::GitHub,
+            "https://github.com",
+            response(json!([{
+                "id":42,"name":"app","full_name":full_name,"path_with_namespace":full_name,
+                "marked_for_deletion_on":"2026-10-08"
+            }])),
+        ),
+        (
+            Provider::BitbucketCloud,
+            "https://bitbucket.org/workspace",
+            cloud_page(json!([{
+                "uuid":"{repo-id}","name":"app","full_name":full_name,"path_with_namespace":full_name,
+                "marked_for_deletion_at":"2026-10-08"
+            }])),
+        ),
+        (
+            Provider::BitbucketServer,
+            "https://bb.example",
+            server_page(json!([{
+                "id":42,"name":"app","slug":"app-deletion_scheduled-42",
+                "project":{"key":"group-deletion_scheduled-141"},"path_with_namespace":full_name,
+                "marked_for_deletion_on":"2026-10-08","marked_for_deletion_at":"2026-10-08"
+            }])),
+        ),
+    ] {
+        let transport = MockTransport::new(vec![page]);
+        let page = client(provider, server, transport.clone())
+            .repositories(None, &CancellationToken::new())
+            .unwrap();
+        assert_eq!(page.items.len(), 1, "{provider:?}");
+        assert_eq!(page.items[0].full_name, full_name, "{provider:?}");
+        assert!(page.next.is_none());
+        assert_eq!(transport.urls().len(), 1);
+    }
+}
+
+#[test]
 fn each_provider_paginates_without_constructing_untrusted_origins() {
     for (provider, server, first, second) in [
         (

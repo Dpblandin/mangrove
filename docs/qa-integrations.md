@@ -94,6 +94,24 @@ Le bundle de QA final utilise les mêmes octets exécutables que le bundle produ
 
 Les [sept jobs de la correction précédente](https://github.com/Dpblandin/mangrove/actions/runs/36865020055) passent, dont Windows. La refonte et le clonage demandent leur propre validation sur le nouveau commit.
 
+## Chargement progressif dans le sélecteur
+
+À la demande de l’utilisateur, les boutons de pagination des dépôts sont supprimés. Les pages suivantes s’ajoutent en bas du menu ouvert, sans changer la recherche, la sélection ou la position des résultats déjà visibles. Le chargement se déclenche à la peinture du dernier dépôt visible, après vérification du masque de contenu ; la mesure des lignes virtuelles ne lance aucune requête. Une recherche sans correspondance poursuit les pages suivantes. Les erreurs arrêtent l’automatisme et proposent une reprise explicite.
+
+Les nouveaux blocs de namespace sont ajoutés à la fin pour préserver les indices complets et filtrés, y compris lors des confirmations différées du kit. Les doublons sont ignorés par ID et le refus d’une page qui dépasse 20 000 dépôts ou 8 Mio de textes/URLs conserve le catalogue existant. Les callbacks portent le scope du sélecteur ; annulation, tickets et générations empêchent les réponses tardives de repeupler un autre compte ou profil.
+
+Une revue `refactor` puis trois lectures `simplify` parallèles couvrent ce delta. Les corrections vérifient notamment le déclenchement hors mesure/layout, la poursuite d’une première page vide avec un curseur et la réactivation du menu après un clone échoué.
+
+La première observation native sur le compte GitLab existant charge les dépôts authentifiés, puis le défilement déclenche une lecture supplémentaire et ajoute les résultats sans fermer le menu ni déplacer les anciennes lignes. Un titre de namespace très long renvoyé par GitLab se repliait et chevauchait la ligne suivante ; les titres sont désormais tronqués sur une ligne et les options affichent le nom court du dépôt, avec recherche sur le chemin complet. Le suffixe `deletion_scheduled` appartient au chemin fourni par GitLab. À la demande suivante de l’utilisateur, les projets marqués pour suppression et les chemins de projet/groupe parent portant ce suffixe automatique sont exclus de la liste ; aucun dépôt distant n’est modifié ou supprimé par ce filtre.
+
+Après les corrections, 88 tests GPUI production et 93 instrumentés passent, ainsi que Clippy tous targets dans les deux configurations, le formatage et le contrôle du diff. Les dix tests ciblés des intégrations incluent les ajouts stables sous recherche, les doublons, une correspondance trouvée sur une page ultérieure et le refus atomique des limites de nombre/taille.
+
+Le [job Windows du clonage](https://github.com/Dpblandin/mangrove/actions/runs/36871305870/job/110399473250) avait échoué avec `CloneFailed` : la canonicalisation Rust transmet un chemin préfixé `\\?\` que Git for Windows refuse comme argument. Git est désormais lancé dans le dossier neuf réservé et clone vers `.`. Le test réel existant utilise une destination avec espaces à l’intérieur d’un dépôt parent configuré avec réécriture d’URL, hook, helper et filtre factices ; checkout, historique, tag, origin et configuration parent inchangée passent. Les 76 tests remote, Clippy et le formatage passent sur macOS ; cette correction nécessite sa propre confirmation Windows en CI. Les deux nouveaux tests des fournisseurs vérifient le filtrage des projets/namespaces GitLab en attente de suppression, la conservation du curseur lorsque toute une page est masquée, les archives, les noms proches légitimes et l’absence de filtre sur les autres forges.
+
+La passe native après filtrage GitLab confirme les noms courts et une recherche `deletion_scheduled` sans résultat. La recherche reste saisie pendant puis après la lecture suivante, avec le loader visible dans le menu. Un déplacement du formulaire dû au bouton d’annulation global pendant l’ajout d’une page est corrigé : le chargement supplémentaire reste dans le sélecteur.
+
+Le bundle macOS est reconstruit après ces corrections et relancé avec la configuration OAuth locale. SHA-256 de l’exécutable : `348901cc1c865f2c85e9caa6d6acd610045906ed44ec1502ce097b9ca9496f24`.
+
 ## Essais restants et statut
 
 La PR reste **draft à la demande de l’utilisateur**. Les essais suivants restent à effectuer :

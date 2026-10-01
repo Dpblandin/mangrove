@@ -65,6 +65,9 @@ impl IntegrationsView {
                 ),
             ));
         } else {
+            let load_state = self.repository_load_state();
+            let load_trigger =
+                RepositoryLoadTrigger::new(cx.entity().downgrade(), self.repository_select_scope);
             form = form.child(clone_row(
                 "Dépôt à cloner",
                 p,
@@ -89,25 +92,28 @@ impl IntegrationsView {
                             .menu_max_h(px(300.))
                             .cleanable(true)
                             .placeholder(
-                                if self.pending == Some(PendingOperation::RepositoryRead) {
+                                if self.pending == Some(PendingOperation::RepositoryRead)
+                                    && self.repositories.is_empty()
+                                {
                                     "Chargement des dépôts…"
                                 } else {
                                     "Choisir un dépôt…"
                                 },
                             )
-                            .search_placeholder("Rechercher dans cette page…")
+                            .search_placeholder("Rechercher un dépôt…")
                             .accessibility_label("Dépôt à cloner")
-                            .disabled(!self.can_select_repository() || self.repositories.is_empty())
-                            .empty(move |_, _| {
-                                div()
-                                    .p(px(16.))
-                                    .text_size(px(12. + offset))
-                                    .text_color(rgb(p.muted))
-                                    .whitespace_normal()
-                                    .child("Aucun dépôt ne correspond sur cette page.")
+                            .disabled(
+                                !self.can_select_repository()
+                                    || (self.repositories.is_empty()
+                                        && self.repositories_next.is_none()),
+                            )
+                            .empty(move |_, _| RepositoryEmpty {
+                                trigger: load_trigger.clone(),
+                                state: load_state,
+                                palette: p,
                             }),
                     )
-                    .child(self.repository_page_controls(cx)),
+                    .child(self.repository_list_controls(cx)),
             ));
         }
         form = form.child(clone_row(
@@ -183,7 +189,7 @@ impl IntegrationsView {
         ))
     }
 
-    fn repository_page_controls(&self, cx: &mut Context<Self>) -> Div {
+    fn repository_list_controls(&self, cx: &mut Context<Self>) -> Div {
         let p = self.palette;
         let offset = self.offset;
         let mut actions = div().flex().items_center().flex_wrap().gap(px(8.));
@@ -191,47 +197,17 @@ impl IntegrationsView {
             link_action("repositories-reload", "Actualiser", p, offset)
                 .disabled(self.pending.is_some() || self.picking_path)
                 .on_click(
-                    cx.listener(|this, _, _, cx| this.read(ReadRequest::Repositories(None, 0), cx)),
+                    cx.listener(|this, _, _, cx| this.read(ReadRequest::Repositories(None), cx)),
                 ),
         );
-        if self.repositories_page > 0 {
-            let previous_page = self.repositories_page - 1;
-            let cursor = self
-                .repositories_history
-                .get(previous_page)
-                .cloned()
-                .flatten();
-            actions = actions.child(
-                link_action("repositories-previous", "Page précédente", p, offset)
-                    .disabled(self.pending.is_some() || self.picking_path)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.read(ReadRequest::Repositories(cursor.clone(), previous_page), cx)
-                    })),
-            );
-        }
-        if let Some(cursor) = self.repositories_next.clone() {
-            actions = actions.child(
-                link_action("repositories-next", "Page suivante", p, offset)
-                    .disabled(self.pending.is_some() || self.picking_path)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.read(
-                            ReadRequest::Repositories(
-                                Some(cursor.clone()),
-                                this.repositories_page + 1,
-                            ),
-                            cx,
-                        )
-                    })),
-            );
-        }
         let count = self.repositories.len();
         let description = if count == 0 && self.pending.is_none() {
             "Aucun dépôt chargé. Actualisez ou vérifiez les accès de ce compte.".to_string()
         } else {
             format!(
-                "Page {} · {} dépôt{} · recherche dans cette page",
-                self.repositories_page + 1,
+                "{} dépôt{} chargé{}",
                 count,
+                if count > 1 { "s" } else { "" },
                 if count > 1 { "s" } else { "" }
             )
         };
@@ -1210,6 +1186,8 @@ impl Render for IntegrationsView {
                                     .when(
                                         self.pending.is_some_and(|operation| {
                                             operation != PendingOperation::Disconnect
+                                                && (operation != PendingOperation::RepositoryRead
+                                                    || self.repositories_next.is_none())
                                         }),
                                         |view| {
                                             view.child(

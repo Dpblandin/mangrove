@@ -6,9 +6,7 @@ use gpui_kit::{
         Sizable,
         input::{Input, InputEvent, InputState},
         scroll::Scrollbar,
-        searchable_list::{
-            SearchableGroup, SearchableListDelegate, SearchableListItem, SearchableVec,
-        },
+        searchable_list::{SearchableGroup, SearchableListDelegate, SearchableListItem},
         select::{Select, SelectEvent, SelectState},
     },
     prelude::*,
@@ -25,13 +23,22 @@ use mangrove_remote::{
     ssh::SshChoice,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    cell::RefCell,
+    collections::HashMap,
     path::PathBuf,
+    rc::Rc,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 mod render;
+mod repository_select;
+
+#[cfg(test)]
+use repository_select::repository_option_groups;
+use repository_select::{
+    RepositoryEmpty, RepositoryLoadState, RepositoryLoadTrigger, RepositoryMenu, RepositoryMenuData,
+};
 
 const MAX_ROWS: usize = 250;
 
@@ -149,59 +156,11 @@ impl ProviderEdition {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RepositoryOption {
-    id: String,
-    full_name: String,
-}
-
-impl SearchableListItem for RepositoryOption {
-    type Value = String;
-
-    fn title(&self) -> SharedString {
-        self.full_name.clone().into()
-    }
-
-    fn value(&self) -> &Self::Value {
-        &self.id
-    }
-
-    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(gpui_kit::component::Icon::new(IconName::FolderGit2).with_size(px(14.)))
-            .child(div().min_w_0().truncate().child(self.full_name.clone()))
-    }
-}
-
-type RepositorySelect = SelectState<SearchableVec<SearchableGroup<RepositoryOption>>>;
-
-fn repository_option_groups(repositories: &[Repository]) -> Vec<SearchableGroup<RepositoryOption>> {
-    let mut groups = BTreeMap::<String, Vec<RepositoryOption>>::new();
-    for repository in repositories {
-        let namespace = repository
-            .full_name
-            .rsplit_once('/')
-            .map_or("Dépôts", |(namespace, _)| namespace);
-        groups
-            .entry(namespace.to_string())
-            .or_default()
-            .push(RepositoryOption {
-                id: repository.id.clone(),
-                full_name: repository.full_name.clone(),
-            });
-    }
-    groups
-        .into_iter()
-        .map(|(namespace, items)| SearchableGroup::new(namespace).items(items))
-        .collect()
-}
+type RepositorySelect = SelectState<RepositoryMenu>;
 
 #[derive(Clone)]
 enum ReadRequest {
-    Repositories(Option<PageCursor>, usize),
+    Repositories(Option<PageCursor>),
     Changes(Repository, Option<PageCursor>),
     Discussions(Repository, ChangeRequest, Option<PageCursor>),
     Statuses(Repository, String, Option<PageCursor>),
@@ -270,7 +229,7 @@ enum ReadResponse {
     Statuses(Page<CiStatus>),
 }
 
-/// Small, bounded pages are retained only for the active profile/account.
+/// Bounded remote collections are retained only for the active profile/account.
 /// Every network operation runs on the background executor and carries both
 /// a backend cancellation ticket and a view generation.
 pub struct IntegrationsView {
@@ -300,6 +259,8 @@ pub struct IntegrationsView {
     repository_select_subscription: Option<Subscription>,
     repository_select_scope: u64,
     repository_select_dirty: bool,
+    repository_select_reset: bool,
+    repository_menu_data: Rc<RefCell<RepositoryMenuData>>,
     clone_url: Entity<InputState>,
     direct_clone: bool,
     clone_parent: Entity<InputState>,
@@ -308,8 +269,7 @@ pub struct IntegrationsView {
     clone_ssh: bool,
     picking_path: bool,
     picker_task: Option<Task<()>>,
-    repositories_history: Vec<Option<PageCursor>>,
-    repositories_page: usize,
+    repository_load_error: Option<mangrove_remote::RemoteError>,
     _subscriptions: Vec<Subscription>,
     session: Arc<ProfileSession>,
     vault: Arc<OsCredentialVault>,
@@ -360,15 +320,15 @@ impl IntegrationsView {
         }
         let client_id = configured_gitlab_client_id(&profile);
         let gitlab_config_open = client_id.is_empty();
-        let repository_select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(Vec::<SearchableGroup<RepositoryOption>>::new()),
-                None,
-                window,
-                cx,
-            )
-            .searchable(true)
-        });
+        let repository_menu_data = Rc::new(RefCell::new(RepositoryMenuData::default()));
+        let options = RepositoryMenu::new(
+            repository_menu_data.clone(),
+            RepositoryLoadTrigger::new(cx.entity().downgrade(), 0),
+            RepositoryLoadState::Complete,
+            palette,
+        );
+        let repository_select =
+            cx.new(|cx| SelectState::new(options, None, window, cx).searchable(true));
         let clone_url = text_input(
             "https://serveur/groupe/depot.git ou git@serveur:groupe/depot.git",
             window,
@@ -443,6 +403,8 @@ impl IntegrationsView {
             repository_select_subscription: None,
             repository_select_scope: 0,
             repository_select_dirty: true,
+            repository_select_reset: true,
+            repository_menu_data,
             clone_url,
             direct_clone: false,
             clone_parent,
@@ -451,8 +413,7 @@ impl IntegrationsView {
             clone_ssh: false,
             picking_path: false,
             picker_task: None,
-            repositories_history: vec![None],
-            repositories_page: 0,
+            repository_load_error: None,
             _subscriptions: subscriptions,
             vault: Arc::new(OsCredentialVault::new()),
             generation: 0,
@@ -530,6 +491,7 @@ impl IntegrationsView {
     pub fn set_theme(&mut self, palette: Palette, offset: f32, cx: &mut Context<Self>) {
         self.palette = palette;
         self.offset = offset;
+        self.repository_select_dirty = true;
         cx.notify();
     }
 
@@ -623,6 +585,7 @@ impl IntegrationsView {
         self.pending = None;
         self.picker_task = None;
         self.picking_path = false;
+        self.repository_select_dirty = true;
     }
 
     fn clear_reads(&mut self) {
@@ -630,8 +593,8 @@ impl IntegrationsView {
         self.ssh_references.clear();
         self.repositories.clear();
         self.repositories_next = None;
-        self.repositories_page = 0;
-        self.repositories_history = vec![None];
+        self.repository_load_error = None;
+        self.repository_menu_data = Rc::new(RefCell::new(RepositoryMenuData::default()));
         self.clear_changes();
     }
 
@@ -916,7 +879,7 @@ impl IntegrationsView {
         self.clear_reads();
         self.selected_account = Some(id);
         if self.section == IntegrationsSection::Repositories {
-            self.read(ReadRequest::Repositories(None, 0), cx);
+            self.read(ReadRequest::Repositories(None), cx);
         }
     }
 
@@ -1037,23 +1000,29 @@ impl IntegrationsView {
         else {
             return;
         };
-        let page_request = match &request {
-            ReadRequest::Repositories(cursor, page) => Some((cursor.clone(), *page)),
-            _ => None,
-        };
+        let repository_read = matches!(request, ReadRequest::Repositories(_));
+        let append = matches!(&request, ReadRequest::Repositories(Some(_)));
         self.cancel();
-        self.pending = Some(if page_request.is_some() {
+        if repository_read && !append {
+            self.clear_reads();
+        }
+        if repository_read {
+            self.repository_load_error = None;
+        }
+        self.pending = Some(if repository_read {
             PendingOperation::RepositoryRead
         } else {
             PendingOperation::Read
         });
         self.error = None;
-        self.message = Some("Lecture distante en cours…".into());
+        self.message = (!append).then(|| "Lecture distante en cours…".into());
         let ticket = self.session.ticket(&account.id);
         let worker_ticket = ticket.clone();
         let generation = self.generation;
         let vault = self.vault.clone();
-        self.scroll.set_offset(point(px(0.), px(0.)));
+        if !append {
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1075,15 +1044,17 @@ impl IntegrationsView {
                 view.message = None;
                 match result {
                     Ok(ReadResponse::Repositories(page)) => {
-                        if let Some((cursor, number)) = page_request {
-                            view.repositories_page = number;
-                            view.repositories_history.truncate(number);
-                            view.repositories_history.push(cursor);
+                        let result = view
+                            .repository_menu_data
+                            .borrow_mut()
+                            .append(&mut view.repositories, page.items);
+                        match result {
+                            Ok(()) => view.repositories_next = page.next,
+                            Err(error) => {
+                                view.error = Some(error.to_string());
+                                view.repository_load_error = Some(error);
+                            }
                         }
-                        view.repositories = bounded(page.items);
-                        view.repositories_next = page.next;
-                        view.clear_changes();
-                        view.invalidate_repository_select();
                     }
                     Ok(ReadResponse::Changes(page)) => {
                         view.changes = bounded(page.items);
@@ -1101,8 +1072,12 @@ impl IntegrationsView {
                     }
                     Err(error) => {
                         view.error = Some(error.to_string());
+                        if repository_read {
+                            view.repository_load_error = Some(error);
+                        }
                     }
                 }
+                view.repository_select_dirty = true;
                 cx.notify();
             });
         }));
@@ -1112,10 +1087,48 @@ impl IntegrationsView {
     fn invalidate_repository_select(&mut self) {
         self.repository_select_scope = self.repository_select_scope.wrapping_add(1);
         self.repository_select_dirty = true;
+        self.repository_select_reset = true;
     }
 
     fn can_select_repository(&self) -> bool {
-        !self.picking_path && matches!(self.pending, None | Some(PendingOperation::Read))
+        !self.picking_path
+            && matches!(
+                self.pending,
+                None | Some(PendingOperation::Read | PendingOperation::RepositoryRead)
+            )
+    }
+
+    fn repository_load_state(&self) -> RepositoryLoadState {
+        if self.pending == Some(PendingOperation::RepositoryRead) {
+            return RepositoryLoadState::Loading;
+        }
+        if self.repositories_next.is_none()
+            || self.pending.is_some()
+            || self.repository_load_error == Some(mangrove_remote::RemoteError::ResponseTooLarge)
+        {
+            return RepositoryLoadState::Complete;
+        }
+        if self.repository_load_error.is_some() {
+            RepositoryLoadState::Retry
+        } else {
+            RepositoryLoadState::Ready
+        }
+    }
+
+    fn load_more_repositories(&mut self, scope: u64, retry: bool, cx: &mut Context<Self>) {
+        if scope != self.repository_select_scope
+            || self.section != IntegrationsSection::Repositories
+            || self.direct_clone
+            || self.picking_path
+            || self.pending.is_some()
+            || self.repository_load_error == Some(mangrove_remote::RemoteError::ResponseTooLarge)
+            || (!retry && self.repository_load_error.is_some())
+        {
+            return;
+        }
+        if let Some(cursor) = self.repositories_next.clone() {
+            self.read(ReadRequest::Repositories(Some(cursor)), cx);
+        }
     }
 
     fn sync_repository_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1123,16 +1136,30 @@ impl IntegrationsView {
             return;
         }
         self.repository_select_dirty = false;
-        // Kit's set_items retains its query and deferred selection indices.
-        // A new entity and subscription close the old menu at a page boundary.
+        let options = RepositoryMenu::new(
+            self.repository_menu_data.clone(),
+            RepositoryLoadTrigger::new(cx.entity().downgrade(), self.repository_select_scope),
+            self.repository_load_state(),
+            self.palette,
+        );
+        if !self.repository_select_reset {
+            // Pages only append sections: existing full/filtered IndexPaths stay
+            // valid, including kit's deferred confirmations and scroll position.
+            self.repository_select.update(cx, |select, cx| {
+                select.set_items(options, window, cx);
+                cx.notify();
+            });
+            return;
+        }
+        self.repository_select_reset = false;
+        // Source changes replace the entity so old confirmation callbacks cannot
+        // select a repository from another profile/account.
         self.repository_select_subscription = None;
         if !self.direct_clone && self.selected_repository.is_none() {
             self.generated_clone_name.clear();
             self.clone_name
                 .update(cx, |input, cx| input.set_value("", window, cx));
         }
-        let groups = repository_option_groups(&self.repositories);
-        let options = SearchableVec::new(groups);
         let selected_index = self
             .selected_repository
             .as_ref()
@@ -1311,6 +1338,7 @@ impl IntegrationsView {
                     return;
                 }
                 view.pending = None;
+                view.repository_select_dirty = true;
                 match result {
                     Ok(path) => {
                         view.message = None;
@@ -1463,7 +1491,7 @@ fn perform_read<T: mangrove_remote::Transport>(
     cancel: &CancellationToken,
 ) -> Result<ReadResponse, mangrove_remote::RemoteError> {
     match request {
-        ReadRequest::Repositories(cursor, _) => client
+        ReadRequest::Repositories(cursor) => client
             .repositories(cursor.as_ref(), cancel)
             .map(ReadResponse::Repositories),
         ReadRequest::Changes(repository, cursor) => client

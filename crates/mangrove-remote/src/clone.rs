@@ -118,7 +118,6 @@ pub fn clone_repository(
         &destination,
         ssh_command.as_deref(),
         &credentials,
-        directory.path(),
         cancel,
     )
 }
@@ -159,7 +158,6 @@ fn clone_source(
     destination: &Path,
     ssh_command: Option<&str>,
     credentials: &[(String, String)],
-    directory: &Path,
     cancel: &CancellationToken,
 ) -> Result<PathBuf> {
     cancel.check()?;
@@ -173,14 +171,7 @@ fn clone_source(
         }
     })?;
     let mut command = Command::new("git");
-    configure_clone(
-        &mut command,
-        directory,
-        &source,
-        destination,
-        ssh_command,
-        credentials,
-    );
+    configure_clone(&mut command, &source, destination, ssh_command, credentials);
     ssh::run_command(&mut command, CLONE_TIMEOUT, cancel).map_err(|error| match error {
         RemoteError::SshAuthentication => RemoteError::CloneAuthentication,
         RemoteError::SshUnavailable | RemoteError::Network => RemoteError::CloneFailed,
@@ -191,14 +182,16 @@ fn clone_source(
 
 fn configure_clone(
     command: &mut Command,
-    directory: &Path,
     source: &Source<'_>,
     destination: &Path,
     ssh_command: Option<&str>,
     credentials: &[(String, String)],
 ) {
+    // Rust canonicalization adds a verbatim prefix on Windows that Git rejects
+    // in path arguments. Use the newly reserved directory as the working
+    // directory rather than changing the canonical path's meaning.
     command
-        .current_dir(directory)
+        .current_dir(destination)
         .args([
             "-c",
             "core.hooksPath=",
@@ -222,7 +215,7 @@ fn configure_clone(
             "--",
             source.remote(),
         ])
-        .arg(destination);
+        .arg(".");
     configure_environment(command, credentials);
     if let Some(ssh) = ssh_command {
         command
@@ -394,7 +387,6 @@ mod tests {
                 &destination,
                 None,
                 &[],
-                directory.path(),
                 &CancellationToken::new()
             ),
             Err(RemoteError::CloneDestinationExists)
@@ -408,6 +400,23 @@ mod tests {
     #[test]
     fn real_clone_contains_history_tags_origin_and_checkout_without_source_dependency() {
         let directory = tempfile::tempdir().unwrap();
+        git(
+            directory.path(),
+            &[OsStr::new("init"), OsStr::new("--initial-branch=main")],
+        );
+        for (key, value) in [
+            ("url.file:///missing-parent-rewrite/.insteadOf", "file:///"),
+            ("core.hooksPath", "missing-parent-hooks"),
+            ("filter.fixture.smudge", "missing-parent-smudge-filter"),
+            ("filter.fixture.required", "true"),
+            ("credential.helper", "!exit 99"),
+        ] {
+            git(
+                directory.path(),
+                &[OsStr::new("config"), OsStr::new(key), OsStr::new(value)],
+            );
+        }
+        let parent_config = fs::read(directory.path().join(".git/config")).unwrap();
         let source = directory.path().join("source");
         fs::create_dir(&source).unwrap();
         git(
@@ -415,7 +424,15 @@ mod tests {
             &[OsStr::new("init"), OsStr::new("--initial-branch=main")],
         );
         fs::write(source.join("README.md"), "fixture repository\n").unwrap();
-        git(&source, &[OsStr::new("add"), OsStr::new("README.md")]);
+        fs::write(source.join(".gitattributes"), "README.md filter=fixture\n").unwrap();
+        git(
+            &source,
+            &[
+                OsStr::new("add"),
+                OsStr::new("README.md"),
+                OsStr::new(".gitattributes"),
+            ],
+        );
         let commit = [
             "-c",
             "user.name=Fixture",
@@ -429,17 +446,21 @@ mod tests {
         git(&source, &[OsStr::new("tag"), OsStr::new("v1")]);
         let expected_head = git(&source, &[OsStr::new("rev-parse"), OsStr::new("HEAD")]);
         let url = url::Url::from_directory_path(&source).unwrap().to_string();
-        let destination = destination_path(&directory.path().join("clone")).unwrap();
+        let destination = destination_path(&directory.path().join("clone with spaces")).unwrap();
         let cloned = clone_source(
             Source::File(&url),
             &destination,
             None,
             &[],
-            directory.path(),
             &CancellationToken::new(),
         )
         .unwrap();
         assert_eq!(cloned, destination);
+        assert_eq!(
+            fs::read(directory.path().join(".git/config")).unwrap(),
+            parent_config,
+            "cloning must ignore and preserve the enclosing repository configuration"
+        );
         assert_eq!(
             fs::read(cloned.join("README.md")).unwrap(),
             b"fixture repository\n"
@@ -484,7 +505,6 @@ mod tests {
             &destination,
             None,
             &[],
-            directory.path(),
             &CancellationToken::new(),
         )
         .unwrap_err();
@@ -620,7 +640,6 @@ mod tests {
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
         let worker_destination = destination.clone();
-        let work = directory.path().to_owned();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
             let result = clone_source(
@@ -628,7 +647,6 @@ mod tests {
                 &worker_destination,
                 Some(&ssh),
                 &[],
-                &work,
                 &worker_cancel,
             );
             let _ = sender.send(result);
