@@ -933,18 +933,28 @@ impl InspectorView {
         cx.notify();
     }
     pub fn close_workspace(&mut self, cx: &mut Context<Self>) {
+        let was_active = self.central_active();
         self.workspace_open = false;
+        self.restore_open = None;
         self.preload_task = None;
-        cx.emit(InspectorEvent::ModeChanged(false));
+        // Selecting search results also closes the workspace. Only a real
+        // view switch should return focus to history; otherwise keep typing.
+        if was_active {
+            cx.emit(InspectorEvent::ModeChanged(false));
+        }
         cx.notify();
     }
     pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        let was_active = self.central_active();
+        self.restore_open = None;
         self.compact = compact;
         if !compact && self.snapshot.is_some() {
             self.workspace_open = true;
         }
         self.viewer_dirty = true;
-        cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+        if was_active != self.central_active() {
+            cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+        }
         cx.notify();
     }
     fn rows(&self, area: &str) -> Arc<Vec<FileChoice>> {
@@ -1131,8 +1141,11 @@ impl InspectorView {
         self.diff_loading = false;
         self.viewer_dirty = true;
         if let Some(open) = self.restore_open.take() {
+            let was_active = self.central_active();
             self.workspace_open = open;
-            cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+            if was_active != self.central_active() {
+                cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+            }
         }
         self.schedule_preload(cx);
         cx.notify();
@@ -1482,8 +1495,11 @@ impl InspectorView {
                             self.browser
                                 .update(cx, |view, cx| view.present(presentation, cx));
                             if let Some(open) = self.restore_open.take() {
+                                let was_active = self.central_active();
                                 self.workspace_open = open;
-                                cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+                                if was_active != self.central_active() {
+                                    cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+                                }
                             }
                         }
                     }
