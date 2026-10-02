@@ -270,17 +270,21 @@ impl Chrome {
         names: &[mangrove_core::model::RepositoryName],
         cx: &mut Context<Self>,
     ) {
-        if self
+        let update = self
             .recent_metadata
-            .apply(request, &mut self.preferences.recent, names)
-        {
+            .apply(request, &mut self.preferences.recent, names);
+        if update.names_changed {
             self.save_preferences(cx);
+        }
+        if update.names_changed || update.locations_changed {
             cx.notify();
         }
     }
     pub fn remove_recent(&mut self, path: &str, cx: &mut Context<Self>) {
-        self.recent_metadata.invalidate(path);
-        self.preferences.remove_recent(path);
+        for path in self.recent_metadata.equivalent_paths(path) {
+            self.recent_metadata.invalidate(&path);
+            self.preferences.remove_recent(&path);
+        }
         self.preferences_changed(cx);
     }
     pub fn begin_repository_picker(&mut self, cx: &mut Context<Self>) -> bool {
@@ -918,22 +922,119 @@ impl Chrome {
             .into_any_element()
     }
 
+    fn render_recent_repository(
+        &self,
+        entry: &RecentRepository,
+        label: &str,
+        worktree: bool,
+        removable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.preferences.palette();
+        let offset = self.preferences.font_size_offset;
+        let path = entry.path.clone();
+        let remove = path.clone();
+        let tooltip = format!("{}\n{}", entry.name, entry.path);
+        div()
+            .id(SharedString::from(format!("recent:{path}")))
+            .flex()
+            .items_center()
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(rgb(p.border))
+            .bg(rgb(if worktree { p.panel } else { p.surface }))
+            .overflow_hidden()
+            .hover(move |view| view.bg(rgb(mix(p.text, p.surface, 0.06))))
+            .child(
+                NativeButton::new(SharedString::from(format!("recent-open:{path}")))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(10.))
+                    .line_height(relative(1.5))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_left()
+                    .cursor_pointer()
+                    .accessibility_label(format!("Ouvrir {}", entry.name))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .focus_visible(move |style| style.bg(rgb(mix(p.text, p.surface, 0.06))))
+                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                    .disabled(self.busy)
+                    .child(icon(
+                        if worktree {
+                            IconName::GitBranch
+                        } else {
+                            IconName::FolderGit2
+                        },
+                        16.,
+                        p.accent,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11. + offset))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(p.accent))
+                                    .child(label.to_owned()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .w_full()
+                                    .truncate()
+                                    .text_size(px(9. + offset))
+                                    .text_color(rgb(p.muted))
+                                    .child(path.clone()),
+                            ),
+                    )
+                    .child(icon(IconName::ChevronRight, 14., p.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.busy {
+                            cx.emit(ChromeEvent::OpenRepository(path.clone()))
+                        }
+                    })),
+            )
+            .when(removable, |view| {
+                view.child(
+                    NativeButton::new(SharedString::from(format!("recent-remove:{remove}")))
+                        .w(px(28.))
+                        .h(px(28.))
+                        .mr(px(6.))
+                        .rounded(RADIUS_SM)
+                        .flex_shrink_0()
+                        .text_color(rgb(p.muted))
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(rgb(p.danger)))
+                        .focus_visible(move |style| style.border_1().border_color(rgb(p.accent)))
+                        .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                        .child(gpui_kit::component::Icon::new(IconName::X).with_size(px(14.)))
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Retirer des dépôts récents").build(window, cx)
+                        })
+                        .accessibility_label(format!("Retirer {} des dépôts récents", entry.name))
+                        .disabled(self.busy)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.remove_recent(&remove, cx)),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
     pub fn render_welcome(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.preferences.palette();
         let offset = self.preferences.font_size_offset;
         let query = self.recent_filter.read(cx).value().trim().to_lowercase();
         let recent_focus = self.recent_filter.read(cx).focus_handle(cx);
-        let recent: Vec<_> = self
-            .preferences
-            .recent
-            .iter()
-            .filter(|entry| {
-                format!("{} {}", entry.name, entry.path)
-                    .to_lowercase()
-                    .contains(&query)
-            })
-            .cloned()
-            .collect();
+        let recent = self
+            .recent_metadata
+            .groups(&self.preferences.recent, &query);
         let content = div()
             .id("welcome-content")
             .w_full()
@@ -1108,106 +1209,42 @@ impl Chrome {
                                         .aria_label("Rechercher un dépôt récent"),
                                 ),
                         )
-                        .children(recent.iter().map(|entry| {
-                            let path = entry.path.clone();
-                            let remove = path.clone();
-                            let tooltip = format!("{}\n{}", entry.name, entry.path);
+                        .children(recent.iter().map(|group| {
                             div()
-                                .id(SharedString::from(format!("recent:{path}")))
-                                .flex()
-                                .items_center()
-                                .mb(px(6.))
-                                .rounded(RADIUS_MD)
-                                .border_1()
-                                .border_color(rgb(p.border))
-                                .bg(rgb(p.surface))
-                                .overflow_hidden()
-                                .hover(move |view| view.bg(rgb(mix(p.text, p.surface, 0.06))))
-                                .child(
-                                    NativeButton::new(SharedString::from(format!(
-                                        "recent-open:{path}"
-                                    )))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .p(px(10.))
-                                    .line_height(relative(1.5))
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_left()
-                                    .cursor_pointer()
-                                    .accessibility_label(format!("Ouvrir {}", entry.name))
-                                    .tooltip(move |window, cx| {
-                                        Tooltip::new(tooltip.clone()).build(window, cx)
-                                    })
-                                    .focus_visible(move |style| {
-                                        style.bg(rgb(mix(p.text, p.surface, 0.06)))
-                                    })
-                                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                                    .disabled(self.busy)
-                                    .child(icon(IconName::FolderGit2, 16., p.accent))
-                                    .child(
+                                .mb(px(12.))
+                                .child(self.render_recent_repository(
+                                    &group.repository,
+                                    &group.repository.name,
+                                    false,
+                                    group.removable,
+                                    cx,
+                                ))
+                                .when(!group.worktrees.is_empty(), |view| {
+                                    let prefix = format!("{} · ", group.repository.name);
+                                    view.child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(11. + offset))
-                                            .child(
-                                                div()
-                                                    .truncate()
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(rgb(p.accent))
-                                                    .child(entry.name.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .mt(px(4.))
-                                                    .w_full()
-                                                    .truncate()
-                                                    .text_size(px(9. + offset))
-                                                    .text_color(rgb(p.muted))
-                                                    .child(path.clone()),
-                                            ),
+                                            .mt(px(6.))
+                                            .ml(px(20.))
+                                            .pl(px(14.))
+                                            .border_l_1()
+                                            .border_color(rgb(p.border))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(6.))
+                                            .children(group.worktrees.iter().map(|entry| {
+                                                self.render_recent_repository(
+                                                    entry,
+                                                    entry
+                                                        .name
+                                                        .strip_prefix(&prefix)
+                                                        .unwrap_or(&entry.name),
+                                                    true,
+                                                    true,
+                                                    cx,
+                                                )
+                                            })),
                                     )
-                                    .child(icon(IconName::ChevronRight, 14., p.accent))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !this.busy {
-                                            cx.emit(ChromeEvent::OpenRepository(path.clone()))
-                                        }
-                                    })),
-                                )
-                                .child(
-                                    NativeButton::new(SharedString::from(format!(
-                                        "recent-remove:{remove}"
-                                    )))
-                                    .w(px(28.))
-                                    .h(px(28.))
-                                    .mr(px(6.))
-                                    .rounded(RADIUS_SM)
-                                    .flex_shrink_0()
-                                    .text_color(rgb(p.muted))
-                                    .cursor_pointer()
-                                    .hover(move |style| style.text_color(rgb(p.danger)))
-                                    .focus_visible(move |style| {
-                                        style.border_1().border_color(rgb(p.accent))
-                                    })
-                                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                                    .child(
-                                        gpui_kit::component::Icon::new(IconName::X)
-                                            .with_size(px(14.)),
-                                    )
-                                    .tooltip(|window, cx| {
-                                        Tooltip::new("Retirer des dépôts récents").build(window, cx)
-                                    })
-                                    .accessibility_label(format!(
-                                        "Retirer {} des dépôts récents",
-                                        entry.name
-                                    ))
-                                    .disabled(self.busy)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_recent(&remove, cx)
-                                    })),
-                                )
+                                })
                         }))
                         .when(recent.is_empty(), |view| {
                             view.child(

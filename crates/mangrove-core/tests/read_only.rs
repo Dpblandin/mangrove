@@ -3876,6 +3876,14 @@ fn linked_repository_names_follow_branch_unborn_and_detached_head_in_read_only_m
     let names = mangrove_core::repository_names(&paths).unwrap();
     assert_eq!(names[0].path, paths[0]);
     assert_eq!(
+        names[0].repository_path.as_deref(),
+        linked_path.canonicalize().unwrap().to_str()
+    );
+    assert_eq!(
+        names[0].primary_path.as_deref(),
+        fixture.source.canonicalize().unwrap().to_str()
+    );
+    assert_eq!(
         names[0].name.as_deref(),
         Some("repository · t3code/issue-4-readable")
     );
@@ -3954,8 +3962,14 @@ fn repository_names_keep_main_folder_names_original_paths_and_six_entry_limit() 
     ]) {
         assert_eq!(&entry.path, path);
         assert_eq!(entry.name.as_deref(), expected);
+        assert!(entry.primary_path.is_none());
     }
     assert!(serde_json::to_value(&names[2]).unwrap()["name"].is_null());
+    assert!(names[2].repository_path.is_none());
+    assert_eq!(
+        names[5].repository_path.as_deref(),
+        fixture.source.canonicalize().unwrap().to_str()
+    );
     assert!(mangrove_core::repository_names(&[]).unwrap().is_empty());
     assert!(mangrove_core::repository_names(&vec![paths[0].clone(); 7]).is_err());
     assert_eq!(before, snapshot(fixture.root.path()));
@@ -4025,6 +4039,14 @@ fn linked_repository_names_use_main_workdir_or_bare_repository_for_context() {
         Some("principal-project · readable")
     );
     assert_eq!(names[1].name.as_deref(), Some("principal.git · bare-topic"));
+    assert_eq!(
+        names[0].primary_path.as_deref(),
+        primary_path.canonicalize().unwrap().to_str()
+    );
+    assert_eq!(
+        names[1].primary_path.as_deref(),
+        bare_path.canonicalize().unwrap().to_str()
+    );
     let cache = tempfile::tempdir().unwrap();
     let workspace = Workspace::new(cache.path()).unwrap();
     for (path, expected) in paths.iter().zip(&names) {

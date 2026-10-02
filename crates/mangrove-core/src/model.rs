@@ -28,6 +28,10 @@ pub struct RepositoryInfo {
 pub struct RepositoryName {
     pub path: String,
     pub name: Option<String>,
+    /// Canonical workdir (or Git directory for a bare repository).
+    pub repository_path: Option<String>,
+    /// Canonical primary repository path, only for linked worktrees.
+    pub primary_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
