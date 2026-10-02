@@ -485,6 +485,8 @@ impl Mangrove {
         self.focus.focus(window, cx);
         if let Some(path) = path {
             self.open(path, true, None, window, cx);
+        } else {
+            self.refresh_recent(cx);
         }
     }
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -500,6 +502,8 @@ impl Mangrove {
             self.focus.focus(window, cx);
             if let Some(path) = path {
                 self.open(path, true, None, window, cx);
+            } else {
+                self.refresh_recent(cx);
             }
         }
         self.sync_chrome(cx);
@@ -511,6 +515,7 @@ impl Mangrove {
         self.leave_settings(window, cx);
         self.clear_workspace(cx);
         self.focus.focus(window, cx);
+        self.refresh_recent(cx);
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self

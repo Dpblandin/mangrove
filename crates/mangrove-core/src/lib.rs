@@ -44,20 +44,31 @@ pub fn repository_names(paths: &[String]) -> Result<Vec<RepositoryName>> {
     Ok(paths
         .iter()
         .map(|path| {
-            let name = (|| -> Result<String> {
+            (|| -> Result<_> {
                 let repository = open_source_repository(path)?;
                 let source = repository
                     .workdir()
                     .unwrap_or(repository.path())
                     .canonicalize()
                     .map_err(|e| e.to_string())?;
-                Ok(repository_display_name(&repository, &source))
+                let primary_path = primary_repository_path(&repository);
+                Ok(RepositoryName {
+                    path: path.clone(),
+                    name: Some(repository_display_name(
+                        &repository,
+                        &source,
+                        primary_path.as_deref(),
+                    )),
+                    repository_path: Some(source.to_string_lossy().into_owned()),
+                    primary_path: primary_path.map(|path| path.to_string_lossy().into_owned()),
+                })
             })()
-            .ok();
-            RepositoryName {
+            .unwrap_or_else(|_| RepositoryName {
                 path: path.clone(),
-                name,
-            }
+                name: None,
+                repository_path: None,
+                primary_path: None,
+            })
         })
         .collect())
 }
@@ -501,7 +512,11 @@ impl Workspace {
                 &key[..16],
                 self.generation.fetch_add(1, Ordering::Relaxed)
             ),
-            name: repository_display_name(&repository, &source),
+            name: repository_display_name(
+                &repository,
+                &source,
+                primary_repository_path(&repository).as_deref(),
+            ),
             path: source.to_string_lossy().into_owned(),
             head: head_sha,
             head_name,
@@ -968,7 +983,23 @@ fn open_source_repository(path: &str) -> Result<Repository> {
     .map_err(|e| format!("Impossible d'ouvrir ce dépôt Git : {e}"))
 }
 
-fn repository_display_name(repository: &Repository, source: &Path) -> String {
+fn primary_repository_path(repository: &Repository) -> Option<PathBuf> {
+    if !repository.is_worktree() {
+        return None;
+    }
+    let primary = Repository::open(repository.commondir()).ok()?;
+    primary
+        .workdir()
+        .unwrap_or(primary.path())
+        .canonicalize()
+        .ok()
+}
+
+fn repository_display_name(
+    repository: &Repository,
+    source: &Path,
+    primary_path: Option<&Path>,
+) -> String {
     if !repository.is_worktree() {
         return source
             .file_name()
@@ -976,16 +1007,9 @@ fn repository_display_name(repository: &Repository, source: &Path) -> String {
             .to_string_lossy()
             .into_owned();
     }
-    let primary_name = Repository::open(repository.commondir())
-        .ok()
-        .and_then(|primary| {
-            let source = primary
-                .workdir()
-                .unwrap_or(primary.path())
-                .canonicalize()
-                .ok()?;
-            Some(source.file_name()?.to_string_lossy().into_owned())
-        })
+    let primary_name = primary_path
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "Dépôt".into());
     let mut name = repository_head_name(repository);
     if repository.head_detached().unwrap_or(false) {
