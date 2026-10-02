@@ -2145,11 +2145,14 @@ fn separate_git_directory_keeps_the_selected_worktree_and_cache_guards() {
 fn operational_refs_are_not_history_roots_or_refresh_triggers() {
     let fixture = Fixture::new();
     let root = commit(&fixture.repository, "visible", &[], &[], Some("HEAD"));
-    for name in [
+    let operational_refs = [
         "refs/stash",
         "refs/notes/commits",
         "refs/prefetch/remotes/origin/main",
-    ] {
+        "refs/codex/snapshots/0bf5219b1ee9b260ad4c836df8d3e80d78f27c26",
+        "refs/codex/backups/vite-plus-960cd2127e",
+    ];
+    for name in operational_refs {
         commit(
             &fixture.repository,
             "operational-only",
@@ -2158,9 +2161,30 @@ fn operational_refs_are_not_history_roots_or_refresh_triggers() {
             Some(name),
         );
     }
+    let visible_refs = [
+        "refs/heads/main",
+        "refs/heads/codex/snapshots/feature",
+        "refs/remotes/origin/codex/backups/feature",
+        "refs/tags/codex/snapshots/release",
+        "refs/codex-backup/session",
+    ];
+    for name in &visible_refs[1..] {
+        fixture
+            .repository
+            .reference(name, root, false, "test")
+            .unwrap();
+    }
+    let before = snapshot(&fixture.source);
     let workspace = fixture.workspace();
     let info = fixture.open(&workspace);
     finish(&workspace, &info.id);
+    assert_eq!(info.references.len(), visible_refs.len());
+    for name in visible_refs {
+        assert!(info
+            .references
+            .iter()
+            .any(|reference| reference.name == name));
+    }
     assert_eq!(
         workspace.list_commits(&info.id, 0, 100, "").unwrap().total,
         1
@@ -2172,20 +2196,35 @@ fn operational_refs_are_not_history_roots_or_refresh_triggers() {
             .total,
         0
     );
-    let old = fixture
-        .repository
-        .find_reference("refs/stash")
-        .unwrap()
-        .target()
-        .unwrap();
-    commit(
-        &fixture.repository,
-        "new-stash",
-        &[old],
-        &[],
-        Some("refs/stash"),
-    );
-    assert_eq!(fixture.open(&workspace).id, info.id);
+    assert_eq!(before, snapshot(&fixture.source));
+    for name in operational_refs {
+        let old = fixture
+            .repository
+            .find_reference(name)
+            .unwrap()
+            .target()
+            .unwrap();
+        for query in [name, &old.to_string()] {
+            assert_eq!(
+                workspace
+                    .list_commits(&info.id, 0, 100, query)
+                    .unwrap()
+                    .total,
+                0,
+                "{query}"
+            );
+        }
+        commit(
+            &fixture.repository,
+            "new-operational-snapshot",
+            &[old],
+            &[],
+            Some(name),
+        );
+        let before_refresh = snapshot(&fixture.source);
+        assert_eq!(fixture.open(&workspace).id, info.id, "{name}");
+        assert_eq!(before_refresh, snapshot(&fixture.source));
+    }
 }
 
 #[test]
