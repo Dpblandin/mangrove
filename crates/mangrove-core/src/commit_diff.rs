@@ -141,6 +141,8 @@ impl CachedCommit {
                     + details.message.capacity()
                     + details.author.capacity()
                     + details.email.capacity()
+                    + details.committer.capacity()
+                    + details.committer_email.capacity()
                     + details.parents.capacity() * std::mem::size_of::<String>()
                     + details.parents.iter().map(String::capacity).sum::<usize>()
                     + details
@@ -386,6 +388,9 @@ mod tests {
             message: "x".repeat(MAX_CACHE_BYTES),
             author: String::new(),
             email: String::new(),
+            author_time: 0,
+            committer: String::new(),
+            committer_email: String::new(),
             time: 0,
             parents: vec![],
             files: vec![],

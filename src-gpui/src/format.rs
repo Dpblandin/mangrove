@@ -41,6 +41,16 @@ pub fn commit_date(seconds: i64) -> String {
     )
 }
 
+pub fn commit_timestamp(seconds: i64) -> String {
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%d/%m/%Y à %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "Date inconnue".into())
+}
+
 pub fn format_count(value: usize) -> String {
     let digits = value.to_string();
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);

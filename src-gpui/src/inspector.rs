@@ -7,7 +7,7 @@ use crate::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
         ReadGate, action, is_activate, notice, status_icon,
     },
-    format::{commit_date, format_count, initials, short_sha},
+    format::{commit_date, commit_timestamp, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax,
@@ -15,7 +15,12 @@ use crate::{
     view_cache::render_cached_view,
 };
 use accesskit::Role;
-use gpui_kit::{assets::IconName, component::scroll::Scrollbar, prelude::*, *};
+use gpui_kit::{
+    assets::IconName,
+    component::{scroll::Scrollbar, tooltip::Tooltip},
+    prelude::*,
+    *,
+};
 use mangrove_core::{Workspace, model::*};
 use std::{
     collections::{HashMap, VecDeque},
@@ -363,8 +368,9 @@ pub struct InspectorView {
     preferences: Preferences,
     scroll: [UniformListScrollHandle; 3],
     message_scroll: ScrollHandle,
-    sha_scroll: ScrollHandle,
-    parent_scroll: ScrollHandle,
+    sha_hovered: bool,
+    copied_sha: Option<String>,
+    copy_feedback_task: Option<Task<()>>,
     stash_scroll: ScrollHandle,
     focus: [FocusHandle; 3],
     active_file: [usize; 3],
@@ -463,8 +469,9 @@ impl InspectorView {
             preferences: Preferences::default(),
             scroll: std::array::from_fn(|_| UniformListScrollHandle::new()),
             message_scroll: ScrollHandle::new(),
-            sha_scroll: ScrollHandle::new(),
-            parent_scroll: ScrollHandle::new(),
+            sha_hovered: false,
+            copied_sha: None,
+            copy_feedback_task: None,
             stash_scroll: ScrollHandle::new(),
             focus: std::array::from_fn(|_| cx.focus_handle()),
             active_file: [0; 3],
@@ -482,6 +489,7 @@ impl InspectorView {
         self.update_live_revision();
         self.clear_image_preview(cx);
         self.commit_message = None;
+        self.reset_sha_feedback();
         self.selection_debounce = None;
         self.last_keyboard_selection = None;
         self.repository = None;
@@ -823,6 +831,7 @@ impl InspectorView {
         let keep_commit = matches!(self.selection, Selection::Commit(_))
             && matches!(selection, Selection::Commit(_));
         self.selection = selection;
+        self.reset_sha_feedback();
         self.details_loading = true;
         self.diff_loading = false;
         if !keep_commit {
@@ -1499,6 +1508,8 @@ impl InspectorView {
                                 .into(),
                             message.next().unwrap_or("").trim().to_owned().into(),
                         ));
+                        self.message_scroll.set_offset(point(px(0.), px(0.)));
+                        self.reset_sha_feedback();
                         self.details = Some(details);
                         self.snapshot = None;
                         self.viewer_dirty = true;
@@ -2236,6 +2247,92 @@ impl InspectorView {
             .child(div().flex_1().min_h_0().child(self.diff_body(window, cx)))
             .into_any_element()
     }
+    fn reset_sha_feedback(&mut self) {
+        self.sha_hovered = false;
+        self.copied_sha = None;
+        self.copy_feedback_task = None;
+    }
+    fn copy_commit_sha(&mut self, sha: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
+        self.copied_sha = Some(sha);
+        self.copy_feedback_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |view, cx| {
+                view.copied_sha = None;
+                view.copy_feedback_task = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+    fn commit_identity(
+        &self,
+        name: &str,
+        email: &str,
+        time: i64,
+        role: &str,
+        trailing: Option<AnyElement>,
+    ) -> AnyElement {
+        let p = self.palette;
+        let o = self.preferences.font_size_offset;
+        let identity = format!("{name} <{email}>");
+        let date = format!("{role} · {}", commit_timestamp(time));
+        div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(
+                div()
+                    .size(px(36.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(p.accent_soft))
+                    .text_color(rgb(p.accent))
+                    .text_size(px(12. + o))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(initials(name)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_start()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("commit-{role}")))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13. + o))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(identity.clone()).build(window, cx)
+                                    })
+                                    .child(name.to_owned()),
+                            )
+                            .children(trailing),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11. + o))
+                            .text_color(rgb(p.muted))
+                            .child(date),
+                    ),
+            )
+            .into_any_element()
+    }
     fn render_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let o = self.preferences.font_size_offset;
@@ -2248,10 +2345,10 @@ impl InspectorView {
             .flex_col()
             .bg(rgb(p.panel))
             .border_l_1()
-            .border_color(rgb(p.border))
-            .child(self.panel_heading("Commit", IconName::GitCommitHorizontal));
+            .border_color(rgb(p.border));
         if let Some(error) = &self.error {
             return panel
+                .child(self.panel_heading("Commit", IconName::GitCommitHorizontal))
                 .child(self.state(
                     "Impossible de lire le commit",
                     error,
@@ -2261,189 +2358,226 @@ impl InspectorView {
                 .into_any_element();
         }
         let Some(details) = self.details.clone() else {
-            return panel.child(if self.details_loading{self.state("Lecture du commit…","",IconName::GitCommitHorizontal,false)}else{self.state("Chaque commit a son histoire","Sélectionnez un commit pour découvrir son message, ses fichiers et ses modifications.",IconName::GitCommitHorizontal,false)}).into_any_element();
+            return panel
+                .child(self.panel_heading("Commit", IconName::GitCommitHorizontal))
+                .child(if self.details_loading {
+                    self.state("Lecture du commit…", "", IconName::GitCommitHorizontal, false)
+                } else {
+                    self.state("Chaque commit a son histoire", "Sélectionnez un commit pour découvrir son message, ses fichiers et ses modifications.", IconName::GitCommitHorizontal, false)
+                })
+                .into_any_element();
         };
-        if let Some(limit) = &details.similarity_limited {
-            panel = panel.child(notice(limit.clone(), p.warning, o));
-        }
         let (title, description) = self.commit_message.clone().unwrap_or_default();
         let sha = details.sha.clone();
-        let parent = if details.parents.len() > 1 {
-            format!(
-                "Commit de fusion · comparaison avec le premier parent {}",
-                short_sha(&details.parents[0])
-            )
-        } else if details.parents.is_empty() {
-            "Premier commit du dépôt".into()
-        } else {
-            String::new()
-        };
+        let keyboard_sha = sha.clone();
+        let copied = self.copied_sha.as_ref() == Some(&sha);
         panel = panel.child(
             div()
-                .h(relative(0.36))
-                .min_h(px(220.))
-                .max_h(px(290.))
-                // GPUI lengths have no calc(): move 3o from bottom padding to
-                // margin to add it after the clamp while keeping 16px below
-                // the content.
-                .mb(px(o * 3.))
+                .h(px(40. + o * 2.))
                 .flex_shrink_0()
                 .flex()
-                .flex_col()
-                .gap(px(10.))
-                .px(px(20.))
-                .pt(px(20.))
-                .pb(px(16. - o * 3.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .id("commit-message")
-                                .role(Role::Document)
-                                .aria_label("Message du commit")
-                                .track_scroll(&self.message_scroll)
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                // Preserve the source's stable 6px gutter.
-                                .pr(px(6.))
-                                .text_size(px(15. + o))
-                                .font_weight(FontWeight::MEDIUM)
-                                .line_height(relative(1.625))
-                                .child(title)
-                                .when(!description.is_empty(), |s| {
-                                    s.child(
-                                        div()
-                                            .mt(px(10.))
-                                            .text_size(px(12. + o))
-                                            .line_height(relative(1.625))
-                                            .text_color(rgb(p.muted))
-                                            .font_weight(FontWeight::NORMAL)
-                                            .child(description),
-                                    )
-                                }),
-                        )
-                        .child(scrollbar_theme(
-                            Scrollbar::vertical(&self.message_scroll)
-                                .id("commit-message-scrollbar"),
-                        )),
-                )
-                .child(
-                    div()
-                        .h(px(38. + o * 3.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .size(px(32.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(rgb(p.accent_soft))
-                                .text_color(rgb(p.accent))
-                                .text_size(px(11. + o))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(initials(&details.author)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(12. + o))
-                                        .line_height(px(16. + o * 2.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(details.author.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(10. + o))
-                                        .text_color(rgb(p.muted))
-                                        .child(commit_date(details.time)),
-                                ),
-                        ),
-                )
+                .items_center()
+                .justify_center()
+                .border_b_1()
+                .border_color(rgb(p.border))
                 .child(
                     div()
                         .id("commit-sha")
                         .role(Role::Button)
-                        .aria_label("Copier le SHA complet du commit")
+                        .aria_label(format!("Copier le SHA complet du commit {}", details.sha))
                         .focusable()
-                        .h(px(36. + o * 2.))
-                        .flex_shrink_0()
-                        .min_w_0()
+                        .relative()
                         .flex()
                         .items_center()
-                        .gap(px(12.))
-                        .px(px(11.))
-                        .rounded(RADIUS_MD)
-                        .bg(rgb(p.bg))
-                        .text_size(px(10. + o))
+                        .gap(px(5.))
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(RADIUS_SM)
+                        .text_size(px(12. + o))
                         .cursor_pointer()
-                        .child(div().flex_shrink_0().text_color(rgb(p.muted)).child("SHA"))
-                        .child(
-                            div()
-                                .relative()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .child(
+                        .hover(|s| s.bg(rgb(p.hover)))
+                        .child(div().text_color(rgb(p.muted)).child("commit :"))
+                        .child(short_sha(&sha))
+                        .when(self.sha_hovered || copied, |s| {
+                            s.child(
+                                deferred(
                                     div()
-                                        .id("full-sha")
-                                        .track_scroll(&self.sha_scroll)
-                                        .size_full()
-                                        .min_w_0()
-                                        .overflow_x_scroll()
-                                        .flex()
-                                        .items_center()
-                                        .font_family(MONO)
+                                        .id("sha-copy-tooltip")
+                                        .role(if copied { Role::Status } else { Role::Tooltip })
+                                        .absolute()
+                                        .top(relative(1.))
+                                        .right(px(0.))
+                                        .mt(px(3.))
+                                        .px(px(8.))
+                                        .py(px(4.))
+                                        .rounded(RADIUS_SM)
+                                        .bg(rgb(p.bg))
+                                        .border_1()
+                                        .border_color(rgb(p.border))
+                                        .text_size(px(11. + o))
                                         .whitespace_nowrap()
-                                        .child(div().flex_shrink_0().child(sha.clone())),
+                                        .child(if copied { "Copié !" } else { "Copier" }),
                                 )
-                                .child(scrollbar_theme(
-                                    Scrollbar::horizontal(&self.sha_scroll)
-                                        .id("full-sha-scrollbar"),
-                                )),
-                        )
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()))
+                                .with_priority(10),
+                            )
+                        })
+                        .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                            view.sha_hovered = *hovered;
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.copy_commit_sha(sha.clone(), cx);
+                        }))
+                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                            if is_activate(event) {
+                                view.copy_commit_sha(keyboard_sha.clone(), cx);
+                                cx.stop_propagation();
+                            }
                         })),
-                )
+                ),
+        );
+        if let Some(limit) = &details.similarity_limited {
+            panel = panel.child(notice(limit.clone(), p.warning, o));
+        }
+        panel = panel.child(
+            div()
+                .h(relative(0.36))
+                .min_h(px(180.))
+                .max_h(px(290.))
+                .flex_shrink_0()
+                .mx(px(12.))
+                .mt(px(12.))
+                .relative()
+                .flex()
+                .flex_col()
+                .rounded(RADIUS_SM)
+                .bg(rgb(p.reading_bg))
+                .border_1()
+                .border_color(rgb(p.border))
+                .overflow_hidden()
                 .child(
                     div()
-                        .h(px(30. + o * 2.))
-                        .flex_shrink_0()
-                        .relative()
-                        .child(
-                            div()
-                                .id("parent-note")
-                                .track_scroll(&self.parent_scroll)
-                                .size_full()
-                                .overflow_y_scroll()
-                                .text_size(px(10. + o))
-                                .text_color(rgb(p.muted))
-                                .child(parent),
-                        )
-                        .child(scrollbar_theme(
-                            Scrollbar::vertical(&self.parent_scroll).id("parent-note-scrollbar"),
-                        )),
-                ),
+                        .id("commit-message")
+                        .role(Role::Document)
+                        .aria_label("Message du commit")
+                        .track_scroll(&self.message_scroll)
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_y_scroll()
+                        .p(px(12.))
+                        .pr(px(18.))
+                        .text_size(px(15. + o))
+                        .font_weight(FontWeight::MEDIUM)
+                        .line_height(relative(1.5))
+                        .child(title)
+                        .when(!description.is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .mt(px(12.))
+                                    .text_size(px(13. + o))
+                                    .line_height(relative(1.6))
+                                    .text_color(rgb(p.text))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .child(description),
+                            )
+                        }),
+                )
+                .child(scrollbar_theme(
+                    Scrollbar::vertical(&self.message_scroll).id("commit-message-scrollbar"),
+                )),
+        );
+        let parents = (!details.parents.is_empty()).then(|| {
+            div()
+                .flex_shrink_0()
+                .max_w(px(120. + o * 4.))
+                .justify_end()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(11. + o))
+                .text_color(rgb(p.muted))
+                .child(if details.parents.len() > 1 {
+                    "Parents :"
+                } else {
+                    "Parent :"
+                })
+                .children(details.parents.iter().enumerate().map(|(index, parent)| {
+                    let sha = parent.clone();
+                    let keyboard_sha = sha.clone();
+                    let tooltip = if index == 0 && details.parents.len() > 1 {
+                        format!("{sha} · Premier parent, utilisé pour le diff")
+                    } else {
+                        sha.clone()
+                    };
+                    div()
+                        .id(("commit-parent", index))
+                        .role(Role::Button)
+                        .aria_label(format!("Aller au commit parent {sha}"))
+                        .focusable()
+                        .cursor_pointer()
+                        .text_color(rgb(p.text))
+                        .hover(|s| s.text_color(rgb(p.accent)))
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child(short_sha(parent))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(InspectorEvent::NavigateCommit(sha.clone()));
+                        }))
+                        .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
+                            if is_activate(event) {
+                                cx.emit(InspectorEvent::NavigateCommit(keyboard_sha.clone()));
+                                cx.stop_propagation();
+                            }
+                        }))
+                }))
+                .into_any_element()
+        });
+        panel = panel.child(
+            div()
+                .flex_shrink_0()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .p(px(12.))
+                .child(self.commit_identity(
+                    &details.author,
+                    &details.email,
+                    details.author_time,
+                    "Auteur",
+                    parents,
+                ))
+                .when(
+                    details.author != details.committer
+                        || details.email != details.committer_email
+                        || details.author_time != details.time,
+                    |s| {
+                        s.child(self.commit_identity(
+                            &details.committer,
+                            &details.committer_email,
+                            details.time,
+                            "Committer",
+                            None,
+                        ))
+                    },
+                )
+                .when(details.parents.is_empty(), |s| {
+                    s.child(
+                        div()
+                            .text_size(px(11. + o))
+                            .text_color(rgb(p.muted))
+                            .child("Premier commit du dépôt"),
+                    )
+                })
+                .when(details.parents.len() > 1, |s| {
+                    s.child(
+                        div()
+                            .text_size(px(10. + o))
+                            .text_color(rgb(p.muted))
+                            .child("Fusion · diff comparé au premier parent"),
+                    )
+                }),
         );
         let mut files = div()
             .min_h_0()
