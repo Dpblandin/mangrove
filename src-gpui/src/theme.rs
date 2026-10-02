@@ -35,14 +35,16 @@ pub enum ThemeId {
     Mangrove,
     Macchiato,
     Ardoise,
+    Gitlab,
 }
 
 impl ThemeId {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Classic,
         Self::Mangrove,
         Self::Macchiato,
         Self::Ardoise,
+        Self::Gitlab,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -50,6 +52,7 @@ impl ThemeId {
             Self::Mangrove => "Mangrove",
             Self::Macchiato => "Catppuccin Macchiato",
             Self::Ardoise => "Ardoise",
+            Self::Gitlab => "Gitlab",
         }
     }
 }
@@ -198,6 +201,31 @@ impl Palette {
                     0x8aadf4, 0xa6da95, 0xc6a0f6, 0xeed49f, 0xed8796, 0x8bd5ca, 0xf5a97f, 0xb7bdf8,
                 ];
             }
+            // GitLab's dark neutral UI, diff and Highlight.js tokens, sampled
+            // from https://gitlab.com/dpascaud/tailord on 2026-10-02.
+            ThemeId::Gitlab => {
+                palette.bg = 0x050506;
+                palette.reading_bg = 0x18171d;
+                palette.panel = 0x18171d;
+                palette.surface = 0x28272d;
+                palette.border = 0x4c4b51;
+                palette.text = 0xececef;
+                palette.muted = 0xbfbfc3;
+                palette.accent = 0x9dc8f2;
+                palette.success = 0x84d4b6;
+                palette.danger = 0xffafb8;
+                palette.warning = 0xf7b951;
+                palette.renamed = palette.accent;
+                palette.addition_bg = 0x233726;
+                palette.deletion_bg = 0x4b2526;
+                palette.on_accent = 0x18171d;
+                palette.graph = [
+                    0x9dc8f2, 0x84d4b6, 0xa997e1, 0xf7b951, 0xffafb8, 0x32c5d2, 0xe99b60, 0xf88aaf,
+                ];
+                palette.syntax = [
+                    0xb294bb, 0xb5bd68, 0x969896, 0xde935f, 0xf0c674, 0x81a2be, 0xc5c8c6, 0x81a2be,
+                ];
+            }
         }
         palette.selection = mix(palette.accent, palette.bg, 0.14);
         palette.accent_soft = mix(palette.accent, palette.bg, 0.10);
@@ -206,6 +234,11 @@ impl Palette {
         palette.hunk_bg = mix(palette.accent, palette.reading_bg, 0.12);
         palette.addition_gutter = mix(palette.success, palette.addition_bg, 0.10);
         palette.deletion_gutter = mix(palette.danger, palette.deletion_bg, 0.10);
+        if theme == ThemeId::Gitlab {
+            // GitLab keeps navigation selection and hover neutral.
+            palette.selection = palette.surface;
+            palette.hover = palette.surface;
+        }
         palette
     }
 
