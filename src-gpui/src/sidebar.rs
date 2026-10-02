@@ -20,12 +20,13 @@ use icu_collator::{
 };
 use mangrove_core::{
     Workspace,
-    model::{Reference, RepositoryInfo},
+    model::{Reference, RepositoryInfo, WorktreeInfo, WorktreeList},
 };
 use std::{
     cell::RefCell,
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    ops::Range,
     rc::Rc,
     sync::{Arc, OnceLock},
 };
@@ -92,11 +93,13 @@ enum ReferenceNode {
     Folder {
         path: String,
         label: String,
+        highlights: Vec<Range<usize>>,
         count: usize,
         children: Vec<Self>,
     },
     Reference {
         label: String,
+        highlights: Vec<Range<usize>>,
         reference: Arc<Reference>,
     },
 }
@@ -112,15 +115,21 @@ impl ReferenceNode {
 #[derive(Default)]
 struct FolderBuilder {
     count: usize,
+    highlights: Vec<Range<usize>>,
     folders: Vec<(String, Self)>,
     folder_indices: HashMap<String, usize>,
     references: Vec<ReferenceNode>,
 }
 
-fn reference_tree(references: impl Iterator<Item = Arc<Reference>>) -> Vec<ReferenceNode> {
+fn reference_tree(
+    references: impl Iterator<Item = Arc<Reference>>,
+    filter: &str,
+) -> Vec<ReferenceNode> {
     let mut root = FolderBuilder::default();
     for reference in references {
         let segments: Vec<_> = reference.label.split('/').collect();
+        let highlights = search_highlight_ranges(&reference.label, filter);
+        let mut offset = 0;
         let mut folder = &mut root;
         for segment in &segments[..segments.len().saturating_sub(1)] {
             let index = if let Some(index) = folder.folder_indices.get(*segment) {
@@ -135,28 +144,37 @@ fn reference_tree(references: impl Iterator<Item = Arc<Reference>>) -> Vec<Refer
             };
             folder = &mut folder.folders[index].1;
             folder.count += 1;
+            folder.highlights.extend(visible_highlight_ranges(
+                &highlights,
+                offset..offset + segment.len(),
+            ));
+            offset += segment.len() + 1;
         }
         let label = segments.last().copied().unwrap_or("").to_owned();
-        folder
-            .references
-            .push(ReferenceNode::Reference { label, reference });
+        folder.references.push(ReferenceNode::Reference {
+            highlights: visible_highlight_ranges(&highlights, offset..reference.label.len()),
+            label,
+            reference,
+        });
     }
     fn children(folder: FolderBuilder, parent: &str) -> Vec<ReferenceNode> {
         let mut nodes: Vec<_> = folder
             .folders
             .into_iter()
-            .map(|(label, folder)| {
+            .map(|(label, mut folder)| {
                 let path = if parent.is_empty() {
                     label.clone()
                 } else {
                     format!("{parent}/{label}")
                 };
                 let count = folder.count;
+                let highlights = merged_highlight_ranges(std::mem::take(&mut folder.highlights));
                 ReferenceNode::Folder {
                     children: children(folder, &path),
                     count,
                     path,
                     label,
+                    highlights,
                 }
             })
             .collect();
@@ -182,6 +200,89 @@ fn reference_order(a: &str, b: &str) -> Ordering {
             Collator::try_new(preferences, options).expect("compiled French collation data")
         })
         .compare(a, b)
+}
+
+fn worktree_label(item: &WorktreeInfo) -> String {
+    if item.detached {
+        item.head
+            .as_ref()
+            .map(|sha| format!("{} · {}", item.head_name, short_sha(sha)))
+            .unwrap_or_else(|| item.head_name.clone())
+    } else {
+        item.head_name.clone()
+    }
+}
+
+fn filtered_worktree_indices(list: &WorktreeList, filter: &str) -> Vec<usize> {
+    let filter = filter.trim().to_lowercase();
+    list.worktrees
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            filter.is_empty() || worktree_label(item).to_lowercase().contains(&filter)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn search_highlight_ranges(text: &str, filter: &str) -> Vec<Range<usize>> {
+    let filter = filter.trim().to_lowercase();
+    if filter.is_empty() {
+        return Vec::new();
+    }
+    let folded = text.to_lowercase();
+    let matches: Vec<_> = folded
+        .match_indices(&filter)
+        .map(|(start, matched)| start..start + matched.len())
+        .collect();
+    if matches.is_empty() {
+        return Vec::new();
+    }
+    // Lowercasing can change UTF-8 lengths (İ, Ⱥ). Map folded byte offsets back
+    // to complete source characters before passing ranges to GPUI.
+    let mut source_ranges = Vec::with_capacity(folded.len());
+    for (start, character) in text.char_indices() {
+        let folded_len = character.to_lowercase().map(char::len_utf8).sum();
+        source_ranges.extend(std::iter::repeat_n(
+            start..start + character.len_utf8(),
+            folded_len,
+        ));
+    }
+    merged_highlight_ranges(
+        matches
+            .into_iter()
+            .map(|matched| source_ranges[matched.start].start..source_ranges[matched.end - 1].end)
+            .collect(),
+    )
+}
+
+// Project full-name matches onto the segment displayed in a tree row. Folder
+// highlights come from actual descendant matches, including cross-segment ones.
+fn visible_highlight_ranges(matches: &[Range<usize>], visible: Range<usize>) -> Vec<Range<usize>> {
+    matches
+        .iter()
+        .filter_map(|matched| {
+            let start = matched.start.max(visible.start);
+            let end = matched.end.min(visible.end);
+            (start < end).then(|| start - visible.start..end - visible.start)
+        })
+        .collect()
+}
+
+fn merged_highlight_ranges(mut matches: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    matches.sort_by_key(|range| range.start);
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for range in matches {
+        if let Some(previous) = ranges
+            .last_mut()
+            .filter(|previous| range.start <= previous.end)
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            ranges.push(range);
+        }
+    }
+    ranges
 }
 
 #[derive(Default)]
@@ -259,6 +360,7 @@ enum SidebarRow {
         kind: ReferenceKind,
         path: String,
         label: String,
+        highlights: Vec<Range<usize>>,
         count: usize,
         depth: usize,
         closed: bool,
@@ -266,6 +368,7 @@ enum SidebarRow {
     Reference {
         kind: ReferenceKind,
         label: String,
+        highlights: Vec<Range<usize>>,
         reference: Arc<Reference>,
         depth: usize,
     },
@@ -363,8 +466,9 @@ impl SidebarView {
         cx.notify();
     }
     pub fn new(engine: Arc<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filtrer les références"));
+        let filter_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Filtrer les références et worktrees")
+        });
         let subscription = cx.subscribe(&filter_input, |view, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 view.reference_state
@@ -553,7 +657,7 @@ impl SidebarView {
                 (!references.is_empty()).then(|| ReferenceGroup {
                     kind,
                     count: references.len(),
-                    tree: reference_tree(references.into_iter()),
+                    tree: reference_tree(references.into_iter(), &filter),
                 })
             })
             .collect();
@@ -603,13 +707,14 @@ impl SidebarView {
                 0.
             },
         });
+        let worktree_indices = self
+            .context
+            .worktrees
+            .data
+            .as_ref()
+            .map(|list| filtered_worktree_indices(list, &self.reference_state.filter));
         self.rows.push(SidebarRow::Worktrees {
-            count: self
-                .context
-                .worktrees
-                .data
-                .as_ref()
-                .map(|list| list.worktrees.len()),
+            count: worktree_indices.as_ref().map(Vec::len),
             expanded: self.context.worktrees_expanded,
         });
         if self.context.worktrees_expanded {
@@ -624,12 +729,24 @@ impl SidebarView {
                     error: false,
                 });
             }
-            if let Some(list) = &self.context.worktrees.data {
-                self.rows
-                    .extend((0..list.worktrees.len()).map(SidebarRow::Worktree));
-                if list.truncated {
+            if let Some(indices) = worktree_indices {
+                if indices.is_empty() && self.reference_state.searching() {
                     self.rows.push(SidebarRow::Notice {
-                        text: "Les 256 premiers worktrees sont affichés.".into(),
+                        text: "Aucun worktree trouvé.".into(),
+                        error: false,
+                    });
+                }
+                self.rows
+                    .extend(indices.into_iter().map(SidebarRow::Worktree));
+                if self
+                    .context
+                    .worktrees
+                    .data
+                    .as_ref()
+                    .is_some_and(|list| list.truncated)
+                {
+                    self.rows.push(SidebarRow::Notice {
+                        text: "Les 256 premiers worktrees sont pris en compte.".into(),
                         error: false,
                     });
                 }
@@ -832,6 +949,15 @@ impl SidebarView {
             })
     }
 
+    fn highlighted_label(&self, label: String, ranges: Vec<Range<usize>>) -> StyledText {
+        let style = HighlightStyle {
+            color: Some(rgb(self.palette.text).into()),
+            background_color: Some(rgb(self.palette.accent).opacity(0.35).into()),
+            ..Default::default()
+        };
+        StyledText::new(label).with_highlights(ranges.into_iter().map(|range| (range, style)))
+    }
+
     fn render_row(
         &mut self,
         index: usize,
@@ -865,12 +991,14 @@ impl SidebarView {
                 kind,
                 path,
                 label,
+                highlights,
                 count,
                 depth,
                 closed,
             } => {
                 let tooltip_path = path.clone();
                 let padding = (12. + depth as f32 * 14.).min((self.width * 0.35 - 14.).max(0.));
+                let label = self.highlighted_label(label, highlights);
                 div()
                     .id(SharedString::from(format!(
                         "reference-folder-{}-{path}",
@@ -931,6 +1059,7 @@ impl SidebarView {
             SidebarRow::Reference {
                 kind,
                 label,
+                highlights,
                 reference,
                 depth,
             } => {
@@ -961,6 +1090,7 @@ impl SidebarView {
                     .clone();
                 let button_width = self.width - 1. - if kind.can_solo() { 24. } else { 0. };
                 let padding = (26. + depth as f32 * 14.).min(button_width * 0.35);
+                let label = self.highlighted_label(label, highlights);
                 let row = div()
                     .id(SharedString::from(format!("reference-{name}")))
                     .role(Role::Button)
@@ -1146,14 +1276,8 @@ impl SidebarView {
                 else {
                     return div().into_any_element();
                 };
-                let label = if item.detached {
-                    item.head
-                        .as_ref()
-                        .map(|sha| format!("{} · {}", item.head_name, short_sha(sha)))
-                        .unwrap_or_else(|| item.head_name.clone())
-                } else {
-                    item.head_name.clone()
-                };
+                let label = worktree_label(item);
+                let highlights = search_highlight_ranges(&label, &self.reference_state.filter);
                 let path = item.path.clone();
                 let current = self
                     .repository
@@ -1225,7 +1349,7 @@ impl SidebarView {
                             } else {
                                 FontWeight::MEDIUM
                             })
-                            .child(label),
+                            .child(self.highlighted_label(label, highlights)),
                     )
                     .when(!item.available, |this| {
                         this.child(icon(IconName::TriangleAlert, 12., p.warning))
@@ -1320,8 +1444,8 @@ impl SidebarView {
                     .into_any_element()
             }
             SidebarRow::Notice { text, error } => div()
-                .mx(px(12.))
-                .my(px(8.))
+                .px(px(12.))
+                .py(px(8.))
                 .text_size(px(9. + font_offset))
                 .text_color(rgb(if error { p.danger } else { p.muted }))
                 .child(text)
@@ -1343,7 +1467,7 @@ impl Render for SidebarView {
         let filter_input = Styled::h(
             Input::new(&self.filter_input)
                 .id("reference-filter")
-                .aria_label("Filtrer les références")
+                .aria_label("Filtrer les références et worktrees")
                 .appearance(false)
                 .bordered(false)
                 .focus_bordered(false)
@@ -1413,6 +1537,7 @@ fn flatten_tree(
             ReferenceNode::Folder {
                 path,
                 label,
+                highlights,
                 count,
                 children,
             } => {
@@ -1421,6 +1546,7 @@ fn flatten_tree(
                     kind,
                     path: path.clone(),
                     label: label.clone(),
+                    highlights: highlights.clone(),
                     count: *count,
                     depth,
                     closed,
@@ -1429,9 +1555,14 @@ fn flatten_tree(
                     flatten_tree(children, kind, depth + 1, state, rows);
                 }
             }
-            ReferenceNode::Reference { label, reference } => rows.push(SidebarRow::Reference {
+            ReferenceNode::Reference {
+                label,
+                highlights,
+                reference,
+            } => rows.push(SidebarRow::Reference {
                 kind,
                 label: label.clone(),
+                highlights: highlights.clone(),
                 reference: reference.clone(),
                 depth,
             }),
@@ -1472,14 +1603,14 @@ fn same_row_identity(left: &SidebarRow, right: &SidebarRow) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReferenceKind, ReferenceNode, ReferenceTreeState, SidebarRow, flatten_tree,
-        reference_order, reference_tree,
+        ReferenceKind, ReferenceNode, ReferenceTreeState, SidebarRow, filtered_worktree_indices,
+        flatten_tree, reference_order, reference_tree, search_highlight_ranges,
     };
     use crate::virtual_scroll::{RowGeometry, VirtualScrollHandle};
     use gpui_kit::{
         ListAlignment, ListState, ScrollDelta, component::scroll::ScrollbarHandle, point, px,
     };
-    use mangrove_core::model::Reference;
+    use mangrove_core::model::{Reference, WorktreeInfo, WorktreeList};
     use std::{cmp::Ordering, sync::Arc};
 
     fn reference(label: &str) -> Arc<Reference> {
@@ -1489,6 +1620,100 @@ mod tests {
             kind: "local".into(),
             sha: "a".repeat(40),
         })
+    }
+
+    #[test]
+    fn worktree_search_keeps_navigation_indices_and_matches_detached_heads() {
+        let worktree = |path: &str, head_name: &str, detached, available| WorktreeInfo {
+            name: path.into(),
+            path: path.into(),
+            primary: path == "/main",
+            current: path == "/main",
+            available,
+            head: Some("d0646df0123456789012345678901234567890123".into()),
+            head_name: head_name.into(),
+            detached,
+            locked: None,
+            reason: None,
+        };
+        let list = WorktreeList {
+            worktrees: vec![
+                worktree("/main", "main", false, true),
+                worktree("/review", "t3code/review", false, true),
+                worktree("/feature", "feature/ui", false, true),
+                worktree("/detached", "HEAD détachée", true, true),
+                worktree("/missing", "t3code/missing", false, false),
+            ],
+            truncated: false,
+        };
+        let indices = filtered_worktree_indices(&list, "  T3CODE/  ");
+        let paths: Vec<_> = indices
+            .iter()
+            .map(|&index| list.worktrees[index].path.as_str())
+            .collect();
+        assert_eq!(paths, ["/review", "/missing"]);
+        assert_eq!(filtered_worktree_indices(&list, "D0646DF"), [3]);
+        assert_eq!(filtered_worktree_indices(&list, "détachée"), [3]);
+        assert!(filtered_worktree_indices(&list, "absent").is_empty());
+        assert_eq!(filtered_worktree_indices(&list, "  "), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn search_highlights_follow_matches_across_tree_segments() {
+        let cases = [
+            ("t3code/review", "t3code/", vec![vec![0..6], vec![]]),
+            (
+                "feature/ui/work",
+                "ui/wo",
+                vec![vec![], vec![0..2], vec![0..2]],
+            ),
+            (
+                "foo/baz/foo/bar",
+                "foo/bar",
+                vec![vec![], vec![], vec![0..3], vec![0..3]],
+            ),
+        ];
+        for (name, filter, expected) in cases {
+            let tree = reference_tree([reference(name)].into_iter(), filter);
+            let mut rows = Vec::new();
+            flatten_tree(
+                &tree,
+                ReferenceKind::Local,
+                0,
+                &ReferenceTreeState::default(),
+                &mut rows,
+            );
+            let highlights: Vec<_> = rows
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Folder { highlights, .. }
+                    | SidebarRow::Reference { highlights, .. } => Some(highlights),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(highlights, expected, "{name} filtered by {filter}");
+        }
+        let tree = reference_tree(
+            [reference("t3code/review"), reference("t3code/fix")].into_iter(),
+            "t3code/",
+        );
+        assert!(
+            matches!(&tree[0], ReferenceNode::Folder { highlights, .. } if matches!(highlights.as_slice(), [range] if *range == (0..6)))
+        );
+    }
+
+    #[test]
+    fn search_highlights_preserve_original_utf8_and_all_occurrences() {
+        let text = "İ/Ⱥ/École-éCOLE";
+        let ranges = search_highlight_ranges(text, "  ÉCOLE  ");
+        let matched: Vec<_> = ranges.into_iter().map(|range| &text[range]).collect();
+        assert_eq!(matched, ["École", "éCOLE"]);
+        let range = search_highlight_ranges(text, "i").pop().unwrap();
+        assert_eq!(&text[range], "İ");
+        let range = search_highlight_ranges(text, "ⱥ").pop().unwrap();
+        assert_eq!(&text[range], "Ⱥ");
+        assert!(search_highlight_ranges(text, "  ").is_empty());
+        assert!(search_highlight_ranges(text, "absent").is_empty());
     }
 
     #[test]
@@ -1518,6 +1743,7 @@ mod tests {
                 reference("main"),
             ]
             .into_iter(),
+            "",
         );
         assert!(matches!(&tree[0],ReferenceNode::Folder { path,count:3,.. } if path == "feature"));
         let mut state = ReferenceTreeState::default();
@@ -1560,6 +1786,7 @@ mod tests {
                 reference("école/b"),
             ]
             .into_iter(),
+            "",
         );
         assert!(matches!(&tree[0], ReferenceNode::Folder { label, .. } if label == "École"));
         assert!(matches!(&tree[1], ReferenceNode::Folder { label, .. } if label == "école"));
@@ -1577,6 +1804,7 @@ mod tests {
         rows.extend((0..10_000).map(|_| SidebarRow::Reference {
             kind: ReferenceKind::Local,
             label: "main".into(),
+            highlights: Vec::new(),
             reference: reference.clone(),
             depth: 0,
         }));
