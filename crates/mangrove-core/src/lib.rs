@@ -329,12 +329,13 @@ impl Workspace {
         let mut references = Vec::new();
         for reference in repository.references().map_err(|e| e.to_string())? {
             let reference = reference.map_err(|e| e.to_string())?;
-            // T3 snapshots are operational refs, not history roots. Filtering
+            // Tool snapshots are operational refs, not history roots. Filtering
             // here also keeps their updates out of the traversal fingerprint.
             let raw_name = reference.name_bytes();
             if raw_name == b"refs/stash"
                 || [
                     b"refs/t3/checkpoints/".as_slice(),
+                    b"refs/codex/",
                     b"refs/notes/",
                     b"refs/prefetch/",
                 ]
