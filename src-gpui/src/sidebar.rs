@@ -951,8 +951,8 @@ impl SidebarView {
 
     fn highlighted_label(&self, label: String, ranges: Vec<Range<usize>>) -> StyledText {
         let style = HighlightStyle {
-            color: Some(rgb(self.palette.text).into()),
-            background_color: Some(rgb(self.palette.accent).opacity(0.35).into()),
+            color: Some(rgb(self.palette.on_accent).into()),
+            background_color: Some(rgb(self.palette.accent).into()),
             ..Default::default()
         };
         StyledText::new(label).with_highlights(ranges.into_iter().map(|range| (range, style)))
