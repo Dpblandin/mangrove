@@ -101,6 +101,53 @@ fn finish(workspace: &Workspace, id: &str) {
     }
 }
 
+#[test]
+fn commit_details_preserve_author_and_committer_signatures() {
+    let fixture = Fixture::new();
+    let author = Signature::new(
+        "Nicolas DELEPLACE",
+        "nicolas@example.org",
+        &Time::new(1_790_696_260, 120),
+    )
+    .unwrap();
+    let committer = Signature::new(
+        "ci-release-user",
+        "release@example.org",
+        &Time::new(1_790_885_100, 0),
+    )
+    .unwrap();
+    let tree_id = fixture
+        .repository
+        .treebuilder(None)
+        .unwrap()
+        .write()
+        .unwrap();
+    let tree = fixture.repository.find_tree(tree_id).unwrap();
+    let sha = fixture
+        .repository
+        .commit(
+            Some("HEAD"),
+            &author,
+            &committer,
+            "feat: add prescription possibilities\n\nA readable commit description.",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let details = workspace
+        .commit_details(&info.id, &sha.to_string())
+        .unwrap();
+
+    assert_eq!(details.author, "Nicolas DELEPLACE");
+    assert_eq!(details.email, "nicolas@example.org");
+    assert_eq!(details.author_time, author.when().seconds());
+    assert_eq!(details.committer, "ci-release-user");
+    assert_eq!(details.committer_email, "release@example.org");
+    assert_eq!(details.time, committer.when().seconds());
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct FileState {
     modified: SystemTime,

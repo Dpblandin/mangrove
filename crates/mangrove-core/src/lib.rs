@@ -745,6 +745,7 @@ impl Workspace {
             .unwrap()
             .remember(commit.id(), &diff);
         let author = commit.author();
+        let committer = commit.committer();
         let files = diff
             .deltas()
             .take(MAX_CHANGED_FILES)
@@ -756,7 +757,10 @@ impl Workspace {
             message: String::from_utf8_lossy(commit.message_bytes()).into_owned(),
             author: String::from_utf8_lossy(author.name_bytes()).into_owned(),
             email: String::from_utf8_lossy(author.email_bytes()).into_owned(),
-            time: commit.time().seconds(),
+            author_time: author.when().seconds(),
+            committer: String::from_utf8_lossy(committer.name_bytes()).into_owned(),
+            committer_email: String::from_utf8_lossy(committer.email_bytes()).into_owned(),
+            time: committer.when().seconds(),
             parents: commit.parent_ids().map(|id| id.to_string()).collect(),
             files,
             file_count: diff.deltas().len(),
