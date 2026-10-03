@@ -1472,7 +1472,7 @@ impl Render for SidebarView {
                 .bordered(false)
                 .focus_bordered(false)
                 .p_0()
-                .w_full()
+                .flex_1()
                 .min_w_0()
                 .text_size(px(10. + font_offset))
                 .line_height(relative(1.5)),
@@ -1501,7 +1501,27 @@ impl Render for SidebarView {
             .when(self.repository.is_some(), |this| this
                 .child(div().mx(px(15.)).mb(px(18.)).px(px(8.)).py(px(7.))
                     .flex().items_center().gap(px(7.)).border_1().border_color(rgb(p.border)).rounded(RADIUS_MD)
-                    .child(icon(IconName::Search,13.,p.muted)).child(filter_input))
+                    .child(icon(IconName::Search,13.,p.muted)).child(filter_input)
+                    .when(!self.reference_state.filter.is_empty(), |this| this.child(
+                        NativeButton::new("clear-reference-filter")
+                            .accessibility_label("Effacer la recherche")
+                            .size(px(16.))
+                            .flex_shrink_0()
+                            .rounded(RADIUS_SM)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(p.accent).opacity(0.1)))
+                            .focus_visible(|style| style.border_1().border_color(rgb(p.accent)))
+                            .tooltip(|window, cx| Tooltip::new("Effacer la recherche").build(window, cx))
+                            .child(icon(IconName::X, 12., p.muted))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.filter_input.update(cx, |input, cx| {
+                                    input.set_value("", window, cx);
+                                    input.focus(window, cx);
+                                });
+                                view.reference_state.set_filter(String::new());
+                                view.rebuild_reference_groups();
+                                view.rebuild_rows(cx);
+                            })))))
                 .child(div().relative().flex_1().min_h_0().w_full().flex().flex_col()
                     .child(wheel_capture)
                     .child(list(self.list_state.clone(), move |index, window, cx| {
