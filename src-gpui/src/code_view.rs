@@ -1,5 +1,6 @@
 //! Read-only, virtualized code and patch viewer. Selection is expressed in
 //! snapshot byte positions, so unmounted lines still participate in copying.
+mod selection;
 mod split;
 
 use std::{
@@ -33,6 +34,7 @@ use crate::{
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::{RowGeometry, VirtualScrollHandle},
 };
+use selection::{Position, Selection, Side};
 use split::{SplitLayout, SplitRow};
 
 #[derive(Clone, Debug)]
@@ -106,40 +108,6 @@ pub(crate) fn blame_unavailable(content: &FileContent) -> Option<String> {
             byte_size(bound)
         )
     })
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct Position {
-    row: usize,
-    byte: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Selection {
-    anchor: Position,
-    head: Position,
-}
-impl Selection {
-    fn ordered(self) -> (Position, Position) {
-        if self.anchor <= self.head {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        }
-    }
-    fn range_in_row(self, row: usize, length: usize) -> Option<Range<usize>> {
-        let (start, end) = self.ordered();
-        if row < start.row || row > end.row || start == end {
-            return None;
-        }
-        Some(
-            (if row == start.row { start.byte } else { 0 })..(if row == end.row {
-                end.byte
-            } else {
-                length
-            }),
-        )
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -315,15 +283,20 @@ impl SplitBlocker {
 struct CodeLineLayout {
     line: ShapedLine,
     bounds: Bounds<Pixels>,
+    /// The part of the line its clipping shows, such as one split column.
+    visible: Bounds<Pixels>,
 }
 impl CodeLineLayout {
+    /// A pointer beyond the visible part of the line stops at its edge, so a
+    /// drag into the other column selects no hidden text.
     fn byte_at(&self, point: Point<Pixels>) -> usize {
         if point.y < self.bounds.top() {
             0
         } else if point.y > self.bounds.bottom() {
             self.line.len()
         } else {
-            self.line.closest_index_for_x(point.x - self.bounds.left())
+            let x = point.x.max(self.visible.left()).min(self.visible.right());
+            self.line.closest_index_for_x(x - self.bounds.left())
         }
     }
 }
@@ -400,39 +373,6 @@ fn row_geometry(
         }),
         scale_factor,
     )
-}
-
-fn selected_rows_text(rows: &[Row], selection: Option<Selection>, final_newline: bool) -> String {
-    let Some(selection) = selection else {
-        return String::new();
-    };
-    let (start, end) = selection.ordered();
-    if start == end {
-        return String::new();
-    }
-    let mut text = String::new();
-    for (index, row) in rows
-        .iter()
-        .enumerate()
-        .take(end.row.saturating_add(1))
-        .skip(start.row)
-    {
-        let range = selection
-            .range_in_row(index, row.original.len())
-            .unwrap_or(0..0);
-        if index > start.row {
-            text.push('\n');
-        }
-        text.push_str(&row.original[range]);
-    }
-    if final_newline
-        && start == Position::default()
-        && end.row + 1 == rows.len()
-        && end.byte == rows[end.row].original.len()
-    {
-        text.push('\n');
-    }
-    text
 }
 
 /// Syntax tokens and changed words of each row, published together.
@@ -536,7 +476,8 @@ pub struct CodeView {
     focus: FocusHandle,
     list: ListState,
     horizontal: ScrollHandle,
-    layouts: Rc<RefCell<BTreeMap<usize, CodeLineLayout>>>,
+    /// Laid out text of the visible rows, by row and side.
+    layouts: Rc<RefCell<BTreeMap<(usize, Side), CodeLineLayout>>>,
     palette: Palette,
     font_size: f32,
     ui_offset: f32,
@@ -1354,13 +1295,12 @@ impl CodeView {
         let Some(row) = hunk_target(&self.hunk_rows, current, forward) else {
             return;
         };
-        let caret = Position { row, byte: 0 };
         self.active_line = row;
-        // A side-by-side diff has no caret: its reading line moves alone.
-        self.selection = self.split.is_none().then_some(Selection {
-            anchor: caret,
-            head: caret,
-        });
+        // Hunk headers belong to both sides: the caret keeps its side.
+        self.selection = Some(Selection::caret(
+            self.caret_side(),
+            Position { row, byte: 0 },
+        ));
         let start = (0..row)
             .filter_map(|index| self.scroll.row_height(index))
             .fold(px(0.), |start, height| start + height);
@@ -1368,61 +1308,135 @@ impl CodeView {
         cx.notify();
     }
 
-    fn position_from_layout(&self, index: usize, position: Point<Pixels>) -> Position {
-        let byte = self
-            .layouts
-            .borrow()
-            .get(&index)
-            .map_or(0, |layout| layout.byte_at(position));
-        let row = &self.rows[index];
+    /// The row whose text a displayed row shows on `side`, none in an empty
+    /// cell. Hunk headers belong to both sides of a split diff.
+    fn text_row(&self, index: usize, side: Side) -> Option<&Row> {
+        let row = match self.split.as_ref().map(|split| split.rows.get(index)) {
+            None => index,
+            Some(None) => return None,
+            Some(Some(SplitRow::Hunk(row))) => *row,
+            Some(Some(SplitRow::Pair { old, new })) => {
+                if side == Side::Old {
+                    (*old)?
+                } else {
+                    (*new)?
+                }
+            }
+        };
+        self.rows.get(row)
+    }
+    fn text_of(&self, index: usize, side: Side) -> Option<&str> {
+        self.text_row(index, side).map(|row| &*row.original)
+    }
+    /// The first displayed row from `from`, included, with text on `side`.
+    fn text_row_from(&self, from: usize, side: Side, forward: bool) -> Option<usize> {
+        let has_text = |index: &usize| self.text_row(*index, side).is_some();
+        if forward {
+            (from..self.item_count()).find(has_text)
+        } else {
+            (0..=from.min(self.item_count().saturating_sub(1)))
+                .rev()
+                .find(has_text)
+        }
+    }
+    /// The side read by the keyboard: the selection's, or the new side of a
+    /// split diff.
+    fn caret_side(&self) -> Side {
+        match (&self.split, self.selection) {
+            (None, _) => Side::Unified,
+            (Some(_), Some(selection)) if selection.side != Side::Unified => selection.side,
+            (Some(_), _) => Side::New,
+        }
+    }
+    /// The selection, when it reads `side`. Hunk headers, read from either
+    /// side, pass `None`.
+    fn selection_on(&self, side: Option<Side>) -> Option<Selection> {
+        self.selection
+            .filter(|selection| side.is_none_or(|side| side == selection.side))
+    }
+    fn selected_range(
+        &self,
+        index: usize,
+        side: Option<Side>,
+        length: usize,
+    ) -> Option<Range<usize>> {
+        self.selection_on(side)?.range_in_row(index, length)
+    }
+    /// Whether the selection continues past the end of a displayed row.
+    fn selects_line_end(&self, index: usize, side: Option<Side>) -> bool {
+        self.selection_on(side).is_some_and(|selection| {
+            let (start, end) = selection.ordered();
+            start.row <= index && index < end.row
+        })
+    }
+
+    /// The position under `point` in the text of a displayed row on `side`.
+    fn position_from_layout(
+        &self,
+        index: usize,
+        side: Side,
+        point: Point<Pixels>,
+    ) -> Option<Position> {
+        let row = self.text_row(index, side)?;
+        let layouts = self.layouts.borrow();
+        // Unified rows and shared hunk headers are laid out once.
+        let byte = layouts
+            .get(&(index, side))
+            .or_else(|| layouts.get(&(index, Side::Unified)))
+            .map_or(0, |layout| layout.byte_at(point));
         let mut byte = row.display.original_byte(byte).min(row.original.len());
         while !row.original.is_char_boundary(byte) {
             byte = byte.saturating_sub(1);
         }
-        Position { row: index, byte }
+        Some(Position { row: index, byte })
     }
     fn begin_selection(
         &mut self,
         index: usize,
+        side: Side,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
         self.active_line = index;
-        if self.split.is_some() {
-            cx.stop_propagation();
-            cx.notify();
+        cx.stop_propagation();
+        cx.notify();
+        // An empty cell of a split diff has nothing to select.
+        let (Some(position), Some(line)) = (
+            self.position_from_layout(index, side, event.position),
+            self.text_row(index, side).map(|row| row.original.clone()),
+        ) else {
             return;
-        }
-        let position = self.position_from_layout(index, event.position);
-        let row = &self.rows[index];
-        if event.click_count >= 3 {
-            self.selection = Some(Selection {
+        };
+        let selection = if event.click_count >= 3 {
+            Selection {
+                side,
                 anchor: Position {
                     row: index,
                     byte: 0,
                 },
                 head: Position {
                     row: index,
-                    byte: row.original.len(),
+                    byte: line.len(),
                 },
-            });
+            }
         } else if event.click_count == 2 {
             let word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
-            let start = row.original[..position.byte]
+            let start = line[..position.byte]
                 .char_indices()
                 .rev()
                 .take_while(|(_, ch)| word(*ch))
                 .last()
                 .map_or(position.byte, |(offset, _)| offset);
             let end = position.byte
-                + row.original[position.byte..]
+                + line[position.byte..]
                     .chars()
                     .take_while(|ch| word(*ch))
                     .map(char::len_utf8)
                     .sum::<usize>();
-            self.selection = Some(Selection {
+            Selection {
+                side,
                 anchor: Position {
                     row: index,
                     byte: start,
@@ -1431,25 +1445,24 @@ impl CodeView {
                     row: index,
                     byte: end,
                 },
-            });
+            }
         } else if event.modifiers.shift {
-            self.selection = Some(Selection {
+            Selection {
+                side,
                 anchor: self
                     .selection
+                    .filter(|selection| selection.side == side)
                     .map_or(position, |selection| selection.anchor),
                 head: position,
-            });
+            }
         } else {
-            self.selection = Some(Selection {
-                anchor: position,
-                head: position,
-            });
-        }
+            Selection::caret(side, position)
+        };
+        self.selection = Some(selection);
         self.dragging = true;
         self.drag_point = Some(event.position);
-        cx.stop_propagation();
-        cx.notify();
     }
+    /// Dragging extends the selection on its own side only.
     fn drag_selection(
         &mut self,
         event: &MouseMoveEvent,
@@ -1468,30 +1481,29 @@ impl CodeView {
         self.drag_point = Some(event.position);
         let viewport = self.list.viewport_bounds();
         let point = event.position;
-        let mut target = None;
-        for index in self.layouts.borrow().keys() {
-            if let Some(bounds) = self.list.bounds_for_item(*index)
-                && point.y >= bounds.top()
-                && point.y <= bounds.bottom()
-            {
-                target = Some(*index);
-                break;
-            }
-        }
+        let target = self
+            .layouts
+            .borrow()
+            .keys()
+            .map(|(index, _)| *index)
+            .find(|index| {
+                self.list
+                    .bounds_for_item(*index)
+                    .is_some_and(|bounds| point.y >= bounds.top() && point.y <= bounds.bottom())
+            });
         if point.y < viewport.top() || point.y > viewport.bottom() {
             // Only the animation loop changes scroll position; event frequency
             // must not add a second source of scrolling during a drag.
             window.request_animation_frame();
             return;
         }
-        if let Some(index) = target {
-            let head = self.position_from_layout(index, point);
-            if let Some(selection) = &mut self.selection
-                && selection.head != head
-            {
-                selection.head = head;
-                cx.notify();
-            }
+        let side = self.caret_side();
+        if let Some(head) = target.and_then(|index| self.position_from_layout(index, side, point))
+            && let Some(selection) = &mut self.selection
+            && selection.head != head
+        {
+            selection.head = head;
+            cx.notify();
         }
     }
     fn autoscroll_selection(&mut self, window: &mut Window) {
@@ -1520,7 +1532,7 @@ impl CodeView {
             .layouts
             .borrow()
             .keys()
-            .copied()
+            .map(|(index, _)| *index)
             .filter(|index| {
                 self.list.bounds_for_item(*index).is_some_and(|bounds| {
                     bounds.bottom() >= viewport.top() && bounds.top() <= viewport.bottom()
@@ -1539,27 +1551,28 @@ impl CodeView {
                 .copied()
                 .unwrap_or(top.item_ix)
                 .saturating_add(1)
-                .min(self.rows.len() - 1)
+                .min(self.item_count() - 1)
         };
         self.scroll
             .scroll_vertical_by(px(direction * self.font_size * 1.7));
-        if let Some(selection) = &mut self.selection {
+        let side = self.caret_side();
+        if let Some(length) = self.text_of(index, side).map(str::len)
+            && let Some(selection) = &mut self.selection
+        {
             selection.head = Position {
                 row: index,
-                byte: if direction < 0. {
-                    0
-                } else {
-                    self.rows[index].original.len()
-                },
+                byte: if direction < 0. { 0 } else { length },
             };
         }
         // Frame requests exist only during an active drag beyond the viewport.
         window.request_animation_frame();
     }
     pub fn selected_text(&self) -> String {
-        selected_rows_text(
-            &self.rows,
+        let side = self.caret_side();
+        selection::selected_text(
             self.selection,
+            self.item_count(),
+            |index| self.text_of(index, side),
             !self.is_diff && self.ends_with_newline,
         )
     }
@@ -1570,20 +1583,114 @@ impl CodeView {
         }
         cx.stop_propagation();
     }
+    /// Selects every line of the caret's side.
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        if self.rows.is_empty() || self.split.is_some() {
+        let side = self.caret_side();
+        let (Some(first), Some(last)) = (
+            self.text_row_from(0, side, true),
+            self.text_row_from(self.item_count().saturating_sub(1), side, false),
+        ) else {
             return;
-        }
-        let row = self.rows.len() - 1;
+        };
+        let length = self.text_of(last, side).map_or(0, str::len);
         self.selection = Some(Selection {
-            anchor: Position::default(),
+            side,
+            anchor: Position {
+                row: first,
+                byte: 0,
+            },
             head: Position {
-                row,
-                byte: self.rows[row].original.len(),
+                row: last,
+                byte: length,
             },
         });
         cx.stop_propagation();
         cx.notify();
+    }
+    /// Where a key moves the caret on `side`; up and down skip the empty
+    /// cells of that side. `None` for a key that does not move it.
+    fn moved_caret(
+        &self,
+        current: Position,
+        side: Side,
+        key: &str,
+        page: usize,
+        jump: bool,
+    ) -> Option<Position> {
+        let last = self.item_count().checked_sub(1)?;
+        let length = |row: usize| self.text_of(row, side).map_or(0, str::len);
+        let near = |target: usize, forward: bool| {
+            self.text_row_from(target, side, forward)
+                .or_else(|| self.text_row_from(target, side, !forward))
+                .unwrap_or(current.row)
+        };
+        let mut next = current;
+        match key {
+            "down" if current.row < last => {
+                next.row = self
+                    .text_row_from(current.row + 1, side, true)
+                    .unwrap_or(current.row)
+            }
+            "up" if current.row > 0 => {
+                next.row = self
+                    .text_row_from(current.row - 1, side, false)
+                    .unwrap_or(current.row)
+            }
+            "down" | "up" => {}
+            "pagedown" => next.row = near((current.row + page).min(last), true),
+            "pageup" => next.row = near(current.row.saturating_sub(page), false),
+            "home" => {
+                next.byte = 0;
+                if jump {
+                    next.row = near(0, true);
+                }
+            }
+            "end" => {
+                if jump {
+                    next.row = near(last, false);
+                }
+                next.byte = length(next.row);
+            }
+            "left" => {
+                if next.byte > 0 {
+                    next.byte = self.text_of(next.row, side).map_or(0, |line| {
+                        line[..next.byte.min(line.len())]
+                            .char_indices()
+                            .next_back()
+                            .map_or(0, |(offset, _)| offset)
+                    });
+                } else if let Some(row) = current
+                    .row
+                    .checked_sub(1)
+                    .and_then(|row| self.text_row_from(row, side, false))
+                {
+                    next = Position {
+                        row,
+                        byte: length(row),
+                    };
+                }
+            }
+            "right" => {
+                if let Some(ch) = self
+                    .text_of(next.row, side)
+                    .and_then(|line| line.get(next.byte..)?.chars().next())
+                {
+                    next.byte += ch.len_utf8();
+                } else if let Some(row) = (current.row < last)
+                    .then(|| self.text_row_from(current.row + 1, side, true))
+                    .flatten()
+                {
+                    next = Position { row, byte: 0 };
+                }
+            }
+            _ => return None,
+        }
+        let line = self.text_of(next.row, side).unwrap_or_default();
+        next.byte = next.byte.min(line.len());
+        while !line.is_char_boundary(next.byte) {
+            next.byte -= 1;
+        }
+        Some(next)
     }
     fn keydown(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
@@ -1611,94 +1718,31 @@ impl CodeView {
             }
             return;
         }
-        let viewport_height: f32 = self.list.viewport_bounds().size.height.into();
-        let page = (viewport_height / (self.font_size * 1.7)).floor() as usize;
-        if self.split.is_some() {
-            // Side-by-side rows have no caret: keys move the reading line.
-            let (line, last) = (self.active_line, self.item_count() - 1);
-            let jump = modifiers.platform || modifiers.control;
-            let next = match key {
-                "down" => (line + 1).min(last),
-                "up" => line.saturating_sub(1),
-                "pagedown" => (line + page.max(1)).min(last),
-                "pageup" => line.saturating_sub(page.max(1)),
-                "home" if jump => 0,
-                "end" if jump => last,
-                _ => return,
-            };
-            self.active_line = next;
-            self.scroll.reveal_row(next);
-            window.focus(&self.focus, cx);
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        let current = self.selection.map_or(
+        let side = self.caret_side();
+        let selection = self.selection;
+        let current = selection.map_or(
             Position {
                 row: self.active_line,
                 byte: 0,
             },
             |selection| selection.head,
         );
-        let mut next = current;
-        match key {
-            "down" => next.row = (current.row + 1).min(self.rows.len() - 1),
-            "up" => next.row = current.row.saturating_sub(1),
-            "pagedown" => next.row = (current.row + page.max(1)).min(self.rows.len() - 1),
-            "pageup" => next.row = current.row.saturating_sub(page.max(1)),
-            "home" => {
-                next.byte = 0;
-                if modifiers.platform || modifiers.control {
-                    next.row = 0;
-                }
-            }
-            "end" => {
-                if modifiers.platform || modifiers.control {
-                    next.row = self.rows.len() - 1;
-                }
-                next.byte = self.rows[next.row].original.len();
-            }
-            "left" => {
-                if next.byte > 0 {
-                    next.byte = self.rows[next.row].original[..next.byte]
-                        .char_indices()
-                        .next_back()
-                        .map_or(0, |(offset, _)| offset);
-                } else if next.row > 0 {
-                    next.row -= 1;
-                    next.byte = self.rows[next.row].original.len();
-                }
-            }
-            "right" => {
-                if next.byte < self.rows[next.row].original.len() {
-                    next.byte += self.rows[next.row].original[next.byte..]
-                        .chars()
-                        .next()
-                        .unwrap()
-                        .len_utf8();
-                } else if next.row + 1 < self.rows.len() {
-                    next.row += 1;
-                    next.byte = 0;
-                }
-            }
-            _ => return,
-        }
-        next.byte = next.byte.min(self.rows[next.row].original.len());
-        while !self.rows[next.row].original.is_char_boundary(next.byte) {
-            next.byte -= 1;
-        }
-        self.active_line = next.row;
-        self.selection = if modifiers.shift {
-            Some(Selection {
-                anchor: self.selection.map_or(current, |selection| selection.anchor),
-                head: next,
-            })
-        } else {
-            Some(Selection {
-                anchor: next,
-                head: next,
-            })
+        let viewport_height: f32 = self.list.viewport_bounds().size.height.into();
+        let page = (viewport_height / (self.font_size * 1.7)).floor() as usize;
+        let jump = modifiers.platform || modifiers.control;
+        let Some(next) = self.moved_caret(current, side, key, page.max(1), jump) else {
+            return;
         };
+        self.active_line = next.row;
+        self.selection = Some(if modifiers.shift {
+            Selection {
+                side,
+                anchor: selection.map_or(current, |selection| selection.anchor),
+                head: next,
+            }
+        } else {
+            Selection::caret(side, next)
+        });
         self.scroll.reveal_row(next.row);
         window.focus(&self.focus, cx);
         cx.stop_propagation();
@@ -1823,7 +1867,7 @@ impl CodeView {
     fn code_text(
         &self,
         index: usize,
-        layout: Option<usize>,
+        layout: (usize, Side),
         selection: Option<Range<usize>>,
         window: &Window,
     ) -> AnyElement {
@@ -1856,16 +1900,15 @@ impl CodeView {
         let layouts = self.layouts.clone();
         let line_height = window.pixel_snap(px(self.font_size * 1.7));
         canvas(
-            move |bounds, _, _| {
-                if let Some(key) = layout {
-                    layouts.borrow_mut().insert(
-                        key,
-                        CodeLineLayout {
-                            line: shaped.clone(),
-                            bounds,
-                        },
-                    );
-                }
+            move |bounds, window, _| {
+                layouts.borrow_mut().insert(
+                    layout,
+                    CodeLineLayout {
+                        line: shaped.clone(),
+                        bounds,
+                        visible: window.content_mask().bounds,
+                    },
+                );
                 shaped
             },
             move |bounds, shaped, window, cx| {
@@ -1950,10 +1993,10 @@ impl CodeView {
             }
             _ => p.reading_bg,
         };
-        let selection = self
-            .selection
-            .and_then(|selection| selection.range_in_row(index, row.original.len()));
-        let text = self.code_text(row_index, Some(index), selection, window);
+        // A hunk header across a split diff is read from either side.
+        let side = self.split.is_none().then_some(Side::Unified);
+        let selection = self.selected_range(index, side, row.original.len());
+        let text = self.code_text(row_index, (index, Side::Unified), selection, window);
         let gutter = |value: String| self.number_cell(row.kind, value);
         let mut line = div()
             .id(("code-row", index))
@@ -2046,24 +2089,14 @@ impl CodeView {
             .pr(px(if self.is_diff { DIFF_PADDING } else { 20. }))
             .cursor(CursorStyle::IBeam)
             .child(text)
-            .when(
-                self.selection.is_some_and(|selection| {
-                    let (start, end) = selection.ordered();
-                    start.row <= index && index < end.row
-                }),
-                |view| {
-                    view.child(
-                        div()
-                            .w(px(self.font_size * 0.6))
-                            .h_full()
-                            .bg(rgb(p.selection)),
-                    )
-                },
-            )
+            .when(self.selects_line_end(index, side), |view| {
+                view.child(self.line_end_selection())
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event, window, cx| {
-                    view.begin_selection(index, event, window, cx)
+                    let side = side.unwrap_or_else(|| view.caret_side());
+                    view.begin_selection(index, side, event, window, cx)
                 }),
             );
         match header {
@@ -2100,8 +2133,19 @@ impl CodeView {
     ) -> AnyElement {
         let p = self.palette;
         let window: &Window = window;
-        let cell = |row_index: Option<usize>, old: bool| {
-            let cell = div().flex().flex_1().min_w_0().h_full();
+        let cell = |row_index: Option<usize>, side: Side| {
+            let cell = div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, event, window, cx| {
+                        view.begin_selection(index, side, event, window, cx)
+                    }),
+                );
             let Some(row_index) = row_index else {
                 return cell.bg(rgb(p.panel));
             };
@@ -2111,11 +2155,12 @@ impl CodeView {
                 LineKind::Addition => p.addition_bg,
                 _ => p.reading_bg,
             };
-            let number = if old {
+            let number = if side == Side::Old {
                 &row.old_number
             } else {
                 &row.new_number
             };
+            let selection = self.selected_range(index, Some(side), row.original.len());
             cell.bg(rgb(background))
                 .child(self.number_cell(row.kind, number.clone()))
                 .child(self.sign_cell(row.kind))
@@ -2125,14 +2170,17 @@ impl CodeView {
                             .flex()
                             .h_full()
                             .ml(-scroll_x)
-                            .child(self.code_text(row_index, None, None, window)),
+                            .child(self.code_text(row_index, (index, side), selection, window))
+                            .when(self.selects_line_end(index, Some(side)), |text| {
+                                text.child(self.line_end_selection())
+                            }),
                     ),
                 )
         };
         let columns = self
             .pinned(scroll_x)
             .flex()
-            .child(cell(cells[0], true))
+            .child(cell(cells[0], Side::Old))
             .child(
                 div()
                     .w(px(DIVIDER_WIDTH))
@@ -2140,7 +2188,7 @@ impl CodeView {
                     .flex_shrink_0()
                     .bg(rgb(p.border)),
             )
-            .child(cell(cells[1], false));
+            .child(cell(cells[1], Side::New));
         div()
             .id(("code-row", index))
             .role(Role::Paragraph)
@@ -2156,16 +2204,15 @@ impl CodeView {
             .line_height(px(self.font_size * 1.7))
             .text_color(rgb(p.text))
             .bg(rgb(p.reading_bg))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _, window, cx| {
-                    window.focus(&view.focus, cx);
-                    view.active_line = index;
-                    cx.notify();
-                }),
-            )
             .child(columns)
             .into_any_element()
+    }
+    /// Marks a selected line end, copied as a newline.
+    fn line_end_selection(&self) -> Div {
+        div()
+            .w(px(self.font_size * 0.6))
+            .h_full()
+            .bg(rgb(self.palette.selection))
     }
     /// A line number, tinted on added and deleted lines.
     fn number_cell(&self, kind: LineKind, number: String) -> Div {
@@ -2616,8 +2663,8 @@ fn icon_button(
 mod tests {
     use super::{
         CodeLineLayout, DisplayLine, MAX_DISPLAY_BYTES, OMITTED_LINE, Position, Row, Selection,
-        StateAction, blame_unavailable, hunk_rows, hunk_target, oversized_state, row_geometry,
-        selected_rows_text, visible_shaped_line,
+        Side, StateAction, blame_unavailable, hunk_rows, hunk_target, oversized_state,
+        row_geometry, visible_shaped_line,
     };
     use crate::{
         diff::LineKind,
@@ -2695,6 +2742,16 @@ mod tests {
         Row::new(kind, String::new(), String::new(), "line")
     }
 
+    /// What copying `selection` over unified `rows` gives.
+    fn copied(rows: &[Row], selection: Selection, final_newline: bool) -> String {
+        super::selection::selected_text(
+            Some(selection),
+            rows.len(),
+            |index| rows.get(index).map(|row| &*row.original),
+            final_newline,
+        )
+    }
+
     fn geometry(rows: &[Row], font_size: f32, scale: f32) -> RowGeometry {
         row_geometry(
             rows.iter().map(|row| row.kind == LineKind::Hunk),
@@ -2704,7 +2761,14 @@ mod tests {
     }
 
     fn near(value: gpui_kit::Pixels, expected: f32) {
-        assert!((f32::from(value) - expected).abs() < 0.01);
+        near_within(value, expected, 0.01);
+    }
+
+    fn near_within(value: gpui_kit::Pixels, expected: f32, tolerance: f32) {
+        assert!(
+            (f32::from(value) - expected).abs() <= tolerance,
+            "{value:?} instead of {expected}"
+        );
     }
 
     #[test]
@@ -2839,17 +2903,6 @@ mod tests {
         assert_eq!(hunk_target(&[], 2, true), None);
     }
     #[test]
-    fn selection_across_virtual_rows_excludes_gutters() {
-        let selection = Selection {
-            anchor: Position { row: 1, byte: 2 },
-            head: Position { row: 3, byte: 1 },
-        };
-        assert_eq!(selection.range_in_row(0, 9), None);
-        assert_eq!(selection.range_in_row(1, 9), Some(2..9));
-        assert_eq!(selection.range_in_row(2, 9), Some(0..9));
-        assert_eq!(selection.range_in_row(3, 9), Some(0..1));
-    }
-    #[test]
     fn tabs_render_with_columns_but_copy_keeps_original_bytes() {
         let line = DisplayLine::new("\télève\tx".into());
         assert_eq!(line.text.as_ref(), "        élève   x");
@@ -2885,20 +2938,16 @@ mod tests {
             assert_eq!(line.original_byte(line.text.len()), original.len());
             assert_eq!(line.display_byte(original.len()), line.text.len());
             let selection = Selection {
+                side: Side::Unified,
                 anchor: Position::default(),
                 head: Position {
                     row: 0,
                     byte: original.len(),
                 },
             };
-            assert_eq!(
-                selected_rows_text(std::slice::from_ref(&row), Some(selection), false),
-                original
-            );
-            assert_eq!(
-                selected_rows_text(&[row], Some(selection), true),
-                format!("{original}\n")
-            );
+            let rows = [row];
+            assert_eq!(copied(&rows, selection, false), original);
+            assert_eq!(copied(&rows, selection, true), format!("{original}\n"));
         }
     }
 
@@ -2910,6 +2959,7 @@ mod tests {
         let start = first.display.original_end;
         let rows = [first, second];
         let selection = Selection {
+            side: Side::Unified,
             anchor: Position {
                 row: 0,
                 byte: start,
@@ -2917,7 +2967,7 @@ mod tests {
             head: Position { row: 1, byte: 3 },
         };
         assert_eq!(
-            selected_rows_text(&rows, Some(selection), false),
+            copied(&rows, selection, false),
             format!("{}\n\té", &original[start..])
         );
     }
@@ -2973,11 +3023,18 @@ mod tests {
         let layout = CodeLineLayout {
             line: shaped,
             bounds: Bounds::new(point(px(-1_000.), px(300.)), size(px(10_000.), px(19.))),
+            visible: Bounds::new(point(px(0.), px(0.)), size(px(600.), px(800.))),
         };
         // Screen coordinates retain the full line's scrolled origin, independent
         // of the much smaller foreground glyph set.
         let byte = layout.byte_at(point(px(200.), px(310.)));
         assert_eq!(layout.line.x_for_index(byte), px(1_200.));
+        // Beyond its column, the pointer stops at what the column shows,
+        // within half of a 6 px glyph.
+        for (x, edge) in [(900., 1_600.), (-50., 1_000.)] {
+            let byte = layout.byte_at(point(px(x), px(310.)));
+            near_within(layout.line.x_for_index(byte), edge, 3.);
+        }
         assert_eq!(layout.byte_at(point(px(200.), px(299.))), 0);
         assert_eq!(layout.byte_at(point(px(200.), px(320.))), layout.line.len());
         let original = display.original_byte(byte);
@@ -3098,6 +3155,7 @@ mod tests {
             );
             assert_eq!(background(view, 1, 0..20), None);
             view.selection = Some(Selection {
+                side: Side::Unified,
                 anchor: Position { row: 1, byte: 0 },
                 head: Position { row: 1, byte: 16 },
             });
@@ -3272,6 +3330,7 @@ mod tests {
                 offset_in_item: px(4.),
             });
             view.selection = Some(Selection {
+                side: Side::Unified,
                 anchor: Position { row: 301, byte: 0 },
                 head: Position { row: 302, byte: 3 },
             });
@@ -3564,6 +3623,162 @@ mod tests {
         assert_eq!(
             show(cx, crate::preferences::DiffLayout::Split),
             (30, px(3.))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_split_diff_selects_and_copies_one_side_without_its_empty_cells(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{CodeView, Highlights};
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::{AppContext, KeyDownEvent, Keystroke, WindowOptions};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, old: Option<u32>, new: Option<u32>, content: &str| DiffLine {
+            kind: kind.into(),
+            old_line: old,
+            new_line: new,
+            content: content.into(),
+        };
+        // Split rows: the header, context, the edited pair, the added line
+        // beside an empty cell, context.
+        let diff = Arc::new(FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -1,3 +1,4 @@".into(),
+                lines: vec![
+                    line("context", Some(1), Some(1), "fn main() {"),
+                    line("deletion", Some(2), None, "    let total = 1;"),
+                    line("addition", None, Some(2), "    let total = 2;"),
+                    line("addition", None, Some(3), "    println!(\"{total}\");"),
+                    line("context", Some(3), Some(4), "}"),
+                ],
+            }],
+            ..FileDiff::default()
+        });
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let window = cx.windows()[0];
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_split_host(true, cx);
+                view.set_preferences(
+                    Preferences {
+                        diff_layout: DiffLayout::Split,
+                        ..Preferences::default()
+                    },
+                    cx,
+                );
+                view.set_prepared_diff(diff, "a.rs".into(), Highlights::default(), window, cx);
+            })
+        })
+        .unwrap();
+        let press = |cx: &mut gpui_kit::TestAppContext, keys: &str| {
+            let event = KeyDownEvent {
+                keystroke: Keystroke::parse(keys).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| view.keydown(&event, window, cx))
+            })
+            .unwrap();
+        };
+        let copied =
+            |cx: &mut gpui_kit::TestAppContext| cx.read(|cx| view.read(cx).selected_text());
+        view.update(cx, |view, _| assert_eq!(view.item_count(), 5));
+        // Select all reads the new side unless the caret is on the old one.
+        press(cx, "cmd-a");
+        assert_eq!(
+            copied(cx),
+            "@@ -1,3 +1,4 @@\nfn main() {\n    let total = 2;\n    println!(\"{total}\");\n}"
+        );
+        view.update(cx, |view, _| {
+            view.selection = Some(Selection::caret(Side::Old, Position { row: 1, byte: 0 }));
+        });
+        // Arrows skip the old side's empty cell beside the added line.
+        press(cx, "shift-down");
+        press(cx, "shift-down");
+        view.update(cx, |view, _| {
+            assert_eq!(view.selection.unwrap().head, Position { row: 4, byte: 0 });
+            assert_eq!(view.active_line, 4);
+        });
+        assert_eq!(copied(cx), "fn main() {\n    let total = 1;\n");
+        press(cx, "cmd-a");
+        assert_eq!(
+            copied(cx),
+            "@@ -1,3 +1,4 @@\nfn main() {\n    let total = 1;\n}"
+        );
+        // Changing the layout drops a selection of one side.
+        in_window(cx, &view, |view, window, cx| {
+            view.set_split_host(false, cx);
+            view.update_layout(window, cx);
+            assert!(view.selection.is_none());
+        });
+    }
+    #[gpui_kit::test]
+    fn a_drag_from_the_old_column_selects_only_the_text_it_shows(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, point, px};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, content: String| DiffLine {
+            kind: kind.into(),
+            old_line: (kind == "deletion").then_some(1),
+            new_line: (kind == "addition").then_some(1),
+            content,
+        };
+        // Lines longer than a column: the old side's text continues hidden.
+        let words = "word ".repeat(120);
+        let diff = Arc::new(FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -1 +1 @@".into(),
+                lines: vec![
+                    line("deletion", format!("old {words}")),
+                    line("addition", format!("new {words}")),
+                ],
+            }],
+            ..FileDiff::default()
+        });
+        let view = split_view(cx, diff);
+        // Drawn in a real window, the pair on split row 1 has a layout per side.
+        assert!(resize_window(cx, &view, 1_200.));
+        let (bounds, visible, advance) = view.read_with(cx, |view, _| {
+            let layouts = view.layouts.borrow();
+            let old = &layouts[&(1, Side::Old)];
+            (old.bounds, old.visible, old.line.x_for_index(1))
+        });
+        assert!(visible.right() < bounds.right());
+        let y = bounds.center().y;
+        in_window(cx, &view, |view, window, cx| {
+            let down = MouseDownEvent {
+                position: point(visible.left() + px(1.), y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            };
+            view.begin_selection(1, Side::Old, &down, window, cx);
+            // The pointer goes far into the new column.
+            let drag = MouseMoveEvent {
+                position: point(visible.right() + px(300.), y),
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::default(),
+            };
+            view.drag_selection(&drag, window, cx);
+        });
+        let copied = view.read_with(cx, |view, _| view.selected_text());
+        assert!(copied.starts_with("old word"), "{copied}");
+        let shown = (visible.size.width / advance).round() as usize;
+        assert!(
+            copied.chars().count() <= shown + 1,
+            "{} > {shown}",
+            copied.len()
         );
     }
 }
