@@ -382,7 +382,12 @@ impl HistoryView {
         self.changed(cx);
     }
 
-    pub fn set_repository(&mut self, info: Arc<RepositoryInfo>, cx: &mut Context<Self>) {
+    pub fn set_repository(
+        &mut self,
+        info: Arc<RepositoryInfo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let same_path = self
             .repository
             .as_ref()
@@ -443,9 +448,19 @@ impl HistoryView {
         self.error = info.index.error.clone();
         self.max_lanes = 1;
         self.lane_offset = 0;
-        self.request_page(0, cx);
-        // Completed indexes do not poll; rebase preserved keyboard selection now.
-        self.refresh_position(cx);
+        if !same_path
+            && info.solo_refs.is_empty()
+            && let Some(head) = info.head.clone()
+        {
+            // Worktrees share the global history. Its first row can belong to
+            // another branch, so open at this checkout's HEAD, even while its
+            // position is still being indexed or lies beyond page zero.
+            self.jump_to(head, window, cx);
+        } else {
+            self.request_page(0, cx);
+            // Completed indexes do not poll; rebase preserved keyboard selection now.
+            self.refresh_position(cx);
+        }
         self.start_polling(cx);
         self.changed(cx);
     }
@@ -1033,10 +1048,20 @@ impl HistoryView {
                 self.jump_pending = false;
                 self.merge_progress(&progress);
                 self.total = self.total.max(progress.indexed);
-                self.requested_index = Some(position);
-                self.pages.set_requested_page(Some(position / PAGE_SIZE));
-                self.scroll_to_index(position);
-                self.request_page(position / PAGE_SIZE, cx);
+                // Keep reference jumps visible as the surrounding panels load.
+                self.scroll.scroll_to_item(position, ScrollStrategy::Center);
+                if self.pages.current(position / PAGE_SIZE)
+                    && let Some(row) = self.pages.row(position)
+                {
+                    // Rendering can load the target page before its position
+                    // lookup completes. A cached page will not emit another
+                    // accept_page callback, so select its row immediately.
+                    self.select(row.sha.clone(), position, false, cx);
+                } else {
+                    self.requested_index = Some(position);
+                    self.pages.set_requested_page(Some(position / PAGE_SIZE));
+                    self.request_page(position / PAGE_SIZE, cx);
+                }
                 self.changed(cx);
             }
             Ok((None, progress)) => {
@@ -2298,6 +2323,9 @@ pub fn short_date(timestamp: i64) -> String {
     ];
     format!("{:02} {}", date.day(), months[date.month0() as usize])
 }
+#[cfg(test)]
+mod navigation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{
