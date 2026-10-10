@@ -107,9 +107,18 @@ pub fn format_count(value: usize) -> String {
     formatted
 }
 
+/// Alt shortcut label for the current platform: « ⌥↓ » on macOS, « Alt+↓ » elsewhere.
+pub fn alt_shortcut_label(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌥{key}")
+    } else {
+        format!("Alt+{key}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compact_date_at, count_label, display_path};
+    use super::{alt_shortcut_label, compact_date_at, count_label, display_path};
     use chrono::TimeZone;
 
     #[test]
@@ -151,5 +160,15 @@ mod tests {
             format!("{home}other")
         );
         assert_eq!(display_path("/tmp/repo"), "/tmp/repo");
+    }
+
+    #[test]
+    fn alt_shortcut_uses_the_platform_modifier() {
+        let expected = if cfg!(target_os = "macos") {
+            "⌥↓"
+        } else {
+            "Alt+↓"
+        };
+        assert_eq!(alt_shortcut_label("↓"), expected);
     }
 }

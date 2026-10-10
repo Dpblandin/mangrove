@@ -9,7 +9,10 @@ use std::{
 };
 
 pub const DEFAULT_FONT_SIZE_OFFSET: f32 = 1.;
-pub const DEFAULT_DIFF_FONT_SIZE: f32 = 11.;
+/// Diffs start at the list text size of the interface: 11 px plus the default zoom.
+pub const DEFAULT_DIFF_FONT_SIZE: f32 = 12.;
+pub const MIN_DIFF_FONT_SIZE: f32 = 9.;
+pub const MAX_DIFF_FONT_SIZE: f32 = 20.;
 pub const DEFAULT_AUTO_FETCH_INTERVAL: u32 = 1;
 pub const MAX_AUTO_FETCH_INTERVAL: u32 = 60;
 
@@ -222,7 +225,12 @@ impl Preferences {
         self.font_size_offset = bounded(value, 0., 5., DEFAULT_FONT_SIZE_OFFSET);
     }
     pub fn set_diff_font_size(&mut self, value: f32) {
-        self.diff_font_size = bounded(value, 9., 20., DEFAULT_DIFF_FONT_SIZE);
+        self.diff_font_size = bounded(
+            value,
+            MIN_DIFF_FONT_SIZE,
+            MAX_DIFF_FONT_SIZE,
+            DEFAULT_DIFF_FONT_SIZE,
+        );
     }
     /// `None` resets; +/-1 changes UI and diff sizes together, with the UI bounds.
     pub fn font_shortcut(&mut self, delta: Option<i32>) {
@@ -383,7 +391,7 @@ mod tests {
         p.font_shortcut(Some(-1));
         assert_eq!((p.font_size_offset, p.diff_font_size), (4., 14.));
         p.font_shortcut(None);
-        assert_eq!((p.font_size_offset, p.diff_font_size), (1., 11.));
+        assert_eq!((p.font_size_offset, p.diff_font_size), (1., 12.));
     }
     #[test]
     fn interval_requires_a_whole_number_in_the_supported_range() {
