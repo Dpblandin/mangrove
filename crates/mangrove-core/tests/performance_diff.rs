@@ -320,12 +320,18 @@ fn text_attributes_cannot_load_an_oversized_patch_before_the_size_guard() {
 
 #[test]
 fn normal_renames_and_stale_local_selections_keep_their_content_and_source_unchanged() {
+    // Brackets and `*` are pathspec magic; Windows file names cannot contain `*`.
+    let literal_path = if cfg!(windows) {
+        "literal[1].txt"
+    } else {
+        "literal[1]*.txt"
+    };
     let fixture = Fixture::new();
     fixture.commit(
         None,
         &[
             ("old.txt", b"rename baseline\nsecond line\n"),
-            ("literal[1]*.txt", b"literal before\n"),
+            (literal_path, b"literal before\n"),
         ],
     );
     fixture
@@ -337,7 +343,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
         fixture.source.join("new.txt"),
     )
     .unwrap();
-    fs::write(fixture.source.join("literal[1]*.txt"), b"literal after\n").unwrap();
+    fs::write(fixture.source.join(literal_path), b"literal after\n").unwrap();
     let info = fixture.open();
     let before = source_snapshot(&fixture.source);
     let status = fixture.workspace.working_tree_status(&info.id).unwrap();
@@ -358,7 +364,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
     let literal = status
         .unstaged
         .iter()
-        .find(|file| file.file.path == "literal[1]*.txt")
+        .find(|file| file.file.path == literal_path)
         .unwrap();
     assert!(patch_text(
         &fixture
@@ -371,7 +377,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
     // No status refresh: path identity must survive unrelated insertions and
     // read the selected file's current content, rather than reuse a patch.
     fs::write(fixture.source.join("aaa.txt"), b"other\n").unwrap();
-    fs::write(fixture.source.join("literal[1]*.txt"), b"literal newest\n").unwrap();
+    fs::write(fixture.source.join(literal_path), b"literal newest\n").unwrap();
     let before = source_snapshot(&fixture.source);
     assert!(patch_text(
         &fixture

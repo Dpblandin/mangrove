@@ -134,11 +134,23 @@ fn cached(
     Some(tokens)
 }
 
+/// Time allowed to one highlighting pass before it falls back to plain text.
+const HIGHLIGHT_BUDGET: Duration = Duration::from_millis(500);
+
 /// `None` means cancellation; unsupported or bounded-out syntax remains a
 /// complete plain-text snapshot. Cancelled work never enters the cache.
 pub fn cached_diff_tokens_cancellable(
     path: &str,
     diff: &FileDiff,
+    should_cancel: impl Fn() -> bool,
+) -> Option<Tokens> {
+    cached_diff_tokens_within(path, diff, HIGHLIGHT_BUDGET, should_cancel)
+}
+
+fn cached_diff_tokens_within(
+    path: &str,
+    diff: &FileDiff,
+    budget: Duration,
     should_cancel: impl Fn() -> bool,
 ) -> Option<Tokens> {
     if should_cancel() {
@@ -157,12 +169,7 @@ pub fn cached_diff_tokens_cancellable(
         }
     }
     cached(path, fingerprint.finish(), &should_cancel, || {
-        diff_tokens_with_cancellation(
-            path,
-            diff,
-            Instant::now() + Duration::from_millis(500),
-            &should_cancel,
-        )
+        diff_tokens_with_cancellation(path, diff, Instant::now() + budget, &should_cancel)
     })
 }
 
@@ -181,7 +188,7 @@ pub fn cached_content_tokens_cancellable(
         content_tokens_with_cancellation(
             path,
             lines,
-            Instant::now() + Duration::from_millis(500),
+            Instant::now() + HIGHLIGHT_BUDGET,
             &should_cancel,
         )
     })
@@ -731,12 +738,7 @@ fn diff_tokens_with_cancellation(
 
 #[cfg(test)]
 fn content_tokens(path: &str, lines: &[String]) -> Option<Vec<Vec<Token>>> {
-    content_tokens_with_cancellation(
-        path,
-        lines,
-        Instant::now() + Duration::from_millis(500),
-        &|| false,
-    )
+    content_tokens_with_cancellation(path, lines, Instant::now() + HIGHLIGHT_BUDGET, &|| false)
 }
 
 #[cfg(test)]
@@ -807,10 +809,12 @@ mod tests {
         }
     }
 
+    // These assertions verify token semantics, not cold-query speed on a
+    // shared CI runner. Production retains its separate `HIGHLIGHT_BUDGET`.
+    const SEMANTIC_BUDGET: Duration = Duration::from_secs(30);
+
     fn semantic_deadline() -> Instant {
-        // These assertions verify token semantics, not cold-query speed on a
-        // shared CI runner. Production retains its separate 500 ms budget.
-        Instant::now() + Duration::from_secs(30)
+        Instant::now() + SEMANTIC_BUDGET
     }
 
     #[test]
@@ -1034,14 +1038,16 @@ mod tests {
     fn cancellation_after_work_starts_does_not_cache_a_plain_snapshot() {
         let diff = dispersed_diff(150);
         let checks = std::cell::Cell::new(0);
-        let cancelled = cached_diff_tokens_cancellable("cancel-many-hunks.ts", &diff, || {
-            checks.set(checks.get() + 1);
-            checks.get() > diff.hunks.len() + 450 + 10
-        });
+        let cancelled =
+            cached_diff_tokens_within("cancel-many-hunks.ts", &diff, SEMANTIC_BUDGET, || {
+                checks.set(checks.get() + 1);
+                checks.get() > diff.hunks.len() + 450 + 10
+            });
         assert!(cancelled.is_none());
         assert!(checks.get() > diff.hunks.len() + 450);
         let retried =
-            cached_diff_tokens_cancellable("cancel-many-hunks.ts", &diff, || false).unwrap();
+            cached_diff_tokens_within("cancel-many-hunks.ts", &diff, SEMANTIC_BUDGET, || false)
+                .unwrap();
         assert_eq!(retried.len(), 600);
         assert!(retried[2].iter().any(|token| token.kind == Kind::Keyword));
     }

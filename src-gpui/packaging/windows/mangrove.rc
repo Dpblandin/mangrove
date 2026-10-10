@@ -1,4 +1,2 @@
-// GPUI loads icon 1 for its windows; the manifest enables per-monitor DPI awareness.
-#define RT_MANIFEST 24
+// GPUI loads icon 1 for its windows; it embeds its own DPI manifest.
 1 ICON "icon.ico"
-1 RT_MANIFEST "mangrove.manifest.xml"
