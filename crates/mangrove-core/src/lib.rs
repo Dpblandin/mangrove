@@ -589,10 +589,9 @@ impl Workspace {
         ensure_current(&connection, &session)?;
         let limit = limit.clamp(1, 256);
         i64::try_from(offset).map_err(|_| "Position invalide.")?;
-        let query: String = query.trim().chars().take(256).collect();
+        let query = search_query(query);
         let index = published_progress(&connection, &session)?;
         let indexed = index.indexed;
-        let index_run = &index.index_run;
         let (commits, total) = if query.is_empty() {
             let sql = format!(
                 "SELECT {} FROM walk w JOIN commits c ON c.sha = w.sha
@@ -610,62 +609,20 @@ impl Workspace {
                 .map_err(|e| e.to_string())?;
             (commits, indexed)
         } else {
-            let mut cache = session.searches.lock().unwrap();
-            let (positions, total) = if let Some(snapshot) = cache.get(&query, index_run, indexed) {
-                let page = snapshot
-                    .iter()
-                    .skip(offset)
-                    .take(limit)
-                    .copied()
-                    .collect::<Vec<_>>();
-                (page, snapshot.len())
-            } else {
-                let fts = cache::search_terms(&query);
-                let sha = query
-                    .chars()
-                    .all(|character| character.is_ascii_hexdigit())
-                    .then(|| format!("{}*", query.to_ascii_lowercase()));
-                let cte = search_cte(sha.is_some());
-                // CROSS JOIN keeps selective matches ahead of the walk scan.
-                // Only positions are materialized; graph JSON is read for the
-                // requested page after the complete matching set is known.
-                let sql = format!(
-                    "{cte} SELECT w.position FROM matched m
-                     CROSS JOIN commits c ON c.id = m.id
-                     CROSS JOIN walk w ON w.sha = c.sha
-                     WHERE w.position < ?4 ORDER BY w.position"
-                );
-                let mut statement = connection.prepare_cached(&sql).map_err(|e| e.to_string())?;
-                let mut rows = statement
-                    .query(params![
-                        fts,
-                        sha,
-                        cache::like_prefix(&query),
-                        indexed as i64
-                    ])
-                    .map_err(|e| e.to_string())?;
-                let maximum = MAX_SEARCH_SNAPSHOT_BYTES / std::mem::size_of::<usize>();
-                let mut snapshot = Vec::new();
-                let mut page = Vec::with_capacity(limit);
-                let mut total = 0usize;
-                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                    let position = cache::row_usize(row, 0).map_err(|e| e.to_string())?;
-                    if total < maximum {
-                        snapshot.push(position);
-                    }
-                    if total >= offset && total.saturating_sub(offset) < limit {
+            let mut page = Vec::with_capacity(limit);
+            let results =
+                search_results(&connection, &session, &query, &index, |result, position| {
+                    if result >= offset && result - offset < limit {
                         page.push(position);
                     }
-                    total += 1;
-                }
-                if total <= maximum {
-                    cache.insert(query.clone(), snapshot);
-                }
-                // An exceptionally large match set stays bounded in memory.
-                // Its requested page and total are still computed in one pass.
-                (page, total)
+                })?;
+            let (positions, total) = match results {
+                SearchResults::Cached(snapshot) => (
+                    snapshot.iter().skip(offset).take(limit).copied().collect(),
+                    snapshot.len(),
+                ),
+                SearchResults::Scanned(total) => (page, total),
             };
-            drop(cache);
             let positions = serde_json::to_string(&positions).map_err(|e| e.to_string())?;
             let sql = format!(
                 "SELECT {} FROM json_each(?1) p
@@ -689,6 +646,41 @@ impl Workspace {
         })
     }
 
+    /// Offset of a commit in the list read by `list_commits` for `query`,
+    /// with the traversal run of the same snapshot. A commit outside the
+    /// results has none.
+    pub fn search_offset(
+        &self,
+        id: &str,
+        query: &str,
+        sha: &str,
+    ) -> Result<(Option<usize>, IndexProgress)> {
+        let session = self.session(id)?;
+        let mut connection = session.reads.acquire()?;
+        let connection = connection.transaction().map_err(|e| e.to_string())?;
+        ensure_current(&connection, &session)?;
+        let query = search_query(query);
+        let index = published_progress(&connection, &session)?;
+        let Some(target) =
+            walk_position(&connection, sha)?.filter(|position| *position < index.indexed)
+        else {
+            return Ok((None, index));
+        };
+        if query.is_empty() {
+            return Ok((Some(target), index));
+        }
+        let (mut before, mut found) = (0, false);
+        let results = search_results(&connection, &session, &query, &index, |_, position| {
+            before += usize::from(position < target);
+            found |= position == target;
+        })?;
+        let offset = match results {
+            SearchResults::Cached(snapshot) => snapshot.binary_search(&target).ok(),
+            SearchResults::Scanned(_) => found.then_some(before),
+        };
+        Ok((offset, index))
+    }
+
     pub fn commit_position(&self, id: &str, sha: &str) -> Result<Option<usize>> {
         self.commit_position_with_status(id, sha)
             .map(|(position, _)| position)
@@ -706,12 +698,7 @@ impl Workspace {
         let mut connection = session.reads.acquire()?;
         let connection = connection.transaction().map_err(|e| e.to_string())?;
         ensure_current(&connection, &session)?;
-        let position = connection
-            .query_row("SELECT position FROM walk WHERE sha = ?1", [sha], |row| {
-                cache::row_usize(row, 0)
-            })
-            .optional()
-            .map_err(|e| e.to_string())?;
+        let position = walk_position(&connection, sha)?;
         Ok((position, published_progress(&connection, &session)?))
     }
 
@@ -781,6 +768,25 @@ impl Workspace {
             return Err("Fichier introuvable dans ce commit.".into());
         }
         commit_diff::render_bounded(&repository, &diff, file_index)
+    }
+
+    /// Added and deleted lines of the whole commit, compared to its first
+    /// parent like the file list. `None` when a file exceeds the patch limit
+    /// or the commit has more than `max_files`; `cancelled` stops the read.
+    pub fn commit_line_totals(
+        &self,
+        id: &str,
+        sha: &str,
+        max_files: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<(usize, usize)>> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        let (_, diff, _) = commit_diff(&repository, sha)?;
+        if diff.deltas().len() > max_files.min(MAX_CHANGED_FILES) {
+            return Ok(None);
+        }
+        commit_diff::line_totals(&repository, &diff, cancelled)
     }
 
     pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {
@@ -913,6 +919,84 @@ fn repository_lock(locks: &Mutex<HashMap<String, Weak<Mutex<()>>>>, key: &str) -
     let lock = locks.get(key).and_then(Weak::upgrade).unwrap_or_default();
     locks.insert(key.to_owned(), Arc::downgrade(&lock));
     lock
+}
+
+fn walk_position(connection: &rusqlite::Connection, sha: &str) -> Result<Option<usize>> {
+    connection
+        .query_row("SELECT position FROM walk WHERE sha = ?1", [sha], |row| {
+            cache::row_usize(row, 0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+fn search_query(query: &str) -> String {
+    query.trim().chars().take(256).collect()
+}
+
+/// Walk positions of a search's results, in walk order.
+enum SearchResults {
+    /// The cached snapshot of every result.
+    Cached(Arc<Vec<usize>>),
+    /// The count of results that one scan gave to its visitor. Those that
+    /// fit the snapshot budget are now cached.
+    Scanned(usize),
+}
+
+/// Results of `query` in the published part of the walk. Each result of a
+/// scan is given to `visit` with its offset.
+fn search_results(
+    connection: &rusqlite::Connection,
+    session: &Session,
+    query: &str,
+    index: &IndexProgress,
+    mut visit: impl FnMut(usize, usize),
+) -> Result<SearchResults> {
+    let mut cache = session.searches.lock().unwrap();
+    if let Some(snapshot) = cache.get(query, &index.index_run, index.indexed) {
+        return Ok(SearchResults::Cached(snapshot));
+    }
+    let fts = cache::search_terms(query);
+    let sha = query
+        .chars()
+        .all(|character| character.is_ascii_hexdigit())
+        .then(|| format!("{}*", query.to_ascii_lowercase()));
+    let cte = search_cte(sha.is_some());
+    // CROSS JOIN keeps selective matches ahead of the walk scan.
+    // Only positions are materialized; graph JSON is read for the
+    // requested page after the complete matching set is known.
+    let sql = format!(
+        "{cte} SELECT w.position FROM matched m
+         CROSS JOIN commits c ON c.id = m.id
+         CROSS JOIN walk w ON w.sha = c.sha
+         WHERE w.position < ?4 ORDER BY w.position"
+    );
+    let mut statement = connection.prepare_cached(&sql).map_err(|e| e.to_string())?;
+    let mut rows = statement
+        .query(params![
+            fts,
+            sha,
+            cache::like_prefix(query),
+            index.indexed as i64
+        ])
+        .map_err(|e| e.to_string())?;
+    let maximum = MAX_SEARCH_SNAPSHOT_BYTES / std::mem::size_of::<usize>();
+    let mut snapshot = Vec::new();
+    let mut total = 0usize;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let position = cache::row_usize(row, 0).map_err(|e| e.to_string())?;
+        if total < maximum {
+            snapshot.push(position);
+        }
+        visit(total, position);
+        total += 1;
+    }
+    // An exceptionally large match set stays bounded in memory. Its
+    // visitor still saw every result in this one pass.
+    if total <= maximum {
+        cache.insert(query.to_owned(), snapshot);
+    }
+    Ok(SearchResults::Scanned(total))
 }
 
 fn published_count(connection: &rusqlite::Connection) -> Result<usize> {

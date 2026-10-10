@@ -3,6 +3,14 @@
 //! after that target has been closed, replaced, or left by a newer navigation.
 use crate::chrome::ChromeTab;
 
+/// Name of the screen shown by a tab without repository.
+pub const HOME: &str = "Accueil";
+
+/// Strip position reached by moving `step` tabs from `index`, wrapping at both ends.
+pub fn wrapped_index(index: usize, step: isize, len: usize) -> usize {
+    (index as isize + step).rem_euclid(len.max(1) as isize) as usize
+}
+
 pub struct TabOpenAttempt {
     id: u64,
     revision: u64,
@@ -27,11 +35,39 @@ impl Tabs {
         let id = self.next_id;
         self.entries.push(ChromeTab {
             id,
-            name: "Nouvel onglet".into(),
+            name: HOME.into(),
             path: None,
         });
         self.active = Some(id);
         id
+    }
+    /// Neighbour of the active tab in strip order, wrapping around.
+    pub fn neighbor(&self, step: isize) -> Option<u64> {
+        let index = self
+            .entries
+            .iter()
+            .position(|tab| Some(tab.id) == self.active)?;
+        let target = wrapped_index(index, step, self.entries.len());
+        Some(self.entries[target].id)
+    }
+    /// Cmd/Ctrl+digit target: 1 to 8 address a position, 9 the last tab.
+    pub fn by_shortcut(&self, digit: usize) -> Option<u64> {
+        if digit == 9 {
+            self.entries.last()
+        } else {
+            digit
+                .checked_sub(1)
+                .and_then(|index| self.entries.get(index))
+        }
+        .map(|tab| tab.id)
+    }
+    /// Digit of the Cmd/Ctrl shortcut that reaches the tab at `index`, if any.
+    pub fn shortcut_digit(&self, index: usize) -> Option<usize> {
+        if index < 8 {
+            Some(index + 1)
+        } else {
+            (index + 1 == self.entries.len()).then_some(9)
+        }
     }
     pub fn begin_open(&mut self, path: String) -> TabOpenAttempt {
         let previous = self
@@ -69,7 +105,7 @@ impl Tabs {
         if let Some(tab) = self.entries.iter_mut().find(|tab| tab.id == attempt.id) {
             *tab = attempt.previous.unwrap_or(ChromeTab {
                 id: attempt.id,
-                name: "Nouvel onglet".into(),
+                name: HOME.into(),
                 path: None,
             });
         }
@@ -216,7 +252,7 @@ mod tests {
         assert_eq!(tabs.entries[0], original_tab);
         assert_eq!(tabs.active, Some(target));
         assert_eq!(tabs.active_tab().unwrap().path, None);
-        assert_eq!(tabs.active_tab().unwrap().name, "Nouvel onglet");
+        assert_eq!(tabs.active_tab().unwrap().name, HOME);
         assert_valid_identity(&tabs);
     }
 
@@ -292,5 +328,47 @@ mod tests {
         assert!(tabs.complete_open(attempt, "/second".into(), "second".into()));
         assert_eq!(tabs.entries.len(), 1);
         assert_valid_identity(&tabs);
+    }
+
+    #[test]
+    fn keyboard_cycling_wraps_around_the_strip_in_both_directions() {
+        let mut tabs = Tabs::default();
+        assert_eq!(tabs.neighbor(1), None);
+        let a = open(&mut tabs, "a");
+        assert_eq!(tabs.neighbor(1), Some(a));
+        let b = open(&mut tabs, "b");
+        let c = open(&mut tabs, "c");
+        assert_eq!(tabs.neighbor(1), Some(a));
+        assert_eq!(tabs.neighbor(-1), Some(b));
+        tabs.activate(a);
+        assert_eq!(tabs.neighbor(-1), Some(c));
+        assert_eq!(tabs.neighbor(1), Some(b));
+        assert_eq!(wrapped_index(0, -3, 3), 0);
+        assert_eq!(wrapped_index(2, 4, 3), 0);
+    }
+
+    #[test]
+    fn digit_shortcuts_address_positions_and_nine_selects_the_last_tab() {
+        let mut tabs = Tabs::default();
+        assert_eq!(tabs.by_shortcut(9), None);
+        let ids = (0..10)
+            .map(|index| open(&mut tabs, &format!("/{index}")))
+            .collect::<Vec<_>>();
+        assert_eq!(tabs.by_shortcut(1), Some(ids[0]));
+        assert_eq!(tabs.by_shortcut(8), Some(ids[7]));
+        assert_eq!(tabs.by_shortcut(9), Some(ids[9]));
+        assert_eq!(tabs.by_shortcut(0), None);
+        let labelled = (0..ids.len())
+            .filter_map(|index| Some((index, tabs.shortcut_digit(index)?)))
+            .collect::<Vec<_>>();
+        assert_eq!(labelled.len(), 9);
+        for (index, digit) in labelled {
+            assert_eq!(tabs.by_shortcut(digit), Some(ids[index]));
+        }
+        tabs.close(ids[9]);
+        tabs.close(ids[8]);
+        tabs.close(ids[7]);
+        assert_eq!(tabs.by_shortcut(8), None);
+        assert_eq!(tabs.by_shortcut(9), Some(ids[6]));
     }
 }

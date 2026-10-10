@@ -120,6 +120,12 @@ impl RepositoryContextState {
         self.stashes.invalidate(clear);
     }
 
+    /// An expanded section still being read will change the tree height.
+    pub fn expanded_lists_loading(&self) -> bool {
+        self.worktrees_expanded && self.worktrees.loading
+            || self.stashes_expanded && self.stashes.loading
+    }
+
     fn accept_worktrees(
         &mut self,
         request: &ContextRequest,

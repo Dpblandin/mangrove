@@ -6,7 +6,7 @@ use std::{
     ops::Range,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -20,8 +20,8 @@ use mangrove_core::model::{FileBlame, FileContent, FileDiff};
 
 use crate::{
     diff,
-    format::{commit_date, short_sha},
-    preferences::Preferences,
+    format::{alt_shortcut_label, commit_date, compact_date, short_sha, shortcut_label},
+    preferences::{DEFAULT_DIFF_FONT_SIZE, MAX_DIFF_FONT_SIZE, MIN_DIFF_FONT_SIZE, Preferences},
     syntax::{self, Kind, Token},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::{RowGeometry, VirtualScrollHandle},
@@ -82,6 +82,16 @@ struct DisplayLine {
 // of tabs. The omitted bytes remain in Row::original for selection and copying.
 const MAX_DISPLAY_BYTES: usize = 16 * 1024;
 const OMITTED_LINE: &str = " … [suite masquée ; sélectionner la ligne pour tout copier]";
+static DESCRIPTION: LazyLock<SharedString> = LazyLock::new(|| {
+    format!(
+        "Texte sélectionnable. Flèches et Majuscule pour étendre la sélection, {} pour copier, {} pour tout sélectionner, {} et {} pour changer de bloc.",
+        shortcut_label("C"),
+        shortcut_label("A"),
+        alt_shortcut_label("↑"),
+        alt_shortcut_label("↓")
+    )
+    .into()
+});
 
 impl DisplayLine {
     fn new(text: Arc<str>) -> Self {
@@ -322,12 +332,21 @@ fn selected_rows_text(rows: &[Row], selection: Option<Selection>, final_newline:
     text
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadingPosition {
+    /// Whether the position is in the diff, and the file path.
+    source: (bool, String),
+    top: Pixels,
+}
+
 pub struct CodeView {
     rows: Arc<Vec<Row>>,
     scroll: VirtualScrollHandle,
     geometry_scale: f32,
     diff_source: Option<(Arc<FileDiff>, String)>,
     content_source: Option<Arc<FileContent>>,
+    /// Reading position to apply once the same diff or file is shown again.
+    restored_position: Option<ReadingPosition>,
     tokens: Arc<Vec<Vec<Token>>>,
     generation: u64,
     live_generation: Arc<AtomicU64>,
@@ -340,9 +359,10 @@ pub struct CodeView {
     palette: Palette,
     font_size: f32,
     ui_offset: f32,
-    content_width: f32,
+    text_width: f32,
     number_width: f32,
     is_diff: bool,
+    hunk_rows: Vec<usize>,
     selection: Option<Selection>,
     dragging: bool,
     drag_point: Option<Point<Pixels>>,
@@ -353,7 +373,8 @@ pub struct CodeView {
     notice: Option<String>,
     state: Option<String>,
     parent_available: bool,
-    loading: bool,
+    /// While set, an empty view names what is being read.
+    loading: Option<String>,
     error: Option<String>,
     ends_with_newline: bool,
 }
@@ -376,21 +397,23 @@ impl CodeView {
             geometry_scale: window.scale_factor(),
             diff_source: None,
             content_source: None,
+            restored_position: None,
             tokens: Arc::new(Vec::new()),
             generation: 0,
             live_generation: Arc::new(AtomicU64::new(0)),
             syntax_task: None,
             syntax_pending: false,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             list,
             horizontal,
             layouts: Rc::new(RefCell::new(BTreeMap::new())),
             palette: Palette::default(),
-            font_size: 11.,
+            font_size: DEFAULT_DIFF_FONT_SIZE,
             ui_offset: 1.,
-            content_width: 0.,
+            text_width: 0.,
             number_width: 32.,
             is_diff: false,
+            hunk_rows: Vec::new(),
             selection: None,
             dragging: false,
             drag_point: None,
@@ -401,7 +424,7 @@ impl CodeView {
             notice: None,
             state: Some("Sélectionnez un fichier pour voir ses modifications.".into()),
             parent_available: false,
-            loading: false,
+            loading: None,
             error: None,
             ends_with_newline: false,
         }
@@ -428,7 +451,8 @@ impl CodeView {
         self.parent_available = false;
         self.notice = None;
         self.error = None;
-        self.loading = false;
+        self.loading = None;
+        self.hunk_rows.clear();
         self.blame = None;
         self.blame_indices.clear();
         self.layouts.borrow_mut().clear();
@@ -470,7 +494,7 @@ impl CodeView {
             .into();
         self.number_width = (largest.to_string().len() + 2) as f32 * char_width;
         let widest = self.rows.iter().max_by_key(|row| row.display.columns);
-        let text_width = widest.map_or(0., |row| {
+        self.text_width = widest.map_or(0., |row| {
             let run = TextRun {
                 len: row.display.text.len(),
                 font: font(MONO),
@@ -486,15 +510,27 @@ impl CodeView {
                 .into();
             width
         });
-        self.content_width = text_width
-            + if self.is_diff {
-                self.number_width * 2. + 35.
-            } else {
-                self.number_width + 32.
-            };
-        if self.show_blame && !self.is_diff {
-            self.content_width += 240.;
+    }
+    fn blame_width(&self) -> f32 {
+        // Short SHA and compact date stay whole; the author takes the rest.
+        self.font_size * 20. + 32.
+    }
+    /// Line numbers, diff signs and blame stay visible during horizontal scroll.
+    fn gutter_width(&self) -> f32 {
+        if self.is_diff {
+            self.number_width * 2. + 20.
+        } else {
+            self.number_width
+                + 12.
+                + if self.show_blame {
+                    self.blame_width()
+                } else {
+                    0.
+                }
         }
+    }
+    fn content_width(&self) -> f32 {
+        self.text_width + self.gutter_width() + if self.is_diff { 15. } else { 20. }
     }
     fn append_line_notice(&mut self) {
         if self.rows.iter().any(|row| row.display.truncated()) {
@@ -566,7 +602,9 @@ impl CodeView {
                 })
                 .collect();
             self.reset(rows, window, cx);
+            self.hunk_rows = hunk_rows(&self.rows);
             self.diff_source = Some((diff.clone(), path.clone()));
+            self.apply_reading_position();
             if diff.binary {
                 self.state=Some("Fichier binaire\nLe contenu de ce fichier ne peut pas être affiché sous forme de diff texte.".into());
             } else if diff.hunks.is_empty() && !diff.truncated {
@@ -615,6 +653,7 @@ impl CodeView {
             .collect();
         self.reset(rows, window, cx);
         self.content_source = Some(content.clone());
+        self.apply_reading_position();
         self.state = match content.kind.as_str() {
             "binary" => Some(
                 "Fichier binaire ou encodage non UTF-8 : aucun affichage texte ni blame.".into(),
@@ -666,6 +705,39 @@ impl CodeView {
         }));
         cx.notify();
     }
+    /// The shown diff or file and how far it was scrolled.
+    pub fn reading_position(&self) -> Option<ReadingPosition> {
+        Some(ReadingPosition {
+            source: self.source_key()?,
+            top: self.scroll.vertical_offset(),
+        })
+    }
+    /// Scrolls back to `position` when its diff or file is shown next.
+    pub fn restore_reading_position(&mut self, position: ReadingPosition) {
+        self.restored_position = Some(position);
+    }
+    fn source_key(&self) -> Option<(bool, String)> {
+        match (&self.diff_source, &self.content_source) {
+            (Some((_, path)), _) if self.is_diff => Some((true, path.clone())),
+            (_, Some(content)) => Some((false, content.path.clone())),
+            _ => None,
+        }
+    }
+    /// The diff of a file can precede its content view; only another path
+    /// discards the position.
+    fn apply_reading_position(&mut self) {
+        let Some(source) = self.source_key() else {
+            return;
+        };
+        let Some(position) = self.restored_position.take() else {
+            return;
+        };
+        if source == position.source {
+            self.scroll.scroll_vertical_to(position.top);
+        } else if source.1 == position.source.1 {
+            self.restored_position = Some(position);
+        }
+    }
     pub fn set_blame(&mut self, blame: Option<Arc<FileBlame>>, cx: &mut Context<Self>) {
         self.blame_indices = vec![None; self.rows.len()];
         if let Some(blame) = &blame {
@@ -681,7 +753,6 @@ impl CodeView {
     pub fn set_show_blame(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.show_blame != value {
             self.show_blame = value;
-            self.content_width += if value { 240. } else { -240. };
             cx.notify();
         }
     }
@@ -696,17 +767,15 @@ impl CodeView {
         self.ui_offset = preferences.font_size_offset;
         self.palette = Palette::for_theme(preferences.theme);
         self.font_size = if preferences.diff_font_size.is_finite() {
-            preferences.diff_font_size.round().clamp(9., 20.)
+            preferences
+                .diff_font_size
+                .round()
+                .clamp(MIN_DIFF_FONT_SIZE, MAX_DIFF_FONT_SIZE)
         } else {
-            11.
+            DEFAULT_DIFF_FONT_SIZE
         };
         if old != self.font_size {
-            let fixed = if self.is_diff {
-                35.
-            } else {
-                32. + if self.show_blame { 240. } else { 0. }
-            };
-            self.content_width = (self.content_width - fixed) * self.font_size / old + fixed;
+            self.text_width *= self.font_size / old;
             self.number_width *= self.font_size / old;
             self.rebuild_row_geometry(self.geometry_scale);
         }
@@ -726,18 +795,20 @@ impl CodeView {
         self.drag_point = None;
         self.state = Some("Sélectionnez un fichier pour voir ses modifications.".into());
         self.error = None;
-        self.loading = false;
+        self.loading = None;
         self.notice = None;
         self.parent_available = false;
         self.blame = None;
         self.blame_indices.clear();
-        self.content_width = 0.;
+        self.hunk_rows.clear();
+        self.text_width = 0.;
         self.ends_with_newline = false;
         self.list.reset(0);
         self.layouts.borrow_mut().clear();
         cx.notify();
     }
-    pub fn set_loading(&mut self, value: bool, cx: &mut Context<Self>) {
+    /// `Some` dims the retained rows, or names the read when none are shown.
+    pub fn set_loading(&mut self, value: Option<String>, cx: &mut Context<Self>) {
         if self.loading == value {
             return;
         }
@@ -753,7 +824,7 @@ impl CodeView {
     }
     #[cfg(feature = "app-benchmark")]
     pub fn is_ready(&self) -> bool {
-        !self.loading && !self.syntax_pending
+        self.loading.is_none() && !self.syntax_pending
     }
     #[cfg(feature = "app-benchmark")]
     pub fn syntax_colored(&self) -> bool {
@@ -771,48 +842,23 @@ impl CodeView {
         let palette = self.palette;
         let size = self.font_size;
         let button = |id: &'static str, name: IconName, enabled: bool, delta: f32| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .focusable()
-                .tab_index(0)
-                .aria_label(if delta < 0. {
-                    "Diminuer la taille du texte du diff"
-                } else {
-                    "Augmenter la taille du texte du diff"
-                })
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(26.))
-                .h(px(26.))
-                .rounded(RADIUS_SM)
-                .cursor_pointer()
-                .when(enabled, |view| {
-                    view.hover(move |style| style.bg(rgb(palette.hover)))
-                })
-                .when(!enabled, |view| view.opacity(0.4))
-                .child(icon(name, 14., palette.muted))
-                .tooltip(move |window, cx| {
-                    Tooltip::new(if delta < 0. {
-                        "Diminuer la taille du texte du diff"
-                    } else {
-                        "Augmenter la taille du texte du diff"
-                    })
-                    .build(window, cx)
-                })
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    if enabled {
-                        cx.emit(CodeViewEvent::FontSizeChanged(
-                            (view.font_size + delta).clamp(9., 20.),
-                        ));
-                    }
-                }))
+            let label = if delta < 0. {
+                "Diminuer la taille du texte du diff"
+            } else {
+                "Augmenter la taille du texte du diff"
+            };
+            let change = move |view: &mut Self, cx: &mut Context<Self>| {
+                if enabled {
+                    cx.emit(CodeViewEvent::FontSizeChanged(
+                        (view.font_size + delta).clamp(MIN_DIFF_FONT_SIZE, MAX_DIFF_FONT_SIZE),
+                    ));
+                }
+            };
+            icon_button(id, name, label, label.into(), enabled, palette)
+                .on_click(cx.listener(move |view, _, _, cx| change(view, cx)))
                 .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.emit(CodeViewEvent::FontSizeChanged(
-                            (view.font_size + delta).clamp(9., 20.),
-                        ));
+                    if is_activation(event) {
+                        change(view, cx);
                         cx.stop_propagation();
                     }
                 }))
@@ -822,17 +868,90 @@ impl CodeView {
             .items_center()
             .gap(px(2.))
             .font_family(SANS)
-            .child(button("diff-font-minus", IconName::Minus, size > 9., -1.))
+            .child(button(
+                "diff-font-minus",
+                IconName::Minus,
+                size > MIN_DIFF_FONT_SIZE,
+                -1.,
+            ))
             .child(
                 div()
-                    .min_w(px(32.))
+                    .min_w(px(36.))
                     .text_center()
-                    .text_size(px(10. + self.ui_offset))
+                    .text_size(px(11. + self.ui_offset))
                     .text_color(rgb(palette.muted))
                     .child(format!("{size:.0} px")),
             )
-            .child(button("diff-font-plus", IconName::Plus, size < 20., 1.))
+            .child(button(
+                "diff-font-plus",
+                IconName::Plus,
+                size < MAX_DIFF_FONT_SIZE,
+                1.,
+            ))
             .into_any_element()
+    }
+    /// Previous/next hunk buttons for a diff header, with their shortcuts.
+    pub fn hunk_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
+        let enabled = !self.hunk_rows.is_empty();
+        let button = |id: &'static str, name: IconName, label: &'static str, forward: bool| {
+            let key = if forward { "↓" } else { "↑" };
+            let tooltip = format!("{label} ({})", alt_shortcut_label(key));
+            icon_button(id, name, label, tooltip.into(), enabled, palette)
+                .on_click(cx.listener(move |view, _, _, cx| view.jump_hunk(forward, cx)))
+                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                    if is_activation(event) {
+                        view.jump_hunk(forward, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .child(button(
+                "diff-hunk-previous",
+                IconName::ChevronUp,
+                "Bloc précédent",
+                false,
+            ))
+            .child(button(
+                "diff-hunk-next",
+                IconName::ChevronDown,
+                "Bloc suivant",
+                true,
+            ))
+            .into_any_element()
+    }
+    /// Scroll the previous or next hunk header to the top and move the caret there.
+    pub fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let viewport = self.list.viewport_bounds();
+        let caret_visible = self
+            .list
+            .bounds_for_item(self.active_line)
+            .is_some_and(|bounds| {
+                bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom()
+            });
+        let current = if caret_visible {
+            self.active_line
+        } else {
+            self.list.logical_scroll_top().item_ix
+        };
+        let Some(row) = hunk_target(&self.hunk_rows, current, forward) else {
+            return;
+        };
+        let caret = Position { row, byte: 0 };
+        self.active_line = row;
+        self.selection = Some(Selection {
+            anchor: caret,
+            head: caret,
+        });
+        let start = (0..row)
+            .filter_map(|index| self.scroll.row_height(index))
+            .fold(px(0.), |start, height| start + height);
+        self.scroll.scroll_vertical_to(start);
+        cx.notify();
     }
 
     fn position_from_layout(&self, index: usize, position: Point<Pixels>) -> Position {
@@ -1061,11 +1180,9 @@ impl CodeView {
             self.select_all(cx);
             return;
         }
-        if key == "escape" {
-            self.selection = None;
-            self.dragging = false;
-            self.drag_point = None;
-            cx.notify();
+        if let Some(forward) = hunk_shortcut(event) {
+            self.jump_hunk(forward, cx);
+            cx.stop_propagation();
             return;
         }
         if self.show_blame && matches!(key, "enter" | "space") && !modifiers.shift {
@@ -1234,12 +1351,22 @@ impl CodeView {
         &self,
         index: usize,
         first_visible_row: usize,
+        scroll_x: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let row = &self.rows[index];
         let p = self.palette;
         let hunk = row.kind == "hunk";
+        let background = match row.kind.as_str() {
+            "hunk" => p.hunk_bg,
+            "addition" => p.addition_bg,
+            "deletion" => p.deletion_bg,
+            _ if self.show_blame && index == self.active_line && self.focus.is_focused(window) => {
+                p.surface
+            }
+            _ => p.reading_bg,
+        };
         let default_color = rgb(if hunk { p.accent } else { p.text }).into();
         let runs = self
             .highlights(index, row)
@@ -1362,114 +1489,58 @@ impl CodeView {
             )
             .flex()
             .w_full()
-            .min_w(px(self.content_width))
+            .min_w(px(self.content_width()))
             .h(self.row_height(index))
             .font_family(MONO)
             .text_size(px(self.font_size))
             .line_height(px(self.font_size * 1.7))
             .text_color(rgb(if hunk { p.accent } else { p.text }))
-            .bg(rgb(match row.kind.as_str() {
-                "hunk" => p.hunk_bg,
-                "addition" => p.addition_bg,
-                "deletion" => p.deletion_bg,
-                _ if self.show_blame
-                    && index == self.active_line
-                    && self.focus.is_focused(window) =>
-                {
-                    p.surface
-                }
-                _ => p.reading_bg,
-            }));
+            .bg(rgb(background));
+        let mut sticky = None;
         if hunk {
             line = line.px(px(13.)).py(px(5.)).when(index > 0, |line| {
                 line.border_t_1().border_color(rgb(p.border))
             });
-        } else if self.is_diff {
-            let (sign, color) = match row.kind.as_str() {
-                "addition" => ("+", p.success),
-                "deletion" => ("−", p.danger),
-                _ => (" ", p.muted),
-            };
-            line = line
-                .child(gutter(row.old_number.clone()))
-                .child(gutter(row.new_number.clone()))
-                .child(
-                    div()
-                        .w(px(20.))
-                        .flex_shrink_0()
-                        .text_center()
-                        .text_color(rgb(color))
-                        .child(sign),
-                );
         } else {
-            if self.show_blame {
-                let mut attribution = div()
-                    .id(("blame-line", index))
-                    .role(Role::Button)
-                    .flex()
-                    .w(px(240.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .bg(rgb(p.panel))
-                    .border_r_1()
-                    .border_color(rgb(p.border))
-                    .text_color(rgb(p.muted))
-                    .overflow_hidden();
-                if let Some(group) = self.blame_group(index) {
-                    let sha = group.sha.clone();
-                    let title = format!(
-                        "{} · {}{}",
-                        group.author,
-                        commit_date(group.time),
-                        if group.boundary {
-                            " · Frontière du parcours"
-                        } else {
-                            ""
-                        }
+            // The gutter is painted last, over the code that scrolls beneath it.
+            let mut cells = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(scroll_x)
+                .flex()
+                .bg(rgb(background))
+                .block_mouse_except_scroll();
+            if self.is_diff {
+                let (sign, color) = match row.kind.as_str() {
+                    "addition" => ("+", p.success),
+                    "deletion" => ("−", p.danger),
+                    _ => (" ", p.muted),
+                };
+                cells = cells
+                    .child(gutter(row.old_number.clone()))
+                    .child(gutter(row.new_number.clone()))
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .flex_shrink_0()
+                            .text_center()
+                            .text_color(rgb(color))
+                            .child(sign),
                     );
-                    attribution = attribution
-                        .aria_label(format!(
-                            "Consulter le commit {} de {}",
-                            short_sha(&group.sha),
-                            title
-                        ))
-                        .cursor_pointer()
-                        .hover(move |view| view.bg(rgb(p.surface)).text_color(rgb(p.accent)))
-                        .when(group.boundary, |view| {
-                            view.border_l_2().border_color(rgb(p.warning))
-                        })
-                        .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.active_line = index;
-                            window.focus(&view.focus, cx);
-                            cx.emit(CodeViewEvent::NavigateCommit(sha.clone()));
-                        }));
-                    if group.start_line == index + 1 || first_visible_row == index {
-                        let date = commit_date(group.time);
-                        attribution = attribution
-                            .child(short_sha(&group.sha))
-                            .child(
-                                div()
-                                    .max_w(px(90.))
-                                    .text_ellipsis()
-                                    .text_color(rgb(p.text))
-                                    .child(group.author.clone()),
-                            )
-                            .child(div().text_ellipsis().child(date));
-                    } else {
-                        attribution = attribution.child(div().opacity(0.35).child("│"));
-                    }
-                } else {
-                    attribution = attribution.child("—");
-                }
-                line = line.child(attribution);
+            } else {
+                cells = cells
+                    .children(
+                        self.show_blame
+                            .then(|| self.blame_cell(index, first_visible_row, cx)),
+                    )
+                    .child(gutter(row.new_number.clone()))
+                    .child(div().w(px(12.)).flex_shrink_0());
             }
             line = line
-                .child(gutter(row.new_number.clone()))
-                .child(div().w(px(12.)).flex_shrink_0());
+                .relative()
+                .child(div().w(px(self.gutter_width())).flex_shrink_0());
+            sticky = Some(cells);
         }
         let code = div()
             .id(("code-text", index))
@@ -1499,7 +1570,76 @@ impl CodeView {
                     view.begin_selection(index, event, window, cx)
                 }),
             );
-        line.child(code).into_any_element()
+        line.child(code).children(sticky).into_any_element()
+    }
+    fn blame_cell(
+        &self,
+        index: usize,
+        first_visible_row: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.palette;
+        let attribution = div()
+            .id(("blame-line", index))
+            .role(Role::Button)
+            .flex()
+            .w(px(self.blame_width()))
+            .h_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .bg(rgb(p.panel))
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .text_color(rgb(p.muted))
+            .overflow_hidden();
+        let Some(group) = self.blame_group(index) else {
+            return attribution.child("—");
+        };
+        let sha = group.sha.clone();
+        let title = format!(
+            "{} · {}{}",
+            group.author,
+            commit_date(group.time),
+            if group.boundary {
+                " · Frontière du parcours"
+            } else {
+                ""
+            }
+        );
+        let attribution = attribution
+            .aria_label(format!(
+                "Consulter le commit {} de {}",
+                short_sha(&group.sha),
+                title
+            ))
+            .cursor_pointer()
+            .hover(move |view| view.bg(rgb(p.surface)).text_color(rgb(p.accent)))
+            .when(group.boundary, |view| {
+                view.border_l_2().border_color(rgb(p.warning))
+            })
+            .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.active_line = index;
+                window.focus(&view.focus, cx);
+                cx.emit(CodeViewEvent::NavigateCommit(sha.clone()));
+            }));
+        if group.start_line == index + 1 || first_visible_row == index {
+            attribution
+                .child(div().flex_shrink_0().child(short_sha(&group.sha)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(p.text))
+                        .child(group.author.clone()),
+                )
+                .child(div().flex_shrink_0().child(compact_date(group.time)))
+        } else {
+            attribution.child(div().opacity(0.35).child("│"))
+        }
     }
 }
 
@@ -1520,18 +1660,42 @@ impl Render for CodeView {
         });
         let mut root = div()
             .id("code-view")
-            .role(if self.show_blame&&!self.is_diff {Role::ListBox} else {Role::Document})
-            .aria_label(if self.is_diff {"Modifications du fichier"} else if self.show_blame {"Blame du fichier"} else {"Contenu du fichier"})
-            .aria_description("Texte sélectionnable. Flèches et Majuscule pour étendre la sélection, ⌘C pour copier, ⌘A pour tout sélectionner.")
+            .role(if self.show_blame && !self.is_diff {
+                Role::ListBox
+            } else {
+                Role::Document
+            })
+            .aria_label(if self.is_diff {
+                "Modifications du fichier"
+            } else if self.show_blame {
+                "Blame du fichier"
+            } else {
+                "Contenu du fichier"
+            })
+            .aria_description(DESCRIPTION.clone())
             .flex()
             .flex_col()
             .size_full()
             .min_h_0()
             .min_w_0()
             .bg(rgb(p.reading_bg))
+            .border_1()
+            .border_color(rgb(p.reading_bg))
             .track_focus(&self.focus)
-            .on_action(cx.listener(|view,_:&Copy,_,cx|view.copy_selection(cx)))
-            .on_action(cx.listener(|view,_:&SelectAll,_,cx|view.select_all(cx)))
+            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+            .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy_selection(cx)))
+            .on_action(cx.listener(|view, _: &SelectAll, _, cx| view.select_all(cx)))
+            // A first Escape clears the selection; the next one closes the view.
+            .on_action(cx.listener(|view, _: &crate::app::Escape, _, cx| {
+                if view.selection.is_none() && !view.dragging {
+                    cx.propagate();
+                    return;
+                }
+                view.selection = None;
+                view.dragging = false;
+                view.drag_point = None;
+                cx.notify();
+            }))
             .on_key_down(cx.listener(Self::keydown))
             .child(
                 canvas(
@@ -1553,7 +1717,8 @@ impl Render for CodeView {
                 .w(px(0.))
                 .h(px(0.)),
             );
-        if let Some(state) = self.error.as_ref().or(self.state.as_ref()) {
+        let reading = self.loading.as_ref().filter(|_| self.rows.is_empty());
+        if let Some(state) = self.error.as_ref().or(reading).or(self.state.as_ref()) {
             root = root.child(
                 div()
                     .flex()
@@ -1601,10 +1766,11 @@ impl Render for CodeView {
                                 .bg(rgb(p.surface))
                                 .text_color(rgb(p.text))
                                 .cursor_pointer()
+                                .focus_visible(move |style| style.border_color(rgb(p.accent)))
                                 .child("Voir la version du premier parent")
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(CodeViewEvent::Parent)))
                                 .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    if is_activation(event) {
                                         cx.emit(CodeViewEvent::Parent);
                                         cx.stop_propagation();
                                     }
@@ -1620,6 +1786,7 @@ impl Render for CodeView {
             // ListState is mutably borrowed by GPUI while it measures/render rows.
             // Capture the scroll position here, before entering that callback.
             let first_visible_row = self.list.logical_scroll_top().item_ix;
+            let scroll_x = -self.horizontal.offset().x;
             let wheel_view = cx.weak_entity();
             let wheel_capture = self.scroll.wheel_capture(move |changed, _, cx| {
                 if changed {
@@ -1628,11 +1795,11 @@ impl Render for CodeView {
             });
             let code = list(self.list.clone(), move |index, window, cx| {
                 entity.update(cx, |view, cx| {
-                    view.render_row(index, first_visible_row, window, cx)
+                    view.render_row(index, first_visible_row, scroll_x, window, cx)
                 })
             })
             .w_full()
-            .min_w(px(self.content_width))
+            .min_w(px(self.content_width()))
             .h_full();
             let viewport = div()
                 .id("code-scroll-viewport")
@@ -1672,7 +1839,7 @@ impl Render for CodeView {
                     .px(px(17.))
                     .py(px(13.))
                     .font_family(SANS)
-                    .text_size(px(10. + self.ui_offset))
+                    .text_size(px(11. + self.ui_offset))
                     .line_height(relative(1.625))
                     .text_color(rgb(p.warning))
                     .child(
@@ -1694,18 +1861,82 @@ impl Render for CodeView {
                 root.child(viewport).children(notice)
             };
         }
-        if self.loading {
+        if self.loading.is_some() {
             root = root.opacity(0.65);
         }
         root
     }
 }
 
+fn is_activation(event: &KeyDownEvent) -> bool {
+    matches!(event.keystroke.key.as_str(), "enter" | "space")
+}
+
+/// Alt+↓ moves to the next hunk and Alt+↑ to the previous one.
+pub fn hunk_shortcut(event: &KeyDownEvent) -> Option<bool> {
+    let modifiers = event.keystroke.modifiers;
+    if !modifiers.alt || modifiers.platform || modifiers.control || modifiers.shift {
+        return None;
+    }
+    match event.keystroke.key.as_str() {
+        "down" => Some(true),
+        "up" => Some(false),
+        _ => None,
+    }
+}
+
+fn hunk_rows(rows: &[Row]) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| (row.kind == "hunk").then_some(index))
+        .collect()
+}
+
+/// First hunk header after `current`, or last one before it.
+fn hunk_target(hunks: &[usize], current: usize, forward: bool) -> Option<usize> {
+    if forward {
+        hunks.iter().copied().find(|row| *row > current)
+    } else {
+        hunks.iter().copied().rev().find(|row| *row < current)
+    }
+}
+
+fn icon_button(
+    id: &'static str,
+    name: IconName,
+    label: &'static str,
+    tooltip: SharedString,
+    enabled: bool,
+    palette: Palette,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .tab_index(0)
+        .aria_label(label)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(26.))
+        .h(px(26.))
+        .rounded(RADIUS_SM)
+        .border_1()
+        .border_color(rgb(palette.panel))
+        .cursor_pointer()
+        .when(enabled, |view| {
+            view.hover(move |style| style.bg(rgb(palette.hover)))
+        })
+        .when(!enabled, |view| view.opacity(0.4))
+        .focus_visible(move |style| style.border_color(rgb(palette.accent)))
+        .child(icon(name, 14., palette.muted))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CodeLineLayout, DisplayLine, MAX_DISPLAY_BYTES, OMITTED_LINE, Position, Row, Selection,
-        row_geometry, selected_rows_text, visible_shaped_line,
+        hunk_rows, hunk_target, row_geometry, selected_rows_text, visible_shaped_line,
     };
     use crate::virtual_scroll::VirtualScrollHandle;
     use gpui_kit::component::scroll::ScrollbarHandle;
@@ -1822,6 +2053,29 @@ mod tests {
             }
             near(handle.vertical_offset() - before, 240.);
         }
+    }
+    #[test]
+    fn hunk_navigation_moves_between_headers_and_stops_at_the_ends() {
+        let rows = [
+            row("hunk"),
+            row("context"),
+            row("addition"),
+            row("hunk"),
+            row("deletion"),
+            row("hunk"),
+            row("context"),
+        ];
+        let hunks = hunk_rows(&rows);
+        assert_eq!(hunks, [0, 3, 5]);
+        assert_eq!(hunk_target(&hunks, 0, true), Some(3));
+        assert_eq!(hunk_target(&hunks, 1, true), Some(3));
+        assert_eq!(hunk_target(&hunks, 3, true), Some(5));
+        assert_eq!(hunk_target(&hunks, 5, true), None);
+        assert_eq!(hunk_target(&hunks, 6, false), Some(5));
+        // Inside a hunk, « previous » first returns to its own header.
+        assert_eq!(hunk_target(&hunks, 4, false), Some(3));
+        assert_eq!(hunk_target(&hunks, 0, false), None);
+        assert_eq!(hunk_target(&[], 2, true), None);
     }
     #[test]
     fn selection_across_virtual_rows_excludes_gutters() {
@@ -1985,5 +2239,72 @@ mod tests {
         *shaped = Arc::new(layout);
         let visible = visible_shaped_line(&shaped, px(25.), px(30.), px(1.));
         assert_eq!(visible.runs[0].glyphs.len(), shaped.runs[0].glyphs.len());
+    }
+
+    #[gpui_kit::test]
+    fn a_restored_reading_position_applies_only_to_its_own_diff(cx: &mut gpui_kit::TestAppContext) {
+        use super::CodeView;
+        use gpui_kit::{AppContext, WindowOptions, px};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        use std::sync::Arc;
+        let diff = || {
+            Arc::new(FileDiff {
+                binary: false,
+                truncated: false,
+                additions: 400,
+                deletions: 0,
+                hunks: vec![DiffHunk {
+                    header: "@@ -0,0 +1,400 @@".into(),
+                    lines: (1..=400)
+                        .map(|line| DiffLine {
+                            kind: "add".into(),
+                            old_line: None,
+                            new_line: Some(line),
+                            content: format!("line {line}"),
+                        })
+                        .collect(),
+                }],
+            })
+        };
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let show = |cx: &mut gpui_kit::TestAppContext, path: &'static str| {
+            cx.update_window(cx.windows()[0], |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.set_prepared_diff(diff(), path.into(), Arc::default(), window, cx)
+                })
+            })
+            .unwrap();
+        };
+        let top = |cx: &mut gpui_kit::TestAppContext| {
+            cx.read(|cx| view.read(cx).scroll.vertical_offset())
+        };
+        show(cx, "a.rs");
+        let position = view.update(cx, |view, _| {
+            view.scroll.scroll_vertical_to(px(900.));
+            view.reading_position().unwrap()
+        });
+        assert!(top(cx) > px(0.));
+
+        // Another file shown first drops the position instead of moving it.
+        view.update(cx, |view, _| {
+            view.restore_reading_position(position.clone())
+        });
+        show(cx, "b.rs");
+        assert_eq!(top(cx), px(0.));
+        show(cx, "a.rs");
+        assert_eq!(top(cx), px(0.));
+
+        view.update(cx, |view, _| {
+            view.restore_reading_position(position.clone())
+        });
+        show(cx, "a.rs");
+        assert_eq!(top(cx), position.top);
     }
 }

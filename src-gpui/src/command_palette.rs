@@ -2,6 +2,7 @@
 //! different repository or file. Only visible rows are rendered.
 use crate::{
     file_browser::FileView,
+    history::fold,
     preferences::Pane,
     settings::SettingsSection,
     theme::{Palette, RADIUS_LG, RADIUS_SM, icon, scrollbar_theme},
@@ -16,7 +17,6 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use icu_normalizer::{DecomposingNormalizer, properties::CanonicalCombiningClassMapBorrowed};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -24,6 +24,7 @@ pub enum Command {
     NewTab,
     CloseTab(u64),
     ActivateTab(u64),
+    CycleTab(isize),
     OpenRecent(String),
     RemoveRecent(String),
     BrowseRepositories,
@@ -96,12 +97,9 @@ impl CommandEntry {
         self.search_terms.push_str(&fold(&self.detail));
         self
     }
-    pub fn shortcut(mut self, key: &str) -> Self {
-        self.shortcut = Some(if key == "Échap" {
-            key.into()
-        } else {
-            shortcut_label(key)
-        });
+    /// Label from `format::shortcut_label`, or a named key such as « Échap ».
+    pub fn shortcut(mut self, label: impl Into<String>) -> Self {
+        self.shortcut = Some(label.into());
         self
     }
     pub fn unavailable(mut self, reason: Option<&str>) -> Self {
@@ -138,23 +136,6 @@ impl CommandEntry {
     /// Compare with a fresh catalogue immediately before executing an event.
     pub fn is_current(&self, current: &[Self]) -> bool {
         self.disabled.is_none() && current.iter().any(|entry| entry == self)
-    }
-}
-
-fn fold(text: &str) -> String {
-    let combining = CanonicalCombiningClassMapBorrowed::new();
-    DecomposingNormalizer::new_nfd()
-        .normalize_iter(text.chars())
-        .filter(|character| combining.get_u8(*character) == 0)
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-pub fn shortcut_label(key: &str) -> String {
-    if cfg!(target_os = "macos") {
-        format!("⌘{key}")
-    } else {
-        format!("Ctrl+{key}")
     }
 }
 
@@ -346,7 +327,7 @@ impl CommandPalette {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(10. + offset))
+                            .text_size(px(11. + offset))
                             .text_color(rgb(p.muted))
                             .child(if description.is_empty() {
                                 entry.category.to_owned()
@@ -355,17 +336,12 @@ impl CommandPalette {
                             }),
                     ),
             )
-            .children(entry.shortcut.clone().map(|shortcut| {
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(rgb(p.muted))
-                    .border_1()
-                    .border_color(rgb(p.border))
-                    .rounded(RADIUS_SM)
-                    .px(px(5.))
-                    .child(shortcut)
-            }))
+            .children(
+                entry
+                    .shortcut
+                    .clone()
+                    .map(|shortcut| key_hint(shortcut, p, offset)),
+            )
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.results.selected = index;
                 if enabled {
@@ -485,12 +461,7 @@ impl Render for CommandPalette {
                                     .min_w_0()
                                     .text_size(px(14. + offset)),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(p.muted))
-                                    .child("Échap"),
-                            ),
+                            .child(key_hint("Échap", p, offset)),
                     )
                     .child(
                         div()
@@ -540,16 +511,41 @@ impl Render for CommandPalette {
                     )
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(16.))
                             .px(px(16.))
                             .py(px(8.))
                             .border_t_1()
                             .border_color(rgb(p.border))
-                            .text_size(px(10. + offset))
+                            .text_size(px(11. + offset))
                             .text_color(rgb(p.muted))
-                            .child("↑ ↓ Naviguer     Entrée Exécuter"),
+                            .children([("↑↓", "Naviguer"), ("Entrée", "Exécuter")].map(
+                                |(key, action)| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .child(key_hint(key, p, offset))
+                                        .child(action)
+                                },
+                            )),
                     ),
             )
     }
+}
+
+/// Keyboard key or shortcut, as built by `format::shortcut_label`.
+pub fn key_hint(label: impl Into<SharedString>, p: Palette, offset: f32) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(5.))
+        .rounded(RADIUS_SM)
+        .border_1()
+        .border_color(rgb(p.border))
+        .text_size(px(11. + offset))
+        .text_color(rgb(p.muted))
+        .child(label.into())
 }
 
 #[cfg(test)]

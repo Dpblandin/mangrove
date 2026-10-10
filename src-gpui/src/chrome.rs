@@ -1,11 +1,15 @@
 //! Application chrome. The parent owns repositories, tasks and tab workspaces.
 use crate::{
+    command_palette::key_hint,
+    format::{display_path, shortcut_label},
     integrations::{IntegrationsEvent, IntegrationsView},
     preferences::{Pane, Preferences, RecentRepository, profile_store},
-    recent_repositories::{RecentMetadata, RecentNamesRequest},
+    recent_repositories::{RecentMetadata, RecentNamesRequest, favorite_name, is_remote_favorite},
     settings::{SettingsEvent, SettingsView},
-    theme::{Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
+    tabs::{HOME, wrapped_index},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
 };
+use accesskit::{Orientation, Role};
 use gpui_kit::{
     assets::IconName,
     base::Button as NativeButton,
@@ -20,7 +24,34 @@ use gpui_kit::{
     *,
 };
 use mangrove_remote::{Profile, ProfileStore, Profiles};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+
+/// A workspace message: one summary line and its optional raw detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub summary: String,
+    pub detail: Option<String>,
+}
+
+impl Notice {
+    /// Multi-line messages keep their first line as summary.
+    pub fn plain(message: &str) -> Self {
+        let message = message.trim();
+        let summary = message
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(message);
+        Self {
+            summary: summary.to_owned(),
+            detail: (summary != message).then(|| message.to_owned()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChromeTab {
@@ -37,6 +68,7 @@ pub enum ChromeEvent {
     CloseTab(u64),
     NewTab,
     BrowseRepositories,
+    CloneRemote(String),
     CloseRepositoryBrowser,
     ManageIntegrations,
     ShowSettings,
@@ -85,7 +117,8 @@ pub struct Chrome {
     busy_task: Option<Task<()>>,
     choosing: bool,
     fetching: bool,
-    error: Option<String>,
+    error: Option<Notice>,
+    error_expanded: bool,
     recent_filter: Entity<InputState>,
     welcome_scroll: ScrollHandle,
     repository_browser: bool,
@@ -178,11 +211,15 @@ impl Chrome {
             busy_task: None,
             choosing: false,
             fetching: false,
-            error: profile_error,
+            error: profile_error.as_deref().map(Notice::plain),
+            error_expanded: false,
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
             repository_browser: false,
-            separator_focus: [cx.focus_handle(), cx.focus_handle()],
+            separator_focus: [
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+            ],
             resize: None,
             _subscriptions: subscriptions,
         }
@@ -196,7 +233,7 @@ impl Chrome {
         for tab in &tabs {
             self.tab_focus
                 .entry(tab.id)
-                .or_insert_with(|| cx.focus_handle());
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
         }
         self.tabs = tabs;
         self.active_tab = active;
@@ -207,7 +244,7 @@ impl Chrome {
         name: Option<String>,
         has_remotes: bool,
         busy: bool,
-        error: Option<String>,
+        error: Option<Notice>,
         cx: &mut Context<Self>,
     ) {
         if self.name == name
@@ -233,6 +270,9 @@ impl Chrome {
                     });
                 }));
             }
+        }
+        if self.error != error {
+            self.error_expanded = false;
         }
         self.name = name;
         self.has_remotes = has_remotes;
@@ -377,11 +417,8 @@ impl Chrome {
                 return;
             }
             IntegrationsEvent::ProfileSelected(id) => {
-                if profiles.active_profile_id == *id {
-                    return;
-                }
-                self.save_preferences(cx);
-                profiles.active_profile_id = id.clone();
+                self.request_profile_switch(id, window, cx);
+                return;
             }
             IntegrationsEvent::ProfileCreated(name) => {
                 let mut index = 1;
@@ -394,6 +431,30 @@ impl Chrome {
                 }
                 let profile = Profile::new(format!("profile-{index}"), name.clone());
                 profiles.profiles.push(profile);
+            }
+            IntegrationsEvent::ProfileRenamed { profile_id, name } => {
+                if profiles.rename(profile_id, name).is_err() {
+                    self.profile_save_failed(
+                        event,
+                        crate::integrations::profile_name_error(name)
+                            .unwrap_or_else(|| "Ce profil n’existe plus.".into()),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+            }
+            IntegrationsEvent::ProfileDeleted(id) => {
+                if profiles.remove(id).is_err() {
+                    self.profile_save_failed(
+                        event,
+                        "Le profil actif et le dernier profil ne peuvent pas être supprimés."
+                            .into(),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
             }
             IntegrationsEvent::AccountAdded {
                 profile_id,
@@ -441,6 +502,68 @@ impl Chrome {
                 }
             }
         }
+        self.commit_profiles(event, profiles, window, cx);
+    }
+    /// Switching profiles closes the repository tabs, so ask first.
+    fn request_profile_switch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.tabs.iter().filter(|tab| tab.path.is_some()).count();
+        let Some(profile) = self
+            .profiles
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+        else {
+            return;
+        };
+        if open == 0 || self.profiles.active_profile_id == id {
+            return self.select_profile(id, window, cx);
+        }
+        let detail = if open == 1 {
+            "L’onglet de dépôt ouvert sera fermé.".to_string()
+        } else {
+            format!("Les {open} onglets de dépôts ouverts seront fermés.")
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Passer au profil « {} » ?", profile.name),
+            Some(&detail),
+            &[
+                PromptButton::ok("Changer de profil"),
+                PromptButton::cancel("Annuler"),
+            ],
+            cx,
+        );
+        let id = id.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |chrome, cx| chrome.select_profile(&id, window, cx))
+                });
+            }
+        })
+        .detach();
+    }
+    fn select_profile(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.profiles.active_profile_id == id {
+            return;
+        }
+        self.save_preferences(cx);
+        let mut profiles = self.profiles.clone();
+        profiles.active_profile_id = id.to_string();
+        self.commit_profiles(
+            &IntegrationsEvent::ProfileSelected(id.to_string()),
+            profiles,
+            window,
+            cx,
+        );
+    }
+    fn commit_profiles(
+        &mut self,
+        event: &IntegrationsEvent,
+        profiles: Profiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(store) = &self.profile_store else {
             self.profile_save_failed(event, "Les profils ne peuvent pas être enregistrés. Vérifiez leur fichier de configuration.".into(), window, cx);
             cx.notify();
@@ -450,6 +573,10 @@ impl Chrome {
             self.profile_save_failed(event, error.to_string(), window, cx);
             cx.notify();
             return;
+        }
+        if let IntegrationsEvent::ProfileDeleted(id) = event {
+            // A later profile may reuse this identifier.
+            let _ = Preferences::remove_for_profile(id);
         }
         let changed_profile = profiles.active_profile_id != self.profiles.active_profile_id;
         self.profiles = profiles;
@@ -482,6 +609,13 @@ impl Chrome {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let message = if matches!(event, IntegrationsEvent::ProfileDeleted(_)) {
+            format!(
+                "Les identifiants du profil ont été retirés du coffre, mais le profil n’a pas été supprimé : {message}"
+            )
+        } else {
+            message
+        };
         self.integrations.update(cx, |view, cx| {
             if let IntegrationsEvent::AccountAdded {
                 profile_id,
@@ -497,6 +631,7 @@ impl Chrome {
             view.set_error(message, cx);
         });
     }
+    /// Arrows move between tabs without reloading them; Enter or Space activates.
     fn tab_key(
         &mut self,
         id: u64,
@@ -512,17 +647,15 @@ impl Chrome {
             return;
         };
         let target = match key.key.as_str() {
-            "left" => (index + self.tabs.len() - 1) % self.tabs.len(),
-            "right" => (index + 1) % self.tabs.len(),
+            "left" => wrapped_index(index, -1, self.tabs.len()),
+            "right" => wrapped_index(index, 1, self.tabs.len()),
             "home" => 0,
             "end" => self.tabs.len() - 1,
             _ => return,
         };
-        let id = self.tabs[target].id;
-        if let Some(focus) = self.tab_focus.get(&id) {
+        if let Some(focus) = self.tab_focus.get(&self.tabs[target].id) {
             window.focus(focus, cx);
         }
-        cx.emit(ChromeEvent::ActivateTab(id));
         cx.stop_propagation();
     }
     pub fn render_tabs(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -541,12 +674,15 @@ impl Chrome {
             .child(
                 div()
                     .id("tab-strip")
+                    .role(Role::TabList)
+                    .aria_label("Onglets")
                     .flex()
                     .min_w_0()
                     .overflow_x_scroll()
-                    .children(self.tabs.iter().map(|tab| {
+                    .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                         let id = tab.id;
                         let active = Some(id) == self.active_tab;
+                        let close = format!("Fermer l’onglet {}", tab.name);
                         div()
                             .id(("repository-tab", id))
                             .flex()
@@ -582,6 +718,11 @@ impl Chrome {
                                 div()
                                     .id(("tab-select", id))
                                     .track_focus(&self.tab_focus[&id])
+                                    .role(Role::Tab)
+                                    .aria_label(tab.name.clone())
+                                    .aria_selected(active)
+                                    .aria_position_in_set(index + 1)
+                                    .aria_size_of_set(self.tabs.len())
                                     .flex()
                                     .flex_1()
                                     .min_w_0()
@@ -593,11 +734,14 @@ impl Chrome {
                                     .text_size(px(12. + offset))
                                     .font_weight(FontWeight::MEDIUM)
                                     .cursor_pointer()
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
                                     .child(icon(
                                         if tab.path.is_some() {
                                             IconName::GitBranch
                                         } else {
-                                            IconName::FolderOpen
+                                            IconName::House
                                         },
                                         14.,
                                         if active { p.text } else { p.muted },
@@ -617,9 +761,16 @@ impl Chrome {
                                     .h(px(26.))
                                     .mr(px(5.))
                                     .rounded(RADIUS_SM)
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
                                     .icon(icon(IconName::X, 13., p.muted))
-                                    .accessibility_label(format!("Fermer {}", tab.name))
-                                    .tooltip(format!("Fermer {}", tab.name))
+                                    .accessibility_label(close.clone())
+                                    .tooltip(if active {
+                                        format!("{close} · {}", shortcut_label("W"))
+                                    } else {
+                                        close
+                                    })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.emit(ChromeEvent::CloseTab(id));
@@ -635,9 +786,10 @@ impl Chrome {
                     .ml(px(5.))
                     .mt(px(4.))
                     .rounded(RADIUS_SM)
+                    .focus_visible(move |style| style.border_1().border_color(rgb(p.accent)))
                     .icon(icon(IconName::Plus, 17., p.muted))
                     .accessibility_label("Nouvel onglet")
-                    .tooltip("Nouvel onglet")
+                    .tooltip(format!("Nouvel onglet · {}", shortcut_label("T")))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::NewTab))),
             )
             .into_any_element()
@@ -658,7 +810,7 @@ impl Chrome {
                     })
                     .flatten()
             })
-            .unwrap_or_else(|| "Bienvenue".into());
+            .unwrap_or_else(|| HOME.into());
         div()
             .h(px(59.))
             .flex_none()
@@ -724,7 +876,7 @@ impl Chrome {
                             .h(px(28.))
                             .icon(icon(IconName::Settings, 17., p.muted))
                             .accessibility_label("Paramètres")
-                            .tooltip("Paramètres · ⌘ ,")
+                            .tooltip(format!("Paramètres · {}", shortcut_label(",")))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.can_show_settings(cx) {
                                     cx.emit(ChromeEvent::ShowSettings)
@@ -739,7 +891,7 @@ impl Chrome {
                             .icon(icon(IconName::FolderOpen, 17., p.muted))
                             .disabled(self.busy || self.choosing)
                             .accessibility_label("Ouvrir un dépôt")
-                            .tooltip("Ouvrir un dépôt · ⌘ O")
+                            .tooltip(format!("Ouvrir un dépôt · {}", shortcut_label("O")))
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository)),
                             ),
@@ -759,7 +911,7 @@ impl Chrome {
                     .px(px(22.))
                     .pt(px(16.))
                     .pb(px(12.))
-                    .text_size(px(9. + offset))
+                    .text_size(px(11. + offset))
                     .child("ESPACE DE TRAVAIL"),
             )
             .child(
@@ -804,9 +956,9 @@ impl Chrome {
             }))
             .border_t_1()
             .border_color(rgb(p.border))
-            .text_size(px(9. + offset))
+            .text_size(px(11. + offset))
             .text_color(rgb(p.muted))
-            .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
+            .child(version_label())
             .into_any_element()
     }
     pub fn repository_browser_open(&self) -> bool {
@@ -818,6 +970,27 @@ impl Chrome {
         self.integrations
             .update(cx, |view, cx| view.open_repositories(window, cx));
         cx.notify();
+    }
+
+    /// Opens the clone screen on a direct clone of `url`.
+    pub fn clone_remote(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_repository_browser(window, cx);
+        self.integrations
+            .update(cx, |view, cx| view.prefill_clone_url(url, window, cx));
+    }
+
+    /// Asks before leaving the clone screen while a clone runs. Returns true
+    /// when `leave` waits for that answer; it runs once the user confirms.
+    pub fn confirm_leave_repository_browser(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        leave: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) -> bool {
+        self.repository_browser
+            && self
+                .integrations
+                .update(cx, |view, cx| view.confirm_cancel_clone(window, cx, leave))
     }
 
     pub fn close_repository_browser(&mut self, cx: &mut Context<Self>) {
@@ -866,7 +1039,7 @@ impl Chrome {
                                 div()
                                     .text_size(px(16. + offset))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Dépôts distants"),
+                                    .child("Cloner un dépôt"),
                             ),
                     )
                     .child(
@@ -901,7 +1074,7 @@ impl Chrome {
                                     .focus_visible(move |style| {
                                         style.border_1().border_color(rgb(p.accent))
                                     })
-                                    .accessibility_label("Fermer les dépôts distants")
+                                    .accessibility_label("Fermer l’écran de clonage")
                                     .tooltip(|window, cx| {
                                         Tooltip::new("Fermer (Échap)").build(window, cx)
                                     })
@@ -922,31 +1095,31 @@ impl Chrome {
             .into_any_element()
     }
 
-    fn render_recent_repository(
-        &self,
-        entry: &RecentRepository,
-        label: &str,
-        worktree: bool,
-        removable: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_repository_row(&self, row: RepositoryRow, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.preferences.palette();
         let offset = self.preferences.font_size_offset;
-        let path = entry.path.clone();
-        let remove = path.clone();
-        let tooltip = format!("{}\n{}", entry.name, entry.path);
+        let RepositoryRow {
+            id,
+            icon: row_icon,
+            label,
+            detail,
+            tooltip,
+            open,
+            open_label,
+            nested,
+        } = row;
         div()
-            .id(SharedString::from(format!("recent:{path}")))
+            .id(SharedString::from(id.clone()))
             .flex()
             .items_center()
             .rounded(RADIUS_MD)
             .border_1()
             .border_color(rgb(p.border))
-            .bg(rgb(if worktree { p.panel } else { p.surface }))
+            .bg(rgb(if nested { p.panel } else { p.surface }))
             .overflow_hidden()
             .hover(move |view| view.bg(rgb(mix(p.text, p.surface, 0.06))))
             .child(
-                NativeButton::new(SharedString::from(format!("recent-open:{path}")))
+                NativeButton::new(SharedString::from(format!("{id}:open")))
                     .flex_1()
                     .min_w_0()
                     .flex()
@@ -957,74 +1130,133 @@ impl Chrome {
                     .font_weight(FontWeight::NORMAL)
                     .text_left()
                     .cursor_pointer()
-                    .accessibility_label(format!("Ouvrir {}", entry.name))
+                    .accessibility_label(open_label)
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .focus_visible(move |style| style.bg(rgb(mix(p.text, p.surface, 0.06))))
                     .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
                     .disabled(self.busy)
-                    .child(icon(
-                        if worktree {
-                            IconName::GitBranch
-                        } else {
-                            IconName::FolderGit2
-                        },
-                        16.,
-                        p.accent,
-                    ))
+                    .child(icon(row_icon, 16., p.accent))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11. + offset))
+                            .text_size(px(12. + offset))
                             .child(
                                 div()
                                     .truncate()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(p.accent))
-                                    .child(label.to_owned()),
+                                    .child(label),
                             )
                             .child(
                                 div()
-                                    .mt(px(4.))
+                                    .mt(px(2.))
                                     .w_full()
                                     .truncate()
-                                    .text_size(px(9. + offset))
+                                    .text_size(px(11. + offset))
                                     .text_color(rgb(p.muted))
-                                    .child(path.clone()),
+                                    .child(detail),
                             ),
                     )
                     .child(icon(IconName::ChevronRight, 14., p.accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.busy {
-                            cx.emit(ChromeEvent::OpenRepository(path.clone()))
+                            cx.emit(open.clone())
                         }
                     })),
             )
-            .when(removable, |view| {
-                view.child(
-                    NativeButton::new(SharedString::from(format!("recent-remove:{remove}")))
-                        .w(px(28.))
-                        .h(px(28.))
-                        .mr(px(6.))
-                        .rounded(RADIUS_SM)
-                        .flex_shrink_0()
-                        .text_color(rgb(p.muted))
-                        .cursor_pointer()
-                        .hover(move |style| style.text_color(rgb(p.danger)))
-                        .focus_visible(move |style| style.border_1().border_color(rgb(p.accent)))
-                        .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                        .child(gpui_kit::component::Icon::new(IconName::X).with_size(px(14.)))
-                        .tooltip(|window, cx| {
-                            Tooltip::new("Retirer des dépôts récents").build(window, cx)
-                        })
-                        .accessibility_label(format!("Retirer {} des dépôts récents", entry.name))
-                        .disabled(self.busy)
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.remove_recent(&remove, cx)),
-                        ),
-                )
-            })
-            .into_any_element()
+    }
+
+    fn render_recent_repository(
+        &self,
+        entry: &RecentRepository,
+        label: &str,
+        worktree: bool,
+        removable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.preferences.palette();
+        let remove = entry.path.clone();
+        self.render_repository_row(
+            RepositoryRow {
+                id: format!("recent:{}", entry.path),
+                icon: if worktree {
+                    IconName::GitBranch
+                } else {
+                    IconName::FolderGit2
+                },
+                label: label.to_owned(),
+                detail: display_path(&entry.path),
+                tooltip: format!("{}\n{}", entry.name, entry.path),
+                open: ChromeEvent::OpenRepository(entry.path.clone()),
+                open_label: format!("Ouvrir {}", entry.name),
+                nested: worktree,
+            },
+            cx,
+        )
+        .when(removable, |view| {
+            view.child(
+                NativeButton::new(SharedString::from(format!("recent-remove:{remove}")))
+                    .w(px(28.))
+                    .h(px(28.))
+                    .mr(px(6.))
+                    .rounded(RADIUS_SM)
+                    .flex_shrink_0()
+                    .text_color(rgb(p.muted))
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(rgb(p.danger)))
+                    .focus_visible(move |style| style.border_1().border_color(rgb(p.accent)))
+                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                    .child(gpui_kit::component::Icon::new(IconName::X).with_size(px(14.)))
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Retirer des dépôts récents").build(window, cx)
+                    })
+                    .accessibility_label(format!("Retirer {} des dépôts récents", entry.name))
+                    .disabled(self.busy)
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_recent(&remove, cx))),
+            )
+        })
+        .into_any_element()
+    }
+
+    /// Profile favorites are read-only here; remote ones lead to the clone screen.
+    fn render_favorite(&self, favorite: &str, cx: &mut Context<Self>) -> AnyElement {
+        let name = favorite_name(favorite);
+        let remote = is_remote_favorite(favorite);
+        self.render_repository_row(
+            RepositoryRow {
+                id: format!("favorite:{favorite}"),
+                icon: if remote {
+                    IconName::Globe
+                } else {
+                    IconName::FolderGit2
+                },
+                detail: if remote {
+                    favorite.to_owned()
+                } else {
+                    display_path(favorite)
+                },
+                tooltip: if remote {
+                    format!("{favorite}\nCloner ce dépôt")
+                } else {
+                    favorite.to_owned()
+                },
+                open: if remote {
+                    ChromeEvent::CloneRemote(favorite.to_owned())
+                } else {
+                    ChromeEvent::OpenRepository(favorite.to_owned())
+                },
+                open_label: if remote {
+                    format!("Cloner {name}")
+                } else {
+                    format!("Ouvrir {name}")
+                },
+                label: name,
+                nested: false,
+            },
+            cx,
+        )
+        .into_any_element()
     }
 
     pub fn render_welcome(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1035,6 +1267,26 @@ impl Chrome {
         let recent = self
             .recent_metadata
             .groups(&self.preferences.recent, &query);
+        let favorites = self
+            .profiles
+            .active()
+            .map(|profile| profile.favorites.as_slice())
+            .unwrap_or_default();
+        let section = |title: &'static str| {
+            div()
+                .w_full()
+                .max_w(px(WELCOME_WIDTH))
+                .mt(px(28.))
+                .text_left()
+                .child(
+                    div()
+                        .mb(px(8.))
+                        .text_size(px(12. + offset))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(p.muted))
+                        .child(title),
+                )
+        };
         let content = div()
             .id("welcome-content")
             .w_full()
@@ -1044,26 +1296,29 @@ impl Chrome {
             .flex()
             .flex_col()
             .items_center()
-            .justify_start()
-            .pt(px(54.))
+            .pt(px(56.))
             .px(px(28.))
-            .pb(px(32.))
+            .pb(px(20.))
             .bg(rgb(p.bg))
-            .text_left()
             .child(
                 div()
                     .w_full()
-                    .max_w(px(660.))
-                    .mb(px(24.))
+                    .max_w(px(WELCOME_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .text_center()
+                    .child(logo(56.))
                     .child(
                         div()
+                            .mt(px(16.))
                             .text_size(px(24. + offset))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Dépôts"),
+                            .child(HOME),
                     )
                     .child(
                         div()
-                            .mt(px(6.))
+                            .mt(px(4.))
                             .text_size(px(12. + offset))
                             .text_color(rgb(p.muted))
                             .child(format!(
@@ -1072,110 +1327,113 @@ impl Chrome {
                                     .active()
                                     .map_or("Personnel", |profile| profile.name.as_str())
                             )),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(660.))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(10.))
+                    )
                     .child(
-                        NativeButton::new("welcome-open")
-                            .px(px(17.))
-                            .py(px(12.))
-                            .border_1()
-                            .border_color(rgb(p.accent_border))
-                            .bg(rgb(p.accent))
-                            .text_color(rgb(p.on_accent))
-                            .rounded(RADIUS_MD)
-                            .text_size(px(12. + offset))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .line_height(relative(1.5))
-                            .gap(px(9.))
-                            .cursor_pointer()
-                            .accessibility_label("Ouvrir un dépôt local")
-                            .hover(move |style| style.bg(rgb(mix(p.accent, p.text, 0.85))))
-                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                            .child(icon(IconName::FolderOpen, 17., p.on_accent))
-                            .child("Ouvrir")
-                            .disabled(self.busy || self.choosing)
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository)),
+                        div()
+                            .mt(px(24.))
+                            .flex()
+                            .flex_wrap()
+                            .justify_center()
+                            .gap(px(10.))
+                            .child(
+                                NativeButton::new("welcome-open")
+                                    .px(px(17.))
+                                    .py(px(12.))
+                                    .border_1()
+                                    .border_color(rgb(p.accent_border))
+                                    .bg(rgb(p.accent))
+                                    .text_color(rgb(p.on_accent))
+                                    .rounded(RADIUS_MD)
+                                    .text_size(px(12. + offset))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .line_height(relative(1.5))
+                                    .gap(px(9.))
+                                    .cursor_pointer()
+                                    .accessibility_label("Ouvrir un dépôt local")
+                                    .hover(move |style| style.bg(rgb(mix(p.accent, p.text, 0.85))))
+                                    .focus_visible(move |style| style.border_color(rgb(p.text)))
+                                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                                    .child(icon(IconName::FolderOpen, 17., p.on_accent))
+                                    .child("Ouvrir")
+                                    .disabled(self.busy || self.choosing)
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ChromeEvent::PickRepository)
+                                    })),
+                            )
+                            .child(
+                                NativeButton::new("welcome-remotes")
+                                    .px(px(17.))
+                                    .py(px(12.))
+                                    .border_1()
+                                    .border_color(rgb(p.border))
+                                    .bg(rgb(p.panel))
+                                    .rounded(RADIUS_MD)
+                                    .text_size(px(12. + offset))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .gap(px(9.))
+                                    .cursor_pointer()
+                                    .accessibility_label("Cloner ou consulter un dépôt distant")
+                                    .hover(move |style| style.bg(rgb(p.hover)))
+                                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                                    .disabled(self.busy || self.choosing)
+                                    .child(icon(IconName::Globe, 17., p.muted))
+                                    .child("Cloner")
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(ChromeEvent::BrowseRepositories)
+                                    })),
                             ),
                     )
                     .child(
-                        NativeButton::new("welcome-remotes")
-                            .px(px(17.))
-                            .py(px(12.))
-                            .border_1()
-                            .border_color(rgb(p.border))
-                            .bg(rgb(p.panel))
-                            .rounded(RADIUS_MD)
-                            .text_size(px(12. + offset))
-                            .font_weight(FontWeight::MEDIUM)
-                            .gap(px(9.))
-                            .cursor_pointer()
-                            .accessibility_label("Cloner ou consulter un dépôt distant")
-                            .hover(move |style| style.bg(rgb(p.hover)))
-                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
-                            .disabled(self.busy || self.choosing)
-                            .child(icon(IconName::Globe, 17., p.muted))
-                            .child("Cloner")
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::BrowseRepositories)),
+                        div()
+                            .mt(px(16.))
+                            .flex()
+                            .flex_wrap()
+                            .justify_center()
+                            .items_center()
+                            .gap(px(16.))
+                            .text_size(px(11. + offset))
+                            .text_color(rgb(p.muted))
+                            .children(
+                                [
+                                    ("O", "Ouvrir un dépôt"),
+                                    ("T", "Nouvel onglet"),
+                                    ("P", "Commandes"),
+                                ]
+                                .map(|(key, label)| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .child(key_hint(shortcut_label(key), p, offset))
+                                        .child(label)
+                                }),
                             ),
                     ),
             )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(660.))
-                    .mt(px(15.))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .text_size(px(9. + offset))
-                    .text_color(rgb(p.muted))
-                    .child("Ouvrir un dépôt local")
-                    .child(kbd(
-                        if cfg!(target_os = "macos") {
-                            "⌘ O"
-                        } else {
-                            "Ctrl O"
-                        },
-                        p,
-                        offset,
-                    )),
-            )
-            .when_some(self.error.clone(), |view, error| {
+            .when_some(self.error.clone(), |view, notice| {
                 view.child(
                     div()
-                        .mt(px(15.))
-                        .max_w(px(450.))
-                        .text_size(px(11. + offset))
-                        .text_color(rgb(p.danger))
-                        .child(error),
+                        .w_full()
+                        .max_w(px(WELCOME_WIDTH))
+                        .mt(px(24.))
+                        .child(self.render_notice(&notice, cx)),
+                )
+            })
+            .when(!favorites.is_empty(), |view| {
+                view.child(
+                    section("Favoris").child(
+                        div().flex().flex_col().gap(px(8.)).children(
+                            favorites
+                                .iter()
+                                .map(|favorite| self.render_favorite(favorite, cx)),
+                        ),
+                    ),
                 )
             })
             .when(!self.preferences.recent.is_empty(), |view| {
                 view.child(
-                    div()
-                        .w(px(660.))
-                        .max_w_full()
-                        .mt(px(28.))
-                        .text_left()
-                        .child(
-                            div()
-                                .mb(px(8.))
-                                .text_size(px(12. + offset))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(p.muted))
-                                .child("Récemment ouverts"),
-                        )
+                    section("Récemment ouverts")
                         .child(
                             div()
                                 .id("recent-search")
@@ -1256,7 +1514,15 @@ impl Chrome {
                             )
                         }),
                 )
-            });
+            })
+            .child(
+                div()
+                    .mt_auto()
+                    .pt(px(32.))
+                    .text_size(px(11. + offset))
+                    .text_color(rgb(p.muted))
+                    .child(version_label()),
+            );
         div()
             .id("welcome")
             .relative()
@@ -1278,6 +1544,118 @@ impl Chrome {
             ))
             .into_any_element()
     }
+
+    /// One summary line, at most three when wrapped, with the raw detail on demand.
+    fn render_notice(&self, notice: &Notice, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.preferences.palette();
+        let offset = self.preferences.font_size_offset;
+        let line = (11. + offset) * 1.6;
+        let expanded = self.error_expanded;
+        div()
+            .id("workspace-error")
+            .role(Role::Alert)
+            .aria_label(notice.summary.clone())
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .text_left()
+            .text_size(px(11. + offset))
+            .line_height(px(line))
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(rgb(mix(p.danger, p.border, 0.45)))
+            .bg(rgb(mix(p.danger, p.bg, 0.10)))
+            .text_color(rgb(p.danger))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .h(px(line))
+                            .flex()
+                            .items_center()
+                            .child(icon(IconName::CircleAlert, 14., p.danger)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .line_clamp(3)
+                            .text_ellipsis()
+                            .child(notice.summary.clone()),
+                    )
+                    .child(
+                        Button::new("dismiss-workspace-error")
+                            .ghost()
+                            .w(px(24.))
+                            .h(px(24.))
+                            .focus_visible(move |style| {
+                                style.border_1().border_color(rgb(p.accent))
+                            })
+                            .icon(icon(IconName::X, 14., p.muted))
+                            .accessibility_label("Fermer le message")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::DismissError)),
+                            ),
+                    ),
+            )
+            .when_some(notice.detail.clone(), |view, detail| {
+                let copied = detail.clone();
+                view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .ml(px(18.))
+                        .child(
+                            notice_action(
+                                "workspace-error-toggle",
+                                if expanded {
+                                    "Masquer le détail"
+                                } else {
+                                    "Afficher le détail"
+                                },
+                                p,
+                                offset,
+                            )
+                            .aria_expanded(expanded)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.error_expanded = !this.error_expanded;
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            notice_action("workspace-error-copy", "Copier le détail", p, offset)
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                                }),
+                        ),
+                )
+                .when(expanded, |view| {
+                    view.child(
+                        div()
+                            .id("workspace-error-detail")
+                            .ml(px(24.))
+                            .max_h(px(160.))
+                            .overflow_y_scroll()
+                            .p(px(8.))
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .bg(rgb(p.bg))
+                            .font_family(MONO)
+                            .text_color(rgb(p.text))
+                            .child(detail),
+                    )
+                })
+            })
+    }
+
     /// Place in the relative workspace content, beside history and inspector.
     pub fn render_error(
         &mut self,
@@ -1288,28 +1666,14 @@ impl Chrome {
         if self.name.is_none() || self.busy {
             return None;
         }
-        let error = self.error.clone()?;
-        let p = self.preferences.palette();
+        let notice = self.error.clone()?;
         Some(
-            div()
-                .id("workspace-error")
+            self.render_notice(&notice, cx)
                 .absolute()
                 .bottom(px(43.))
                 .left(px(20.))
                 .right(px(details_width + 20.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(15.))
-                .text_size(px(11. + self.preferences.font_size_offset))
-                .line_height(px(18.))
-                .px(px(12.))
-                .py(px(8.))
-                .rounded(RADIUS_MD)
-                .border_1()
-                .border_color(rgb(mix(p.danger, p.border, 0.45)))
-                .bg(rgb(mix(p.danger, p.bg, 0.10)))
-                .text_color(rgb(p.danger))
+                .occlude()
                 .shadow(vec![BoxShadow {
                     color: rgba(0x00000055).into(),
                     offset: point(px(0.), px(6.)),
@@ -1317,16 +1681,6 @@ impl Chrome {
                     spread_radius: px(0.),
                     inset: false,
                 }])
-                .child(div().flex_1().min_w_0().child(error))
-                .child(
-                    Button::new("dismiss-workspace-error")
-                        .ghost()
-                        .w(px(28.))
-                        .h(px(28.))
-                        .icon(icon(IconName::X, 14., p.muted))
-                        .accessibility_label("Fermer le message")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::DismissError))),
-                )
                 .into_any_element(),
         )
     }
@@ -1357,6 +1711,15 @@ impl Chrome {
                 "right-divider"
             })
             .track_focus(&self.separator_focus[ix])
+            .role(Role::Splitter)
+            .aria_label(if pane == Pane::Left {
+                "Largeur du panneau des branches"
+            } else {
+                "Largeur du panneau des détails"
+            })
+            .aria_description("← et → redimensionnent, Entrée rétablit la largeur par défaut")
+            .aria_orientation(Orientation::Vertical)
+            .aria_numeric_value(f64::from(width))
             .w(px(6.))
             .flex_none()
             .h_full()
@@ -1364,6 +1727,12 @@ impl Chrome {
             .occlude()
             .cursor(CursorStyle::ResizeLeftRight)
             .bg(rgb(p.bg))
+            .focus_visible(move |style| {
+                style
+                    .bg(rgb(p.accent_soft))
+                    .border_x_1()
+                    .border_color(rgb(p.accent))
+            })
             .child(
                 div()
                     .absolute()
@@ -1378,12 +1747,7 @@ impl Chrome {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     window.focus(&this.separator_focus[ix], cx);
                     if event.click_count == 2 {
-                        this.preferences.reset_pane(pane);
-                        this.preferences_changed(cx);
-                        cx.emit(ChromeEvent::PaneResized(
-                            pane,
-                            if pane == Pane::Left { 226. } else { 390. },
-                        ));
+                        this.reset_pane(pane, cx);
                     } else {
                         this.resize = Some(Resize {
                             pane,
@@ -1418,11 +1782,18 @@ impl Chrome {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_resize(false, cx)),
             )
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            .on_action(cx.listener(|this, _: &crate::app::Escape, window, cx| {
+                if this.resize.is_none() {
+                    cx.propagate();
+                    return;
+                }
+                this.finish_resize(true, cx);
+                cx.stop_active_drag(window);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 let key = event.keystroke.key.as_str();
-                if key == "escape" && this.resize.is_some() {
-                    this.finish_resize(true, cx);
-                    cx.stop_active_drag(window);
+                if key == "enter" {
+                    this.reset_pane(pane, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1471,6 +1842,18 @@ impl Chrome {
             }))
             .into_any_element()
     }
+    fn reset_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        self.preferences.reset_pane(pane);
+        self.preferences_changed(cx);
+        cx.emit(ChromeEvent::PaneResized(
+            pane,
+            if pane == Pane::Left {
+                self.preferences.left_width
+            } else {
+                self.preferences.right_width
+            },
+        ));
+    }
     fn move_resize(&mut self, pane: Pane, x: Pixels, cx: &mut Context<Self>) {
         let Some(resize) = self.resize.as_ref().filter(|resize| resize.pane == pane) else {
             return;
@@ -1512,15 +1895,46 @@ impl Render for Chrome {
     }
 }
 
-fn kbd(label: &str, p: Palette, offset: f32) -> AnyElement {
-    div()
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(RADIUS_SM)
+const WELCOME_WIDTH: f32 = 640.;
+
+struct RepositoryRow {
+    id: String,
+    icon: IconName,
+    label: String,
+    detail: String,
+    tooltip: String,
+    open: ChromeEvent,
+    open_label: String,
+    nested: bool,
+}
+
+fn version_label() -> String {
+    format!("Version {}", env!("CARGO_PKG_VERSION"))
+}
+
+fn logo(size: f32) -> AnyElement {
+    static LOGO: OnceLock<Arc<Image>> = OnceLock::new();
+    let logo = LOGO.get_or_init(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../assets/icons/128x128@2x.png").to_vec(),
+        ))
+    });
+    img(logo.clone()).size(px(size)).into_any_element()
+}
+
+fn notice_action(id: &'static str, label: &'static str, p: Palette, offset: f32) -> NativeButton {
+    NativeButton::new(id)
+        .px(px(6.))
         .py(px(2.))
-        .px(px(5.))
-        .text_size(px(9. + offset))
-        .text_color(rgb(p.muted))
-        .child(label.to_string())
-        .into_any_element()
+        .rounded(RADIUS_SM)
+        .border_1()
+        .border_color(rgb(mix(p.danger, p.bg, 0.10)))
+        .text_size(px(11. + offset))
+        .text_color(rgb(p.accent))
+        .cursor_pointer()
+        .hover(move |style| style.bg(rgb(p.hover)))
+        .focus_visible(move |style| style.border_color(rgb(p.accent)))
+        .accessibility_label(label)
+        .child(label)
 }

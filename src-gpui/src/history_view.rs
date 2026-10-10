@@ -1,17 +1,18 @@
 use crate::{
-    command_palette::shortcut_label,
-    format::format_count,
+    format::{commit_date, count_label, format_count, shortcut_label},
     graph::{self, ROW_HEIGHT},
     history::{
-        HistoryCache, HistoryPage, HistoryReadSlots, PAGE_SIZE, PageRequests, PositionRead,
-        PositionRequests, ReferenceGroup, group_references,
+        HistoryCache, HistoryPage, HistoryReadSlots, HistoryRow, PAGE_SIZE, PageRequests,
+        PositionRead, PositionRequests, ReferenceBadge, ReferenceGroup, ReferenceRank, fold,
+        group_references, highlight_terms,
     },
     theme::{self, Palette, RADIUS_MD, RADIUS_SM},
 };
 use gpui_kit::{
     assets::IconName,
-    component::input::{Input, InputEvent, InputState},
+    component::input::{Escape as InputEscape, Input, InputEvent, InputState},
     component::scroll::Scrollbar,
+    component::tooltip::Tooltip,
     prelude::*,
     *,
 };
@@ -56,22 +57,29 @@ pub struct HistoryView {
     search: Entity<InputState>,
     _search_subscription: Subscription,
     filter: String,
+    /// Folded filter, matched against reference labels.
+    folded_filter: String,
     debounce_pending: bool,
     repository_generation: u64,
     navigation_generation: u64,
     requested_index: Option<usize>,
     requested_keyboard: bool,
     jump_pending: bool,
+    /// Commit that a jump has still to select, relaunched by a refresh.
+    jump_target: Option<String>,
     selected_sha: String,
     autoselect: bool,
     selected_index: usize,
     selection_needs_position: bool,
+    reveal_selection: bool,
+    /// Solo replaced the list, whose own traversal can still be published.
+    reveal_on_publish: bool,
     error: Option<String>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
     working_focus: FocusHandle,
     menu_focus: FocusHandle,
-    menu: Option<BranchMenu>,
+    menu: Option<CommitMenu>,
     palette: Palette,
     font_size: f32,
     width: f32,
@@ -100,41 +108,69 @@ impl WorkingSummary {
     }
 }
 
-struct BranchMenu {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuAction {
+    CopySha,
+    CopyMessage,
+    Solo(usize),
+}
+
+/// Commit actions, then one Solo action for each branch on the commit.
+struct CommitMenu {
+    sha: String,
+    short_sha: SharedString,
+    summary: String,
     references: Vec<Reference>,
     position: Point<Pixels>,
     selected: usize,
-    measure_index: usize,
+    width: Pixels,
     scroll: UniformListScrollHandle,
 }
 
-impl BranchMenu {
-    fn new(references: &[Reference], position: Point<Pixels>) -> Option<Self> {
-        let references: Vec<_> = references
-            .iter()
-            .filter(|reference| reference.kind == "local" || reference.kind == "remote")
-            .cloned()
-            .collect();
-        let measure_index = references
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, reference)| reference.label.chars().count())?
-            .0;
-        Some(Self {
-            references,
+impl CommitMenu {
+    const ACTIONS: usize = 2;
+
+    fn new(
+        commit: &CommitRow,
+        short_sha: SharedString,
+        references: &[Reference],
+        position: Point<Pixels>,
+    ) -> Self {
+        Self {
+            sha: commit.sha.clone(),
+            short_sha,
+            summary: commit.summary.clone(),
+            references: references
+                .iter()
+                .filter(|reference| reference.kind == "local" || reference.kind == "remote")
+                .cloned()
+                .collect(),
             position,
             selected: 0,
-            measure_index,
+            width: px(0.),
             scroll: UniformListScrollHandle::new(),
-        })
+        }
+    }
+
+    fn len(&self) -> usize {
+        Self::ACTIONS + self.references.len()
+    }
+
+    fn action(&self, index: usize) -> MenuAction {
+        match index {
+            0 => MenuAction::CopySha,
+            1 => MenuAction::CopyMessage,
+            index => MenuAction::Solo(index - Self::ACTIONS),
+        }
     }
 
     fn navigate_key(&mut self, key: &str) -> bool {
+        let len = self.len();
         self.selected = match key {
-            "down" => (self.selected + 1) % self.references.len(),
-            "up" => (self.selected + self.references.len() - 1) % self.references.len(),
+            "down" => (self.selected + 1) % len,
+            "up" => (self.selected + len - 1) % len,
             "home" => 0,
-            "end" => self.references.len() - 1,
+            "end" => len - 1,
             _ => return false,
         };
         self.scroll
@@ -147,8 +183,54 @@ impl BranchMenu {
     }
 
     fn viewport_height(&self, font_size: f32, window_height: Pixels) -> Pixels {
-        (Self::row_height(font_size) * self.references.len())
-            .min((window_height - px(28.)).max(px(0.)))
+        (Self::row_height(font_size) * self.len()).min((window_height - px(28.)).max(px(0.)))
+    }
+}
+
+/// Column widths for the measured list width; narrow lists keep the
+/// reference column and give up author, date and SHA first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Columns {
+    references: f32,
+    graph: f32,
+    author: Option<f32>,
+    date: Option<f32>,
+    sha: Option<f32>,
+    gap: f32,
+}
+
+impl Columns {
+    fn new(width: f32, font_size: f32) -> Self {
+        let text = 11. + font_size;
+        let narrow = width < 560.;
+        let wide = width >= 760.;
+        Self {
+            references: if width >= 1000. {
+                190.
+            } else if wide {
+                140.
+            } else if !narrow {
+                120.
+            } else {
+                112.
+            },
+            graph: if narrow {
+                72.
+            } else if wide {
+                116.
+            } else {
+                92.
+            },
+            author: wide.then_some(if width >= 1000. { 150. } else { 120. }),
+            date: (!narrow).then_some((text * 7.4).ceil()),
+            sha: (!narrow).then_some((text * 4.8).ceil()),
+            gap: if narrow { 8. } else { 10. },
+        }
+    }
+
+    /// Room for badges inside the reference column padding.
+    fn badge_width(&self) -> f32 {
+        self.references - 14.
     }
 }
 
@@ -199,20 +281,24 @@ impl HistoryView {
             search,
             _search_subscription: search_subscription,
             filter: String::new(),
+            folded_filter: String::new(),
             debounce_pending: false,
             repository_generation: 0,
             navigation_generation: 0,
             requested_index: None,
             requested_keyboard: false,
             jump_pending: false,
+            jump_target: None,
             selected_sha: String::new(),
             autoselect: true,
             selected_index: 0,
             selection_needs_position: false,
+            reveal_selection: false,
+            reveal_on_publish: false,
             error: None,
             scroll: UniformListScrollHandle::new(),
-            focus: cx.focus_handle(),
-            working_focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
+            working_focus: cx.focus_handle().tab_stop(true),
             menu_focus: cx.focus_handle(),
             menu: None,
             palette,
@@ -229,9 +315,47 @@ impl HistoryView {
         }
     }
 
-    #[cfg(feature = "app-benchmark")]
     pub fn selected_sha(&self) -> &str {
         &self.selected_sha
+    }
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+    /// A search without results keeps the commit selected but hides its row.
+    pub fn selection_outside_results(&self) -> bool {
+        self.filtered()
+            && !self.loading()
+            && self.total == 0
+            && !self.selected_sha.is_empty()
+            && !self.working.selected
+    }
+    /// Reselects a tab's commit within its search once its repository reopens.
+    pub fn restore_view(
+        &mut self,
+        sha: String,
+        query: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Like a search typed over a selection: the commit stays selected
+        // while its row is looked up, and an absent one, such as an amended
+        // commit, yields the first row.
+        self.cancel_navigation();
+        self.working.selected = false;
+        self.selected_sha = sha.clone();
+        cx.emit(HistoryEvent::Selected {
+            sha,
+            keyboard: false,
+        });
+        if normalized_query(&query) != normalized_query(&self.query) {
+            self.set_query(query, cx);
+            return;
+        }
+        self.query = query;
+        self.keep_selection();
+        self.request_page(0, cx);
+        self.refresh_position(cx);
+        self.changed(cx);
     }
     #[cfg(feature = "app-benchmark")]
     pub fn selected_index(&self) -> usize {
@@ -363,12 +487,10 @@ impl HistoryView {
             index_run: String::new(),
         };
         self.query.clear();
-        self.filter.clear();
+        self.set_filter(String::new());
         self.debounce_pending = false;
-        self.selected_sha.clear();
+        self.forget_selection();
         self.autoselect = true;
-        self.selected_index = 0;
-        self.selection_needs_position = false;
         self.error = None;
         self.menu = None;
         self.working = WorkingSummary::default();
@@ -396,6 +518,10 @@ impl HistoryView {
             .repository
             .as_ref()
             .is_some_and(|old| old.id == info.id);
+        let solo_changed = self
+            .repository
+            .as_ref()
+            .is_some_and(|old| old.path == info.path && old.solo_refs != info.solo_refs);
         self.menu = None;
         if same_session {
             self.repository = Some(info.clone());
@@ -415,7 +541,13 @@ impl HistoryView {
         if !same_path {
             self.clear(cx);
         }
-        self.references = group_references(&info.references, &info.solo_refs);
+        let pending_jump = self.jump_target.take();
+        self.references = group_references(
+            &info.references,
+            &info.solo_refs,
+            info.head.as_deref(),
+            &info.head_name,
+        );
         let solo: HashSet<_> = info.solo_refs.iter().map(String::as_str).collect();
         let solo_labels: Vec<_> = info
             .references
@@ -435,7 +567,7 @@ impl HistoryView {
         self.index_task = None;
         self.query_task = None;
         self.debounce_pending = false;
-        self.filter = normalized_query(&self.query);
+        self.set_filter(normalized_query(&self.query));
         self.repository = Some(info.clone());
         self.progress = info.index.clone();
         self.retired_index_run = None;
@@ -445,17 +577,25 @@ impl HistoryView {
         self.search_indexed = 0;
         self.search_refreshed = None;
         self.selection_needs_position = !self.selected_sha.is_empty();
+        // Solo replaces the list: show the kept commit, or the new first one.
+        self.reveal_selection = self.selection_needs_position && solo_changed;
+        self.reveal_on_publish = solo_changed;
         self.error = info.index.error.clone();
         self.max_lanes = 1;
         self.lane_offset = 0;
-        if !same_path
-            && info.solo_refs.is_empty()
-            && let Some(head) = info.head.clone()
-        {
+        let jump = if same_path {
+            // A refresh, such as an auto-fetch, relaunches a jump still waiting
+            // for its commit. A new Solo list selects its first row instead.
+            self.autoselect |= solo_changed && pending_jump.is_some();
+            pending_jump.filter(|_| !solo_changed)
+        } else {
             // Worktrees share the global history. Its first row can belong to
             // another branch, so open at this checkout's HEAD, even while its
             // position is still being indexed or lies beyond page zero.
-            self.jump_to(head, window, cx);
+            info.head.clone().filter(|_| info.solo_refs.is_empty())
+        };
+        if let Some(sha) = jump {
+            self.jump_to(sha, window, cx);
         } else {
             self.request_page(0, cx);
             // Completed indexes do not poll; rebase preserved keyboard selection now.
@@ -501,6 +641,11 @@ impl HistoryView {
         self.requested_keyboard = false;
         self.pages.set_requested_page(None);
         self.jump_pending = false;
+        self.jump_target = None;
+        // Navigation also ends the lookup of a kept selection, whose late
+        // result would bring the view back to that commit.
+        self.selection_needs_position = false;
+        self.reveal_selection = false;
         self.navigation_task = None;
         self.position_requests.clear();
     }
@@ -515,9 +660,7 @@ impl HistoryView {
         self.query_task = None;
         self.cancel_navigation();
         self.cancel_pages();
-        self.selected_sha.clear();
-        self.autoselect = true;
-        self.selected_index = 0;
+        self.keep_selection();
         self.total = 0;
         self.error = None;
         self.menu = None;
@@ -533,15 +676,31 @@ impl HistoryView {
                     return;
                 }
                 view.debounce_pending = false;
-                view.filter = next;
+                view.set_filter(next);
                 if view.filter.is_empty() {
                     view.total = view.progress.indexed;
                 }
                 view.request_page(0, cx);
+                view.refresh_position(cx);
                 view.changed(cx);
             });
         }));
         self.changed(cx);
+    }
+
+    /// The inspector keeps its commit while its row in a new list is looked
+    /// up; an absent commit, or none, falls back to the first row.
+    fn keep_selection(&mut self) {
+        let keep = !self.selected_sha.is_empty() && !self.working.selected;
+        self.autoselect = !keep;
+        self.selection_needs_position = keep;
+        self.reveal_selection = keep;
+        self.selected_index = 0;
+    }
+
+    fn set_filter(&mut self, filter: String) {
+        self.folded_filter = fold(&filter);
+        self.filter = filter;
     }
 
     fn merge_progress(&mut self, incoming: &IndexProgress) -> bool {
@@ -579,6 +738,9 @@ impl HistoryView {
             self.search_indexed = 0;
             self.search_refreshed = None;
             self.selection_needs_position = !self.selected_sha.is_empty();
+            // A Solo traversal moves the kept commit once more.
+            let reveal = std::mem::take(&mut self.reveal_on_publish);
+            self.reveal_selection |= reveal && self.selection_needs_position;
             self.max_lanes = 1;
             if !self.filtered() {
                 self.total = indexed;
@@ -697,7 +859,7 @@ impl HistoryView {
         self.max_lanes = self.max_lanes.max(page.max_lanes);
         changed |= self.pages.insert(page, self.total);
         if self.autoselect
-            && self.selected_sha.is_empty()
+            && !self.selection_needs_position
             && self.requested_index.is_none()
             && !self.jump_pending
             && let Some(sha) = first
@@ -710,14 +872,16 @@ impl HistoryView {
         {
             self.select(row.sha.clone(), index, self.requested_keyboard, cx);
         }
-        if self.selection_needs_position
-            && self.filtered()
-            && let Some(position) = self.pages.find_sha(&self.selected_sha)
-            && self.pages.current(position / PAGE_SIZE)
-        {
-            self.selected_index = position;
-            self.selection_needs_position = false;
-            changed = true;
+        if self.selection_needs_position && self.filtered() {
+            if let Some(position) = self.pages.find_sha(&self.selected_sha)
+                && self.pages.current(position / PAGE_SIZE)
+            {
+                self.resolve_selection(Some(position), cx);
+                changed = true;
+            } else {
+                // Page zero holds the first result for an absent commit.
+                self.refresh_position(cx);
+            }
         }
         if changed {
             self.changed(cx);
@@ -781,7 +945,7 @@ impl HistoryView {
                         let started = Instant::now();
                         let result = engine
                             .list_commits(&id, page * PAGE_SIZE, PAGE_SIZE, &filter)
-                            .map(HistoryPage::new);
+                            .map(|page| HistoryPage::new(page, &highlight_terms(&filter)));
                         #[cfg(feature = "app-benchmark")]
                         crate::perf::record_operation("history_page", started.elapsed());
                         (lease, result)
@@ -844,22 +1008,28 @@ impl HistoryView {
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.cancel_navigation();
-        self.selected_sha.clear();
+        self.forget_selection();
         self.autoselect = false;
-        self.selected_index = 0;
         cx.notify();
     }
 
     pub fn restore_commit_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_navigation();
         self.working.selected = false;
-        self.selected_sha.clear();
-        self.selected_index = 0;
+        self.forget_selection();
         // A refresh can deliver the clean status before page zero. Keep the
         // first-commit selection armed until that page becomes available.
         self.autoselect = true;
         self.select_index(0, window, cx);
         cx.notify();
+    }
+
+    /// Drop the commit selection and any lookup of its position.
+    fn forget_selection(&mut self) {
+        self.selected_sha.clear();
+        self.selected_index = 0;
+        self.selection_needs_position = false;
+        self.reveal_selection = false;
     }
 
     fn select(&mut self, sha: String, position: usize, keyboard: bool, cx: &mut Context<Self>) {
@@ -871,7 +1041,6 @@ impl HistoryView {
         self.autoselect = false;
         self.selected_sha = sha.clone();
         self.selected_index = position;
-        self.selection_needs_position = false;
         self.error = None;
         cx.emit(HistoryEvent::Selected { sha, keyboard });
         cx.notify();
@@ -942,23 +1111,68 @@ impl HistoryView {
     }
 
     fn refresh_position(&mut self, cx: &mut Context<Self>) {
-        if self.filtered() || self.selected_sha.is_empty() || !self.selection_needs_position {
+        if self.debounce_pending
+            || self.jump_pending
+            || self.selected_sha.is_empty()
+            || !self.selection_needs_position
+        {
             return;
+        }
+        if self.filtered() {
+            // Results are searched once page zero has cached their snapshot.
+            if !self.pages.current(0) {
+                return;
+            }
+            if self.total == 0 {
+                self.resolve_selection(None, cx);
+                return;
+            }
         }
         self.position_requests.request(PositionRead::Selection {
             generation: self.page_requests.generation(),
             sha: self.selected_sha.clone(),
+            filter: self.filter.clone(),
         });
         self.pump_position(cx);
     }
 
+    /// Place the kept selection in the current list, or replace an absent
+    /// commit with the first row so that the inspector matches the list.
+    fn resolve_selection(&mut self, position: Option<usize>, cx: &mut Context<Self>) {
+        self.selection_needs_position = false;
+        let reveal = std::mem::take(&mut self.reveal_selection);
+        if let Some(position) = position {
+            self.selected_index = position;
+            if reveal {
+                self.scroll.scroll_to_item(position, ScrollStrategy::Center);
+            }
+            cx.notify();
+            return;
+        }
+        if self.total == 0 {
+            return;
+        }
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        if self.pages.current(0)
+            && let Some(row) = self.pages.row(0)
+        {
+            self.select(row.sha.clone(), 0, false, cx);
+        } else {
+            self.autoselect = true;
+        }
+    }
+
     fn position_is_current(&self, read: &PositionRead) -> bool {
         match read {
-            PositionRead::Selection { generation, sha } => {
+            PositionRead::Selection {
+                generation,
+                sha,
+                filter,
+            } => {
                 *generation == self.page_requests.generation()
                     && sha == &self.selected_sha
                     && self.selection_needs_position
-                    && !self.filtered()
+                    && filter == &self.filter
             }
             PositionRead::Jump {
                 generation,
@@ -986,12 +1200,17 @@ impl HistoryView {
             let engine = self.engine.clone();
             let id = id.clone();
             let sha = read.sha().to_owned();
+            let filter = read.filter().to_owned();
             let started_run = self.progress.index_run.clone();
             cx.spawn(async move |this, cx| {
                 let (lease, result) = cx
                     .background_executor()
                     .spawn(async move {
-                        let result = engine.commit_position_with_status(&id, &sha);
+                        let result = if filter.is_empty() {
+                            engine.commit_position_with_status(&id, &sha)
+                        } else {
+                            engine.search_offset(&id, &filter, &sha)
+                        };
                         (lease, result)
                     })
                     .await;
@@ -1027,27 +1246,43 @@ impl HistoryView {
         cx: &mut Context<Self>,
     ) {
         let PositionRead::Jump {
-            ref sha, deadline, ..
+            ref sha,
+            ref filter,
+            deadline,
+            ..
         } = read
         else {
-            if let Ok((Some(position), progress)) = result {
-                let changed = self.merge_progress(&progress);
-                self.selected_index = position;
-                self.selection_needs_position = false;
-                if changed {
-                    self.request_visible_pages(cx);
-                    self.changed(cx);
-                } else {
-                    cx.notify();
-                }
+            let Ok((position, progress)) = result else {
+                return;
+            };
+            let changed = self.merge_progress(&progress);
+            // An unindexed commit can still appear while indexing continues.
+            if position.is_some()
+                || self.filtered()
+                || (progress.complete && progress.error.is_none())
+            {
+                self.resolve_selection(position, cx);
+            }
+            if changed {
+                self.request_visible_pages(cx);
+                self.changed(cx);
             }
             return;
         };
+        if !filter.is_empty() && matches!(result, Ok((None, _))) {
+            // Outside the results: navigate in the whole history instead.
+            let sha = sha.clone();
+            self.jump_pending = false;
+            self.jump_unfiltered(sha, cx);
+            return;
+        }
         match result {
             Ok((Some(position), progress)) => {
                 self.jump_pending = false;
                 self.merge_progress(&progress);
-                self.total = self.total.max(progress.indexed);
+                if filter.is_empty() {
+                    self.total = self.total.max(progress.indexed);
+                }
                 // Keep reference jumps visible as the surrounding panels load.
                 self.scroll.scroll_to_item(position, ScrollStrategy::Center);
                 if self.pages.current(position / PAGE_SIZE)
@@ -1073,12 +1308,12 @@ impl HistoryView {
                         .as_ref()
                         .is_some_and(|info| !info.solo_refs.is_empty())
                 {
-                    self.jump_pending = false;
+                    self.abandon_jump();
                     cx.emit(HistoryEvent::ExitSoloAndNavigate(sha.clone()));
                     return;
                 }
                 if progress.complete || progress.error.is_some() || Instant::now() >= deadline {
-                    self.jump_pending = false;
+                    self.abandon_jump();
                     self.error = Some(
                         progress
                             .error
@@ -1101,36 +1336,59 @@ impl HistoryView {
                 }
             }
             Err(error) => {
-                self.jump_pending = false;
+                self.abandon_jump();
                 self.error = Some(error);
                 self.changed(cx);
             }
         }
     }
 
+    fn abandon_jump(&mut self) {
+        self.jump_pending = false;
+        self.jump_target = None;
+    }
+
+    /// Navigate to a commit. A search containing it stays applied; otherwise
+    /// the search is cleared before the commit is selected in the history.
     pub fn jump_to(&mut self, sha: String, _window: &mut Window, cx: &mut Context<Self>) {
         if self.repository.is_none() {
             return;
         }
+        if !self.filtered() || self.debounce_pending {
+            self.jump_unfiltered(sha, cx);
+            return;
+        }
+        self.cancel_navigation();
+        self.jump_pending = true;
+        self.request_jump(sha, self.filter.clone(), cx);
+        cx.notify();
+    }
+
+    fn jump_unfiltered(&mut self, sha: String, cx: &mut Context<Self>) {
         self.query_task = None;
         self.cancel_navigation();
         self.cancel_pages();
         self.query.clear();
-        self.filter.clear();
+        self.set_filter(String::new());
         self.debounce_pending = false;
         self.total = self.progress.indexed;
-        self.selected_sha.clear();
+        self.forget_selection();
         self.autoselect = false;
-        self.selected_index = 0;
         self.jump_pending = true;
+        self.request_jump(sha, String::new(), cx);
+        self.changed(cx);
+    }
+
+    fn request_jump(&mut self, sha: String, filter: String, cx: &mut Context<Self>) {
+        self.jump_target = Some(sha.clone());
         self.position_requests.request(PositionRead::Jump {
             generation: self.navigation_generation,
             repository_generation: self.repository_generation,
             sha,
+            filter,
             deadline: Instant::now() + Duration::from_secs(30),
         });
         self.pump_position(cx);
-        self.changed(cx);
     }
 
     fn scroll_to_index(&self, target: usize) {
@@ -1145,11 +1403,11 @@ impl HistoryView {
         );
     }
 
-    fn graph_width(&self) -> f32 {
-        if self.width <= 620. { 92. } else { 116. }
+    fn columns(&self) -> Columns {
+        Columns::new(self.width, self.font_size)
     }
     fn visible_lanes(&self) -> usize {
-        ((self.graph_width() - 30.) / 18.).floor().max(1.) as usize
+        graph::visible_lanes(self.columns().graph)
     }
     fn show_working_row(&self) -> bool {
         self.working.has_changes() && self.filter.is_empty() && !self.debounce_pending
@@ -1157,24 +1415,67 @@ impl HistoryView {
 
     fn open_menu(
         &mut self,
-        refs: &[Reference],
-        position: Point<Pixels>,
+        index: usize,
+        position: Option<Point<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = BranchMenu::new(refs, position) else {
+        let Some(prepared) = self.pages.row_shared(index) else {
             return;
         };
+        let group = self.references.get(&prepared.commit.sha).cloned();
+        let mut menu = CommitMenu::new(
+            &prepared.commit,
+            prepared.short_sha.clone(),
+            group
+                .as_ref()
+                .map_or(&[][..], |group| group.references.as_slice()),
+            position.unwrap_or_else(|| self.context_position(index)),
+        );
+        menu.width = self.menu_width(&menu, window);
         self.menu = Some(menu);
         self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
-    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
-            self.focus.focus(window, cx);
-            cx.notify();
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<CommitMenu> {
+        let menu = self.menu.take()?;
+        self.focus.focus(window, cx);
+        cx.notify();
+        Some(menu)
+    }
+
+    fn activate_menu(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.close_menu(window, cx) else {
+            return;
+        };
+        match menu.action(index) {
+            MenuAction::CopySha => cx.write_to_clipboard(ClipboardItem::new_string(menu.sha)),
+            MenuAction::CopyMessage => self.copy_message(menu.sha, menu.summary, cx),
+            MenuAction::Solo(reference) => {
+                if let Some(reference) = menu.references.into_iter().nth(reference) {
+                    cx.emit(HistoryEvent::ToggleSolo(reference.name));
+                }
+            }
         }
+    }
+
+    /// Rows only carry the summary; the full message is read on demand.
+    fn copy_message(&self, sha: String, summary: String, cx: &mut Context<Self>) {
+        let Some(info) = &self.repository else {
+            return;
+        };
+        let engine = self.engine.clone();
+        let id = info.id.clone();
+        cx.spawn(async move |_, cx| {
+            let message = cx
+                .background_executor()
+                .spawn(async move { engine.commit_details_shared(&id, &sha) })
+                .await
+                .map_or(summary, |details| details.message.trim_end().to_owned());
+            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(message)));
+        })
+        .detach();
     }
 
     fn context_position(&self, index: usize) -> Point<Pixels> {
@@ -1198,6 +1499,73 @@ impl HistoryView {
         }
     }
 
+    fn menu_item(
+        &self,
+        menu: &CommitMenu,
+        index: usize,
+    ) -> (IconName, &'static str, Option<SharedString>) {
+        match menu.action(index) {
+            MenuAction::CopySha => (
+                IconName::Copy,
+                "Copier le SHA",
+                Some(menu.short_sha.clone()),
+            ),
+            MenuAction::CopyMessage => (IconName::TextQuote, "Copier le message", None),
+            MenuAction::Solo(reference) => {
+                let reference = &menu.references[reference];
+                let kind = if reference.kind == "local" {
+                    "Locale"
+                } else {
+                    "Distante"
+                };
+                (
+                    IconName::Focus,
+                    self.menu_label(reference),
+                    Some(format!("{kind} · {}", reference.label).into()),
+                )
+            }
+        }
+    }
+
+    /// Natural width of the menu, measured once at opening so that labels are
+    /// only shortened by a narrower window.
+    fn menu_width(&self, menu: &CommitMenu, window: &Window) -> Pixels {
+        // Thousands of branches can share a commit; measure the longest labels.
+        let mut longest: Vec<_> = (0..menu.references.len()).collect();
+        longest
+            .sort_by_key(|index| std::cmp::Reverse(menu.references[*index].label.chars().count()));
+        let size = px(11. + self.font_size);
+        let measure = |text: &str| {
+            let run = TextRun {
+                len: text.len(),
+                font: font(theme::SANS),
+                color: rgb(self.palette.text).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .layout_line(text, size, &[run], None)
+                .width
+        };
+        let widest = (0..CommitMenu::ACTIONS)
+            .chain(
+                longest
+                    .into_iter()
+                    .take(24)
+                    .map(|index| CommitMenu::ACTIONS + index),
+            )
+            .map(|index| {
+                let (_, label, detail) = self.menu_item(menu, index);
+                measure(label) + detail.map_or(px(0.), |detail| px(8.) + measure(&detail))
+            })
+            .fold(px(0.), Pixels::max);
+        // Container and row padding, border, icon and its gap, scrollbar margin.
+        let maximum = (window.viewport_size().width - px(16.)).max(px(0.));
+        (widest + px(62.)).max(px(220.)).min(maximum)
+    }
+
     fn menu_rows(
         &self,
         range: Range<usize>,
@@ -1208,70 +1576,69 @@ impl HistoryView {
             return Vec::new();
         };
         let palette = self.palette;
-        let multiple = menu.references.len() > 1;
         let selected = menu.selected;
         range
-            .filter_map(|index| {
-                let reference = menu.references.get(index)?;
-                let name = reference.name.clone();
-                Some(
-                    div()
-                        .id(("solo-menu-item", index))
-                        .role(Role::MenuItem)
-                        .focusable()
-                        .tab_index(0)
-                        .tab_stop(false)
-                        .aria_label(format!(
-                            "{} : {}",
-                            self.menu_label(reference),
-                            reference.label
-                        ))
-                        .aria_position_in_set(index + 1)
-                        .aria_size_of_set(menu.references.len())
-                        .when(
-                            index == selected && self.menu_focus.is_focused(window),
-                            |style| style.aria_active_descendant(),
+            .filter(|index| *index < menu.len())
+            .map(|index| {
+                let (icon, label, detail) = self.menu_item(menu, index);
+                div()
+                    .id(("commit-menu-item", index))
+                    .role(Role::MenuItem)
+                    .focusable()
+                    .tab_index(0)
+                    .tab_stop(false)
+                    .aria_label(match &detail {
+                        Some(detail) => format!("{label} : {detail}"),
+                        None => label.to_owned(),
+                    })
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(menu.len())
+                    .when(
+                        index == selected && self.menu_focus.is_focused(window),
+                        |style| style.aria_active_descendant(),
+                    )
+                    .relative()
+                    .w_full()
+                    .h(CommitMenu::row_height(self.font_size))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .rounded(RADIUS_SM)
+                    .cursor_pointer()
+                    .text_size(px(11. + self.font_size))
+                    .line_height(relative(1.5))
+                    .text_color(rgb(palette.text))
+                    .when(index == selected, |style| {
+                        style.bg(rgb(palette.accent_soft))
+                    })
+                    .hover(|style| style.bg(rgb(palette.accent_soft)))
+                    .when(index == CommitMenu::ACTIONS, |style| {
+                        style.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.))
+                                .bg(rgb(palette.border)),
                         )
-                        .h(BranchMenu::row_height(self.font_size))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(10.))
-                        .rounded(RADIUS_SM)
-                        .cursor_pointer()
-                        .text_size(px(11. + self.font_size))
-                        .line_height(relative(1.5))
-                        .text_color(rgb(palette.text))
-                        .when(index == selected, |style| {
-                            style.bg(rgb(palette.accent_soft))
-                        })
-                        .hover(|style| style.bg(rgb(palette.accent_soft)))
-                        .child(theme::icon(IconName::Focus, 14., palette.text))
-                        .child(div().flex_shrink_0().child(self.menu_label(reference)))
-                        .when(multiple, |style| {
-                            style.child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(rgb(palette.muted))
-                                    .child(format!(
-                                        "{} · {}",
-                                        if reference.kind == "local" {
-                                            "Locale"
-                                        } else {
-                                            "Distante"
-                                        },
-                                        reference.label
-                                    )),
-                            )
-                        })
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.close_menu(window, cx);
-                            cx.emit(HistoryEvent::ToggleSolo(name.clone()));
-                        }))
-                        .into_any_element(),
-                )
+                    })
+                    .child(theme::icon(icon, 14., palette.text))
+                    .child(div().flex_shrink_0().whitespace_nowrap().child(label))
+                    .children(detail.map(|detail| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(palette.muted))
+                            .when(index == 0, |style| style.font_family(theme::MONO))
+                            .child(detail)
+                    }))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.activate_menu(index, window, cx);
+                    }))
+                    .into_any_element()
             })
             .collect()
     }
@@ -1279,16 +1646,16 @@ impl HistoryView {
     fn menu_element(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
         let palette = self.palette;
-        let max_width = (window.viewport_size().width - px(16.))
-            .max(px(0.))
-            .min(px(580.));
         let content = div()
-            .id("branch-context-menu")
+            .id("commit-context-menu")
             .role(Role::Menu)
-            .aria_label("Actions Solo des branches")
+            .aria_label("Actions du commit")
             .track_focus(&self.menu_focus)
-            .min_w(px(210.).min(max_width))
-            .max_w(max_width)
+            // The Escape action reaches the focused menu before key events.
+            .on_action(cx.listener(|view, _: &crate::app::Escape, window, cx| {
+                view.close_menu(window, cx);
+            }))
+            .w(menu.width)
             .occlude()
             .p(px(5.))
             .rounded(RADIUS_MD)
@@ -1296,7 +1663,9 @@ impl HistoryView {
             .border_color(rgb(palette.border))
             .bg(rgb(palette.panel))
             .shadow_lg()
-            .on_mouse_down_out(cx.listener(|view, _, window, cx| view.close_menu(window, cx)))
+            .on_mouse_down_out(cx.listener(|view, _, window, cx| {
+                view.close_menu(window, cx);
+            }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 let Some(menu) = &mut view.menu else {
                     return;
@@ -1311,9 +1680,8 @@ impl HistoryView {
                         view.close_menu(window, cx);
                     }
                     "enter" | "space" => {
-                        let name = menu.references[menu.selected].name.clone();
-                        view.close_menu(window, cx);
-                        cx.emit(HistoryEvent::ToggleSolo(name));
+                        let index = menu.selected;
+                        view.activate_menu(index, window, cx);
                     }
                     _ => return,
                 }
@@ -1323,22 +1691,22 @@ impl HistoryView {
             .child(
                 div()
                     .relative()
+                    .w_full()
                     .h(menu.viewport_height(self.font_size, window.viewport_size().height))
                     .overflow_hidden()
                     .child(
                         uniform_list(
-                            "branch-menu-references",
-                            menu.references.len(),
+                            "commit-menu-items",
+                            menu.len(),
                             cx.processor(|view, range, window, cx| {
                                 view.menu_rows(range, window, cx)
                             }),
                         )
-                        .with_width_from_item(Some(menu.measure_index))
                         .track_scroll(&menu.scroll)
-                        .h_full(),
+                        .size_full(),
                     )
                     .child(theme::scrollbar_theme(
-                        Scrollbar::vertical(&menu.scroll).id("branch-menu-scrollbar"),
+                        Scrollbar::vertical(&menu.scroll).id("commit-menu-scrollbar"),
                     )),
             );
         Some(
@@ -1354,26 +1722,34 @@ impl HistoryView {
 
     fn headings(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette;
-        let graph_width = self.graph_width();
-        let visible = self.visible_lanes();
+        let columns = self.columns();
+        let visible = graph::visible_lanes(columns.graph);
         div()
             .flex()
             .items_center()
-            .h(px(35.))
+            .h(px(26.))
             .flex_shrink_0()
             .w_full()
-            .pr(px(14.))
-            .gap(px(if self.width <= 620. { 9. } else { 12. }))
+            .pr(px(12.))
+            .gap(px(columns.gap))
             .border_t_1()
             .border_b_1()
             .border_color(rgb(palette.border))
-            .text_size(px(10. + self.font_size))
+            .text_size(px(11. + self.font_size))
             .text_color(rgb(palette.muted))
             .child(
                 div()
-                    .w(px(graph_width))
+                    .w(px(columns.references))
                     .flex_shrink_0()
-                    .pl(px(20.))
+                    .pl(px(10.))
+                    .truncate()
+                    .child("Branche / Tag"),
+            )
+            .child(
+                div()
+                    .w(px(columns.graph))
+                    .flex_shrink_0()
+                    .pl(px(6.))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -1438,17 +1814,21 @@ impl HistoryView {
                         ))
                     }),
             )
-            .child(div().flex_1().min_w_0().child("Message du commit"))
-            .when(self.width > 620., |style| {
-                style
-                    .child(div().w(px(132.)).flex_shrink_0().child("Auteur"))
-                    .child(div().w(px(72.)).flex_shrink_0().child("Date"))
-            })
-            .child(
-                div()
-                    .w(px(if self.width <= 620. { 64. } else { 72. }))
-                    .flex_shrink_0()
-                    .child("SHA"),
+            .child(div().flex_1().min_w_0().truncate().child("Message"))
+            .children(
+                columns
+                    .author
+                    .map(|width| div().w(px(width)).flex_shrink_0().child("Auteur")),
+            )
+            .children(
+                columns
+                    .date
+                    .map(|width| div().w(px(width)).flex_shrink_0().child("Date")),
+            )
+            .children(
+                columns
+                    .sha
+                    .map(|width| div().w(px(width)).flex_shrink_0().text_right().child("SHA")),
             )
             .into_any_element()
     }
@@ -1461,22 +1841,26 @@ impl HistoryView {
             .track_focus(&self.working_focus)
             .tab_index(0)
             .aria_label(format!(
-                "Modifications non commitées, {} changements",
-                format_count(self.working.staged + self.working.unstaged)
+                "Modifications locales, {}",
+                count_label(
+                    self.working.staged + self.working.unstaged,
+                    "changement",
+                    "changements"
+                )
             ))
             .aria_toggled(if self.working.selected {
                 Toggled::True
             } else {
                 Toggled::False
             })
-            .h(px(44.))
+            .h(px(ROW_HEIGHT))
             .w_full()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(10.))
-            .pl(px(20.))
-            .pr(px(16.))
+            .gap(px(8.))
+            .pl(px(10.))
+            .pr(px(12.))
             .bg(rgb(if self.working.selected {
                 palette.selection
             } else {
@@ -1491,13 +1875,13 @@ impl HistoryView {
             .hover(|style| style.bg(rgb(palette.hover)))
             .text_size(px(12. + self.font_size))
             .text_color(rgb(palette.text))
-            .child(theme::icon(IconName::FilePenLine, 17., palette.accent))
+            .child(theme::icon(IconName::FilePenLine, 15., palette.accent))
             .child(
                 div()
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Modifications non commitées"),
+                    .child("Modifications locales"),
             )
             .children(self.working.counts.iter().map(|(status, count)| {
                 let (icon, color) = match status.as_str() {
@@ -1511,7 +1895,7 @@ impl HistoryView {
                     .items_center()
                     .gap(px(4.))
                     .font_family(theme::MONO)
-                    .text_size(px(10. + self.font_size))
+                    .text_size(px(11. + self.font_size))
                     .text_color(rgb(color))
                     .child(theme::icon(icon, 13., color))
                     .child(count.to_string())
@@ -1520,7 +1904,7 @@ impl HistoryView {
                 div()
                     .ml_auto()
                     .font_family(theme::MONO)
-                    .text_size(px(10. + self.font_size))
+                    .text_size(px(11. + self.font_size))
                     .text_color(rgb(palette.muted))
                     .child(format_count(self.working.staged + self.working.unstaged)),
             )
@@ -1572,10 +1956,15 @@ impl HistoryView {
             self.request_page(page, cx);
         }
         let palette = self.palette;
-        let graph_width = self.graph_width();
-        let small = self.width <= 620.;
-        let hide_refs = self.width <= 480.;
+        let columns = self.columns();
         let filtered = self.filtered();
+        let font_size = self.font_size;
+        // Average proportional glyph width, for fitting reference badges.
+        let char_width = (11. + font_size) * 0.58;
+        let avatar = (19. + font_size).min(24.);
+        let highlight = search_highlight(palette);
+        let sha_query = (filtered && self.filter.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(self.filter.as_str());
         range
             .map(|index| {
                 let Some(prepared) = self.pages.row_shared(index) else {
@@ -1593,8 +1982,8 @@ impl HistoryView {
                         .w_full()
                         .flex()
                         .items_center()
-                        .pl(px(graph_width + 12.))
-                        .text_size(px(11. + self.font_size))
+                        .pl(px(columns.references + columns.graph + 2. * columns.gap))
+                        .text_size(px(11. + font_size))
                         .text_color(rgb(palette.muted))
                         .child("Chargement…")
                         .into_any_element();
@@ -1602,22 +1991,63 @@ impl HistoryView {
                 let row = prepared.commit.clone();
                 let selected = row.sha == self.selected_sha && !self.working.selected;
                 let sha = row.sha.clone();
-                let group = self.references.get(&row.sha).cloned();
-                let refs = group.as_ref().map(|group| group.references.clone());
-                let context_refs = refs.clone();
-                let accessible_refs = refs.clone();
-                let has_branches = group.as_ref().is_some_and(|group| group.has_branches);
-                let displayed_refs = if hide_refs {
-                    &[][..]
-                } else {
-                    group
-                        .as_ref()
-                        .map_or(&[][..], |group| group.badges.as_slice())
+                let group = self
+                    .references
+                    .get(&row.sha)
+                    .filter(|group| group.displayed > 0)
+                    .cloned();
+                let highlighted = |text: &SharedString, ranges: &[Range<usize>]| {
+                    if ranges.is_empty() {
+                        text.clone().into_any_element()
+                    } else {
+                        StyledText::new(text.clone())
+                            .with_highlights(ranges.iter().map(|range| (range.clone(), highlight)))
+                            .into_any_element()
+                    }
                 };
-                let subject = prepared.subject.clone();
-                let font_size = self.font_size;
+                let sha_ranges: Vec<_> = sha_query
+                    .filter(|query| {
+                        row.sha
+                            .get(..query.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(query))
+                    })
+                    .map(|query| 0..query.len().min(prepared.short_sha.len()))
+                    .into_iter()
+                    .collect();
+                let references = group.as_ref().map(|group| {
+                    let shown = group.fitting_badges(columns.badge_width(), char_width);
+                    let hidden = group.displayed - shown;
+                    let tooltip = group.clone();
+                    div()
+                        .id(("commit-references", index))
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .overflow_hidden()
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(tooltip.tooltip()).build(window, cx)
+                        })
+                        .children(group.badges[..shown].iter().map(|badge| {
+                            let highlight = badge.highlight(&self.folded_filter);
+                            reference_badge(badge, highlight, font_size, palette)
+                        }))
+                        .when(hidden > 0, |style| {
+                            style.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px(px(5.))
+                                    .rounded(RADIUS_SM)
+                                    .border_1()
+                                    .border_color(rgb(palette.border))
+                                    .bg(rgb(palette.surface))
+                                    .line_height(relative(1.35))
+                                    .text_color(rgb(palette.muted))
+                                    .child(format!("+{}", format_count(hidden))),
+                            )
+                        })
+                });
                 let entity = cx.entity().downgrade();
-                let menu_entity = entity.clone();
                 let element = div()
                     .id(("commit", index))
                     .when(window.is_a11y_active(), |style| {
@@ -1629,8 +2059,8 @@ impl HistoryView {
                     .tab_stop(false)
                     .when(window.is_a11y_active(), |style| {
                         style
-                            .aria_label(format!("{}, {}", subject, row.author))
-                            .aria_description(format!("{}, {}", prepared.date, prepared.short_sha))
+                            .aria_label(format!("{}, {}", prepared.subject, row.author))
+                            .aria_description(accessible_description(&prepared, group.as_deref()))
                     })
                     .aria_selected(selected)
                     .aria_position_in_set(index + 1)
@@ -1646,8 +2076,8 @@ impl HistoryView {
                     .w_full()
                     .relative()
                     .overflow_hidden()
-                    .pr(px(14.))
-                    .gap(px(if small { 9. } else { 12. }))
+                    .pr(px(12.))
+                    .gap(px(columns.gap))
                     .when(selected, |style| style.bg(rgb(palette.selection)))
                     .when(!selected, |style| {
                         style.hover(|style| style.bg(rgb(palette.hover)))
@@ -1673,12 +2103,23 @@ impl HistoryView {
                                 .bg(rgb(palette.accent_border)),
                         )
                     })
+                    .child(
+                        div()
+                            .w(px(columns.references))
+                            .h_full()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .pl(px(10.))
+                            .pr(px(4.))
+                            .children(references),
+                    )
                     .child(graph::row(
                         row.clone(),
                         selected,
                         filtered,
                         self.lane_offset,
-                        graph_width,
+                        columns.graph,
                         palette,
                     ))
                     .child(
@@ -1687,112 +2128,7 @@ impl HistoryView {
                             .min_w_0()
                             .flex()
                             .items_center()
-                            .gap(px(7.))
-                            .overflow_hidden()
-                            .children(displayed_refs.iter().enumerate().map(
-                                |(ref_index, reference)| {
-                                    let tag = reference.kind == "tag";
-                                    let color = if tag { palette.warning } else { palette.accent };
-                                    let references = reference.clone();
-                                    let weak = entity.clone();
-                                    let activate_entity = entity.clone();
-                                    let context_entity = entity.clone();
-                                    let menu_references = reference.clone();
-                                    div()
-                                        .id(("commit-ref", ref_index))
-                                        .role(Role::Button)
-                                        .focusable()
-                                        .tab_index(0)
-                                        .tab_stop(false)
-                                        .when(window.is_a11y_active(), |style| {
-                                            style.aria_label(format!(
-                                                "{} {}",
-                                                if tag { "Tag" } else { "Branche" },
-                                                reference.label,
-                                            ))
-                                        })
-                                        .on_a11y_action(
-                                            AccessibleAction::Click,
-                                            move |_, window, cx| {
-                                                let _ = activate_entity.update(cx, |view, cx| {
-                                                    view.close_menu(window, cx);
-                                                    view.select_index(index, window, cx);
-                                                });
-                                            },
-                                        )
-                                        .when(!tag, |style| {
-                                            style.on_a11y_action(
-                                                AccessibleAction::ShowContextMenu,
-                                                move |_, window, cx| {
-                                                    let _ =
-                                                        context_entity.update(cx, |view, cx| {
-                                                            view.open_menu(
-                                                                std::slice::from_ref(
-                                                                    menu_references.as_ref(),
-                                                                ),
-                                                                view.context_position(index),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        });
-                                                },
-                                            )
-                                        })
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .max_w(px(136.))
-                                        .min_w_0()
-                                        .px(px(5.))
-                                        .py(px(3.))
-                                        .rounded(RADIUS_SM)
-                                        .border_1()
-                                        .border_color(if tag {
-                                            with_alpha(color, 0.28)
-                                        } else {
-                                            rgb(palette.accent_border).into()
-                                        })
-                                        .bg(if tag {
-                                            with_alpha(color, 0.08)
-                                        } else {
-                                            rgb(palette.accent_soft).into()
-                                        })
-                                        .text_size(px(9. + font_size))
-                                        .text_color(rgb(color))
-                                        .child(theme::icon(
-                                            if tag {
-                                                IconName::Tag
-                                            } else {
-                                                IconName::GitBranch
-                                            },
-                                            10.,
-                                            color,
-                                        ))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(reference.label.clone()),
-                                        )
-                                        .on_mouse_down(
-                                            MouseButton::Right,
-                                            move |event, window, cx| {
-                                                if references.kind == "tag" {
-                                                    return;
-                                                }
-                                                let _ = weak.update(cx, |view, cx| {
-                                                    view.open_menu(
-                                                        std::slice::from_ref(references.as_ref()),
-                                                        event.position,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                                cx.stop_propagation();
-                                            },
-                                        )
-                                },
-                            ))
+                            .gap(px(6.))
                             .child(
                                 div()
                                     .flex_1()
@@ -1800,7 +2136,10 @@ impl HistoryView {
                                     .truncate()
                                     .text_size(px(12. + font_size))
                                     .text_color(rgb(palette.text))
-                                    .child(subject),
+                                    .child(highlighted(
+                                        &prepared.subject,
+                                        &prepared.subject_highlights,
+                                    )),
                             )
                             .when(row.parents.len() > 1, |style| {
                                 style.child(theme::icon(
@@ -1810,49 +2149,60 @@ impl HistoryView {
                                 ))
                             }),
                     )
-                    .when(!small, |style| {
-                        style
-                            .child(
-                                div()
-                                    .w(px(132.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .size(px(21.))
-                                            .flex_shrink_0()
-                                            .rounded_full()
-                                            .bg(rgb(palette.surface))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_size(px(8. + font_size))
-                                            .text_color(rgb(palette.text))
-                                            .child(prepared.initials.clone()),
-                                    )
-                                    .child(
-                                        div().min_w_0().truncate().child(prepared.author.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(72.))
-                                    .flex_shrink_0()
-                                    .child(prepared.date.clone()),
-                            )
+                    .when_some(columns.author, |style, width| {
+                        style.child(
+                            div()
+                                .w(px(width))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .size(px(avatar))
+                                        .flex_shrink_0()
+                                        .rounded_full()
+                                        .bg(rgb(palette.surface))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(11. + font_size))
+                                        .line_height(relative(1.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(palette.text))
+                                        .child(prepared.initials.clone()),
+                                )
+                                .child(div().min_w_0().truncate().child(highlighted(
+                                    &prepared.author,
+                                    &prepared.author_highlights,
+                                ))),
+                        )
                     })
-                    .child(
-                        div()
-                            .w(px(if small { 64. } else { 72. }))
-                            .flex_shrink_0()
-                            .text_right()
-                            .font_family(theme::MONO)
-                            .text_size(px(10. + font_size))
-                            .child(prepared.short_sha.clone()),
-                    )
+                    .when_some(columns.date, |style, width| {
+                        let time = row.time;
+                        style.child(
+                            div()
+                                .id(("commit-date", index))
+                                .w(px(width))
+                                .flex_shrink_0()
+                                .truncate()
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(commit_date(time)).build(window, cx)
+                                })
+                                .child(prepared.date.clone()),
+                        )
+                    })
+                    .when_some(columns.sha, |style, width| {
+                        style.child(
+                            div()
+                                .w(px(width))
+                                .flex_shrink_0()
+                                .text_right()
+                                .font_family(theme::MONO)
+                                .child(highlighted(&prepared.short_sha, &sha_ranges)),
+                        )
+                    })
                     .when(selected, |style| {
                         style.child(
                             div()
@@ -1872,32 +2222,16 @@ impl HistoryView {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                            view.open_menu(
-                                context_refs
-                                    .as_deref()
-                                    .map(Vec::as_slice)
-                                    .unwrap_or_default(),
-                                event.position,
-                                window,
-                                cx,
-                            );
+                            view.open_menu(index, Some(event.position), window, cx);
                             cx.stop_propagation();
                         }),
                     )
-                    .when(window.is_a11y_active() && has_branches, |style| {
+                    .when(window.is_a11y_active(), |style| {
                         style.on_a11y_action(
                             AccessibleAction::ShowContextMenu,
                             move |_, window, cx| {
-                                let _ = menu_entity.update(cx, |view, cx| {
-                                    view.open_menu(
-                                        accessible_refs
-                                            .as_deref()
-                                            .map(Vec::as_slice)
-                                            .unwrap_or_default(),
-                                        view.context_position(index),
-                                        window,
-                                        cx,
-                                    );
+                                let _ = entity.update(cx, |view, cx| {
+                                    view.open_menu(index, None, window, cx);
                                 });
                             },
                         )
@@ -1918,6 +2252,7 @@ impl Render for HistoryView {
             self.search
                 .update(cx, |input, cx| input.set_value(query, window, cx));
         }
+        let narrow = self.columns().sha.is_none();
         let mut root = div()
             .id("history-view")
             .size_full()
@@ -1930,52 +2265,108 @@ impl Render for HistoryView {
             .text_color(rgb(palette.text))
             .child(
                 div()
-                    .h(px(71.))
+                    .id("history-search-toolbar")
+                    .role(Role::Toolbar)
+                    .aria_label("Recherche dans l’historique")
+                    .h(px(44.))
                     .w_full()
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .px(px(22.))
+                    .gap(px(10.))
+                    .px(px(12.))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(30.))
                             .flex()
                             .items_center()
-                            .min_w_0()
-                            .gap(px(10.))
-                            .child(theme::icon(IconName::GitBranch, 17., palette.accent))
+                            .gap(px(8.))
+                            .px(px(10.))
+                            .rounded(RADIUS_MD)
+                            .border_1()
+                            .border_color(rgb(palette.border))
+                            .bg(rgb(palette.bg))
+                            // Escape keeps the search and hands the keys to its results.
+                            .on_action(cx.listener(|view, _: &InputEscape, window, cx| {
+                                view.focus_list(window, cx)
+                            }))
+                            .child(theme::icon(IconName::Search, 14., palette.muted))
                             .child(
-                                div()
-                                    .id("history-heading")
-                                    .role(Role::Heading)
-                                    .aria_label("Historique")
-                                    .aria_level(2)
-                                    .text_size(px(16. + self.font_size))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child("Historique"),
-                            )
-                            .child(
-                                div()
-                                    .id("history-head-reference")
-                                    .role(Role::Label)
-                                    .when(window.is_a11y_active(), |style| {
-                                        style.aria_label(self.head_label.clone())
-                                    })
-                                    .ml(px(6.))
-                                    .max_w(px(180.))
+                                Input::new(&self.search)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .focus_bordered(false)
+                                    .aria_label("Rechercher des commits")
+                                    .flex_1()
                                     .min_w_0()
-                                    .truncate()
-                                    .px(px(8.))
-                                    .py(px(5.))
-                                    .rounded(RADIUS_SM)
-                                    .border_1()
-                                    .border_color(rgb(palette.border))
-                                    .bg(rgb(palette.accent_soft))
-                                    .text_size(px(10. + self.font_size))
-                                    .text_color(rgb(palette.accent))
-                                    .child(self.head_label.clone()),
-                            ),
+                                    .text_size(px(11. + self.font_size)),
+                            )
+                            .when(self.query.is_empty(), |style| {
+                                style.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .rounded(RADIUS_SM)
+                                        .border_1()
+                                        .border_color(rgb(palette.border))
+                                        .px(px(5.))
+                                        .text_size(px(11. + self.font_size))
+                                        .text_color(rgb(palette.muted))
+                                        .child(shortcut_label("K")),
+                                )
+                            })
+                            .when(!self.query.is_empty(), |style| {
+                                style.child(
+                                    div()
+                                        .id("clear-search")
+                                        .role(Role::Button)
+                                        .focusable()
+                                        .tab_index(0)
+                                        .aria_label("Effacer la recherche")
+                                        .flex_shrink_0()
+                                        .cursor_pointer()
+                                        .child(theme::icon(IconName::X, 12., palette.muted))
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.set_query(String::new(), cx);
+                                            view.focus_search(window, cx);
+                                        })),
+                                )
+                            }),
                     )
+                    .child(
+                        div()
+                            .id("history-head-reference")
+                            .role(Role::Label)
+                            .when(window.is_a11y_active(), |style| {
+                                style.aria_label(self.head_label.clone())
+                            })
+                            .max_w(px(if narrow { 120. } else { 180. }))
+                            .min_w_0()
+                            .truncate()
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(rgb(palette.border))
+                            .bg(rgb(palette.accent_soft))
+                            .text_size(px(11. + self.font_size))
+                            .text_color(rgb(palette.accent))
+                            .child(self.head_label.clone()),
+                    )
+                    .when(!narrow || self.filtered(), |style| {
+                        style.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11. + self.font_size))
+                                .text_color(rgb(palette.muted))
+                                .child(if self.filtered() {
+                                    count_label(self.total, "résultat", "résultats")
+                                } else {
+                                    count_label(self.total, "commit", "commits")
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .id("refresh-history")
@@ -1983,7 +2374,7 @@ impl Render for HistoryView {
                             .focusable()
                             .tab_index(0)
                             .aria_label("Actualiser le dépôt")
-                            .size(px(30.))
+                            .size(px(28.))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -2005,9 +2396,9 @@ impl Render for HistoryView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .px(px(16.))
-                    .py(px(8.))
-                    .border_b_1()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .border_t_1()
                     .border_color(with_alpha(palette.warning, 0.3))
                     .bg(with_alpha(palette.warning, 0.1))
                     .text_color(rgb(palette.warning))
@@ -2031,7 +2422,7 @@ impl Render for HistoryView {
                             .border_1()
                             .border_color(with_alpha(palette.warning, 0.3))
                             .px(px(8.))
-                            .py(px(4.))
+                            .py(px(2.))
                             .cursor_pointer()
                             .hover(|style| style.bg(with_alpha(palette.warning, 0.1)))
                             .child("Quitter le mode Solo")
@@ -2039,99 +2430,6 @@ impl Render for HistoryView {
                     ),
             );
         }
-        root =
-            root.child(
-                div()
-                    .id("history-search-toolbar")
-                    .role(Role::Toolbar)
-                    .aria_label("Recherche dans l’historique")
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(17.))
-                    .mx(px(22.))
-                    .mb(px(18.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(34.))
-                            .flex()
-                            .items_center()
-                            .gap(px(9.))
-                            .px(px(11.))
-                            .rounded(RADIUS_MD)
-                            .border_1()
-                            .border_color(rgb(palette.border))
-                            .bg(rgb(palette.bg))
-                            .child(theme::icon(IconName::Search, 15., palette.muted))
-                            .child(
-                                Input::new(&self.search)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .focus_bordered(false)
-                                    .aria_label("Rechercher des commits")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(11. + self.font_size)),
-                            )
-                            .when(self.query.is_empty(), |style| {
-                                style.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .rounded(RADIUS_SM)
-                                        .border_1()
-                                        .border_color(rgb(palette.border))
-                                        .px(px(5.))
-                                        .py(px(2.))
-                                        .text_size(px(9. + self.font_size))
-                                        .text_color(rgb(palette.muted))
-                                        .child(if cfg!(target_os = "macos") {
-                                            "⌘ K"
-                                        } else {
-                                            "Ctrl K"
-                                        }),
-                                )
-                            })
-                            .when(!self.query.is_empty(), |style| {
-                                style.child(
-                                    div()
-                                        .id("clear-search")
-                                        .role(Role::Button)
-                                        .focusable()
-                                        .tab_index(0)
-                                        .aria_label("Effacer la recherche")
-                                        .flex_shrink_0()
-                                        .cursor_pointer()
-                                        .child(theme::icon(IconName::X, 12., palette.muted))
-                                        .on_click(cx.listener(|view, _, window, cx| {
-                                            view.set_query(String::new(), cx);
-                                            view.focus_search(window, cx);
-                                        })),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .flex_shrink_0()
-                            .text_size(px(10. + self.font_size))
-                            .child(
-                                div()
-                                    .font_family(theme::MONO)
-                                    .child(format_count(self.total)),
-                            )
-                            .child(div().text_color(rgb(palette.muted)).child(
-                                if self.filtered() {
-                                    "résultats"
-                                } else {
-                                    "commits"
-                                },
-                            )),
-                    ),
-            );
         root = root.child(self.headings(cx));
         if self.show_working_row() {
             root = root.child(self.working_row(cx));
@@ -2163,21 +2461,24 @@ impl Render for HistoryView {
                         if event.keystroke.key == "contextmenu"
                             || event.keystroke.modifiers.shift =>
                     {
-                        if let Some(references) = view.references.get(&view.selected_sha).cloned() {
-                            view.open_menu(
-                                references.references.as_slice(),
-                                view.context_position(view.selected_index),
-                                window,
-                                cx,
-                            );
+                        if view
+                            .pages
+                            .row(view.selected_index)
+                            .is_some_and(|row| row.sha == view.selected_sha)
+                        {
+                            view.open_menu(view.selected_index, None, window, cx);
                         }
                     }
-                    "escape" if view.menu.is_some() => view.close_menu(window, cx),
+                    "escape" if view.menu.is_some() => {
+                        view.close_menu(window, cx);
+                    }
                     _ => return,
                 }
                 cx.stop_propagation();
             }))
-            .on_scroll_wheel(cx.listener(|view, _, window, cx| view.close_menu(window, cx)));
+            .on_scroll_wheel(cx.listener(|view, _, window, cx| {
+                view.close_menu(window, cx);
+            }));
         if self.total > 0 {
             viewport = viewport
                 .child(
@@ -2234,8 +2535,8 @@ impl Render for HistoryView {
         }
         let status = if !self.progress.complete {
             format!(
-                "Indexation · {} commits",
-                format_count(self.progress.indexed)
+                "Indexation · {}",
+                count_label(self.progress.indexed, "commit", "commits")
             )
         } else if self.progress.error.is_some() {
             "Indexation interrompue".to_owned()
@@ -2245,20 +2546,22 @@ impl Render for HistoryView {
         root.child(viewport)
             .child(
                 div()
-                    .h(px(31.))
+                    .h(px(26.))
                     .flex_shrink_0()
                     .w_full()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px(px(20.))
+                    .gap(px(12.))
+                    .px(px(12.))
                     .border_t_1()
                     .border_color(rgb(palette.border))
                     .bg(rgb(palette.panel))
-                    .text_size(px(9. + self.font_size))
+                    .text_size(px(11. + self.font_size))
                     .text_color(rgb(palette.muted))
                     .child(
                         div()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .gap(px(6.))
@@ -2276,21 +2579,13 @@ impl Render for HistoryView {
                                     ))
                                 },
                             )
-                            .child(status),
+                            .child(div().min_w_0().truncate().child(status)),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .opacity(0.7)
-                            .child(theme::icon(IconName::Command, 11., palette.muted))
-                            .child(format!(
-                                "{} Rechercher · {} Commandes",
-                                shortcut_label("K"),
-                                shortcut_label("P"),
-                            )),
-                    ),
+                    .child(div().flex_shrink_0().opacity(0.8).child(format!(
+                        "{} Rechercher · {} Commandes",
+                        shortcut_label("K"),
+                        shortcut_label("P"),
+                    ))),
             )
             .children(self.menu_element(window, cx))
     }
@@ -2311,29 +2606,122 @@ fn with_alpha(color: u32, alpha: f32) -> Hsla {
     value
 }
 
-pub fn short_date(timestamp: i64) -> String {
-    use chrono::Datelike;
-    let Some(date) = chrono::DateTime::from_timestamp(timestamp, 0) else {
-        return "Date inconnue".into();
-    };
-    let date = date.with_timezone(&chrono::Local);
-    let months = [
-        "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.",
-        "déc.",
-    ];
-    format!("{:02} {}", date.day(), months[date.month0() as usize])
+/// Search matches use the sidebar highlight.
+fn search_highlight(palette: Palette) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(rgb(palette.on_accent).into()),
+        background_color: Some(rgb(palette.accent).into()),
+        ..Default::default()
+    }
 }
+
+fn reference_badge(
+    badge: &ReferenceBadge,
+    highlight: Option<Range<usize>>,
+    font_size: f32,
+    palette: Palette,
+) -> Div {
+    let (icon, color, background, border) = match badge.rank {
+        ReferenceRank::Head => (
+            IconName::GitBranch,
+            palette.on_accent,
+            Some(rgb(palette.accent).into()),
+            rgb(palette.accent).into(),
+        ),
+        ReferenceRank::Local => (
+            IconName::GitBranch,
+            palette.accent,
+            Some(rgb(palette.accent_soft).into()),
+            rgb(palette.accent_border).into(),
+        ),
+        ReferenceRank::Tag => (
+            IconName::Tag,
+            palette.warning,
+            Some(with_alpha(palette.warning, 0.1)),
+            with_alpha(palette.warning, 0.35),
+        ),
+        ReferenceRank::Remote => (
+            IconName::Cloud,
+            palette.accent,
+            None,
+            with_alpha(palette.accent, 0.55),
+        ),
+    };
+    let label = match highlight {
+        Some(range) => {
+            // The current branch is drawn in the accent: invert its match.
+            let style = if badge.rank == ReferenceRank::Head {
+                HighlightStyle {
+                    color: Some(rgb(palette.accent).into()),
+                    background_color: Some(rgb(palette.on_accent).into()),
+                    ..Default::default()
+                }
+            } else {
+                search_highlight(palette)
+            };
+            StyledText::new(badge.label.clone())
+                .with_highlights([(range, style)])
+                .into_any_element()
+        }
+        None => badge.label.clone().into_any_element(),
+    };
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .px(px(5.))
+        .rounded(RADIUS_SM)
+        .border_1()
+        .border_color(border)
+        .when(badge.rank == ReferenceRank::Remote, |style| {
+            style.border_dashed()
+        })
+        .when_some(background, |style, background: Hsla| style.bg(background))
+        .when(badge.rank == ReferenceRank::Head, |style| {
+            style.font_weight(FontWeight::MEDIUM)
+        })
+        .text_size(px(11. + font_size))
+        .line_height(relative(1.35))
+        .text_color(rgb(color))
+        .child(theme::icon(icon, 10., color))
+        .child(div().min_w_0().truncate().child(label))
+}
+
+fn accessible_description(row: &HistoryRow, group: Option<&ReferenceGroup>) -> String {
+    let mut description = format!("{}, {}", row.date, row.short_sha);
+    if let Some(group) = group {
+        let labels: Vec<_> = group
+            .badges
+            .iter()
+            .map(|badge| badge.label.as_ref())
+            .collect();
+        description.push_str(", ");
+        description.push_str(&labels.join(", "));
+        if group.displayed > labels.len() {
+            description.push_str(" et ");
+            description.push_str(&count_label(
+                group.displayed - labels.len(),
+                "autre référence",
+                "autres références",
+            ));
+        }
+    }
+    description
+}
+
 #[cfg(test)]
 mod navigation_tests;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchMenu, WorkingSummary, format_count, normalized_query, position_snapshot_can_publish,
+        Columns, CommitMenu, MenuAction, WorkingSummary, format_count, normalized_query,
+        position_snapshot_can_publish,
     };
     use crate::format::{initials, short_sha};
     use gpui_kit::{ScrollStrategy, point, px};
-    use mangrove_core::model::Reference;
+    use mangrove_core::model::{CommitRow, GraphRow, Reference};
 
     fn reference(index: usize, kind: &str) -> Reference {
         Reference {
@@ -2342,6 +2730,25 @@ mod tests {
             kind: kind.into(),
             sha: "commit".into(),
         }
+    }
+
+    fn menu(references: &[Reference]) -> CommitMenu {
+        let commit = CommitRow {
+            sha: "commit".into(),
+            summary: "Summary".into(),
+            author: String::new(),
+            email: String::new(),
+            time: 0,
+            parents: vec![],
+            position: 0,
+            graph: GraphRow {
+                lane: 0,
+                color: 0,
+                width: 1,
+                edges: vec![],
+            },
+        };
+        CommitMenu::new(&commit, "commit".into(), references, point(px(0.), px(0.)))
     }
 
     #[test]
@@ -2355,43 +2762,72 @@ mod tests {
     }
 
     #[test]
-    fn long_branch_menu_keyboard_reveals_its_selected_reference() {
+    fn long_commit_menu_keyboard_reveals_its_selected_reference() {
         let mut references: Vec<_> = (0..10_000)
             .map(|index| reference(index, if index % 2 == 0 { "local" } else { "remote" }))
             .collect();
         references.insert(0, reference(99_999, "tag"));
-        let mut menu = BranchMenu::new(&references, point(px(0.), px(0.))).unwrap();
+        let mut menu = menu(&references);
         assert_eq!(menu.references.len(), 10_000);
-        for (key, expected) in [("end", 9_999), ("down", 0), ("up", 9_999), ("home", 0)] {
+        assert_eq!(menu.len(), 10_002);
+        for (key, expected) in [("end", 10_001), ("down", 0), ("up", 10_001), ("home", 0)] {
             assert!(menu.navigate_key(key));
             assert_eq!(menu.selected, expected);
-            assert_eq!(
-                menu.references[expected].name,
-                references[expected + 1].name
-            );
             let state = menu.scroll.0.borrow();
             let reveal = state.deferred_scroll_to_item.as_ref().unwrap();
             assert_eq!(reveal.item_index, expected);
             assert_eq!(reveal.strategy, ScrollStrategy::Nearest);
         }
+        assert_eq!(menu.action(10_001), MenuAction::Solo(9_999));
+        assert_eq!(menu.references[9_999].name, references[10_000].name);
         assert!(!menu.navigate_key("enter"));
-        assert!(BranchMenu::new(&[reference(0, "tag")], point(px(0.), px(0.))).is_none());
     }
 
     #[test]
-    fn branch_menu_preserves_small_height_and_bounds_large_menus_to_the_window() {
-        let position = point(px(0.), px(0.));
-        let small = BranchMenu::new(&[reference(0, "local")], position).unwrap();
+    fn every_commit_menu_copies_and_only_branches_add_solo_actions() {
+        let tagged = menu(&[reference(0, "tag")]);
+        assert_eq!(tagged.len(), CommitMenu::ACTIONS);
+        assert_eq!(tagged.action(0), MenuAction::CopySha);
+        assert_eq!(tagged.action(1), MenuAction::CopyMessage);
+        let branch = menu(&[reference(0, "tag"), reference(1, "local")]);
+        assert_eq!(branch.len(), 3);
+        assert_eq!(branch.action(2), MenuAction::Solo(0));
+        assert_eq!(branch.references[0].name, "refs/local/1");
+    }
+
+    #[test]
+    fn commit_menu_preserves_small_height_and_bounds_large_menus_to_the_window() {
+        let small = menu(&[reference(0, "local")]);
         let many: Vec<_> = (0..128).map(|index| reference(index, "remote")).collect();
-        let large = BranchMenu::new(&many, position).unwrap();
+        let large = menu(&many);
         for font_size in [0., 1., 5.] {
             assert_eq!(
                 small.viewport_height(font_size, px(920.)),
-                BranchMenu::row_height(font_size)
+                CommitMenu::row_height(font_size) * 3
             );
             assert_eq!(large.viewport_height(font_size, px(920.)), px(892.));
             assert_eq!(large.viewport_height(font_size, px(640.)), px(612.));
         }
+    }
+
+    #[test]
+    fn columns_keep_references_at_every_width_and_drop_details_first() {
+        // History width beside default panels in a 1000 px window.
+        let narrow = Columns::new(372., 1.);
+        assert_eq!(narrow.references, 112.);
+        assert_eq!((narrow.author, narrow.date, narrow.sha), (None, None, None));
+        let fixed = narrow.references + narrow.graph + 2. * narrow.gap + 12.;
+        assert!(372. - fixed >= 160., "message keeps {} px", 372. - fixed);
+        let medium = Columns::new(640., 1.);
+        assert!(medium.author.is_none() && medium.date.is_some() && medium.sha.is_some());
+        let wide = Columns::new(812., 1.);
+        assert!(wide.author.is_some() && wide.references > medium.references);
+        // « 22 déc. 14:32 » is 13 glyphs of at most 0.57 em in the list font.
+        for font_size in [0., 1., 5.] {
+            let date = Columns::new(812., font_size).date.unwrap();
+            assert!(date >= 13. * 0.57 * (11. + font_size));
+        }
+        assert!(narrow.badge_width() > 0.);
     }
 
     #[test]

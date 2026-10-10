@@ -9,7 +9,10 @@ use std::{
 };
 
 pub const DEFAULT_FONT_SIZE_OFFSET: f32 = 1.;
-pub const DEFAULT_DIFF_FONT_SIZE: f32 = 11.;
+/// Diffs start at the list text size of the interface: 11 px plus the default zoom.
+pub const DEFAULT_DIFF_FONT_SIZE: f32 = 12.;
+pub const MIN_DIFF_FONT_SIZE: f32 = 9.;
+pub const MAX_DIFF_FONT_SIZE: f32 = 20.;
 pub const DEFAULT_AUTO_FETCH_INTERVAL: u32 = 1;
 pub const MAX_AUTO_FETCH_INTERVAL: u32 = 60;
 
@@ -151,6 +154,16 @@ impl Preferences {
     pub fn save_for_profile(&self, profile: &str) -> io::Result<()> {
         self.save_to(&Self::profile_path(&Self::path(), profile)?)
     }
+    /// Deletes a removed profile's preferences; the legacy file is kept.
+    pub fn remove_for_profile(profile: &str) -> io::Result<()> {
+        Self::remove_profile_from(&Self::path(), profile)
+    }
+    fn remove_profile_from(base: &Path, profile: &str) -> io::Result<()> {
+        match fs::remove_file(Self::profile_path(base, profile)?) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
     pub fn load_from(path: &Path) -> Self {
         fs::read_to_string(path)
             .ok()
@@ -222,7 +235,12 @@ impl Preferences {
         self.font_size_offset = bounded(value, 0., 5., DEFAULT_FONT_SIZE_OFFSET);
     }
     pub fn set_diff_font_size(&mut self, value: f32) {
-        self.diff_font_size = bounded(value, 9., 20., DEFAULT_DIFF_FONT_SIZE);
+        self.diff_font_size = bounded(
+            value,
+            MIN_DIFF_FONT_SIZE,
+            MAX_DIFF_FONT_SIZE,
+            DEFAULT_DIFF_FONT_SIZE,
+        );
     }
     /// `None` resets; +/-1 changes UI and diff sizes together, with the UI bounds.
     pub fn font_shortcut(&mut self, delta: Option<i32>) {
@@ -328,6 +346,37 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]
+    fn removed_profile_preferences_do_not_reach_a_reused_identifier() {
+        let directory = std::env::temp_dir().join(format!(
+            "mangrove-removed-profile-preferences-{}",
+            std::process::id()
+        ));
+        let base = directory.join("preferences.json");
+        let legacy = Preferences {
+            theme: ThemeId::Ardoise,
+            ..Preferences::default()
+        };
+        legacy.save_to(&base).unwrap();
+        let removed = Preferences {
+            theme: ThemeId::Gitlab,
+            ..Preferences::default()
+        };
+        removed
+            .save_to(&Preferences::profile_path(&base, "profile-1").unwrap())
+            .unwrap();
+        Preferences::remove_profile_from(&base, "profile-1").unwrap();
+        assert_eq!(
+            Preferences::load_profile_from(&base, "profile-1"),
+            Preferences::default()
+        );
+        // Removing twice, or the default profile without its own file, is a no-op.
+        Preferences::remove_profile_from(&base, "profile-1").unwrap();
+        Preferences::remove_profile_from(&base, "personal").unwrap();
+        assert_eq!(Preferences::load_profile_from(&base, "personal"), legacy);
+        assert!(Preferences::remove_profile_from(&base, "../outside").is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
     fn tolerant_preferences_preserve_valid_values_and_bound_untrusted_fields() {
         let p = Preferences::from_value(
             serde_json::json!({"theme":"macchiato","font_size_offset":99,"diff_font_size":1,"left_width":999,"right_width":1,"auto_fetch_interval":1.5,"recent":[{"path":"a","name":"A"},{"path":"a","name":"duplicate"},{"path":4,"name":"invalid"},{"path":"b","name":"B"}]}),
@@ -383,7 +432,7 @@ mod tests {
         p.font_shortcut(Some(-1));
         assert_eq!((p.font_size_offset, p.diff_font_size), (4., 14.));
         p.font_shortcut(None);
-        assert_eq!((p.font_size_offset, p.diff_font_size), (1., 11.));
+        assert_eq!((p.font_size_offset, p.diff_font_size), (1., 12.));
     }
     #[test]
     fn interval_requires_a_whole_number_in_the_supported_range() {

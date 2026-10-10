@@ -20,6 +20,48 @@ pub(crate) fn render_bounded(
 ) -> Result<crate::model::FileDiff> {
     let delta = diff.get_delta(index).ok_or("Fichier introuvable.")?;
     let odb = repository.odb().map_err(|error| error.to_string())?;
+    if oversized(&odb, &delta)? {
+        return Ok(crate::model::FileDiff {
+            binary: false,
+            truncated: true,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    }
+    render_file_diff(diff, index)
+}
+
+/// Line totals of every file, counted like their patches, or `None` when one
+/// patch would be skipped by the size guard. `cancelled` is checked per file.
+pub(crate) fn line_totals(
+    repository: &Repository,
+    diff: &Diff<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<(usize, usize)>> {
+    let odb = repository.odb().map_err(|error| error.to_string())?;
+    let (mut additions, mut deletions) = (0, 0);
+    for (index, delta) in diff.deltas().enumerate() {
+        if cancelled() {
+            return Err("Lecture annulée.".into());
+        }
+        if oversized(&odb, &delta)? {
+            return Ok(None);
+        }
+        let Some(patch) = git2::Patch::from_diff(diff, index).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if patch.delta().flags().contains(git2::DiffFlags::BINARY) {
+            continue;
+        }
+        let (_, added, deleted) = patch.line_stats().map_err(|e| e.to_string())?;
+        additions += added;
+        deletions += deleted;
+    }
+    Ok(Some((additions, deletions)))
+}
+
+fn oversized(odb: &git2::Odb<'_>, delta: &DiffDelta<'_>) -> Result<bool> {
     for file in [delta.old_file(), delta.new_file()] {
         if file.id().is_zero()
             || !matches!(
@@ -33,16 +75,10 @@ pub(crate) fn render_bounded(
             .read_header(file.id())
             .map_err(|error| error.to_string())?;
         if size > MAX_FILE_SIZE as usize {
-            return Ok(crate::model::FileDiff {
-                binary: false,
-                truncated: true,
-                additions: 0,
-                deletions: 0,
-                hunks: vec![],
-            });
+            return Ok(true);
         }
     }
-    render_file_diff(diff, index)
+    Ok(false)
 }
 
 struct FileIdentity {

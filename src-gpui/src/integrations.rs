@@ -1,10 +1,14 @@
-use crate::theme::{Palette, icon, scrollbar_theme};
+use crate::{
+    format::{count_label, display_path, initials},
+    recent_repositories::is_remote_favorite,
+    theme::{Palette, icon, scrollbar_theme},
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     base::Button,
     component::{
         Disableable, Sizable,
-        input::{Input, InputEvent, InputState},
+        input::{Escape as InputEscape, Input, InputEvent, InputState},
         scroll::Scrollbar,
         searchable_list::{SearchableGroup, SearchableListDelegate, SearchableListItem},
         select::{Select, SelectEvent, SelectState},
@@ -50,6 +54,12 @@ const MAX_ROWS: usize = 250;
 pub enum IntegrationsEvent {
     ProfileSelected(String),
     ProfileCreated(String),
+    ProfileRenamed {
+        profile_id: String,
+        name: String,
+    },
+    /// Emitted once the profile's credentials have left the vault.
+    ProfileDeleted(String),
     AccountAdded {
         profile_id: String,
         account: Account,
@@ -258,8 +268,12 @@ pub struct IntegrationsView {
     offset: f32,
     scroll: ScrollHandle,
     rail_scroll: ScrollHandle,
+    focus_handle: FocusHandle,
     identities: HashMap<String, AccountIdentity>,
     profile_name: Entity<InputState>,
+    profile_rename: Entity<InputState>,
+    renaming_profile: Option<String>,
+    deleting_profile: Option<String>,
     label: Entity<InputState>,
     server: Entity<InputState>,
     username: Entity<InputState>,
@@ -290,6 +304,7 @@ pub struct IntegrationsView {
     clone_ssh: bool,
     picking_path: bool,
     picker_task: Option<Task<()>>,
+    clone_prompt: bool,
     repository_load_error: Option<mangrove_remote::RemoteError>,
     _subscriptions: Vec<Subscription>,
     session: Arc<ProfileSession>,
@@ -333,20 +348,20 @@ impl IntegrationsView {
             |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
                 cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
             };
-        let key_path = text_input("/Users/…/.ssh/id_ed25519", window, cx);
+        let key_path = text_input("~/.ssh/id_ed25519", window, cx);
         if let SshChoice::KeyFile { path } = &profile.ssh {
             key_path.update(cx, |input, cx| {
-                input.set_value(path.to_string_lossy().to_string(), window, cx)
+                input.set_value(display_path(&path.to_string_lossy()), window, cx)
             });
         }
         let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
-        let oauth_config_open = client_id.is_empty();
         let repository_menu_data = Rc::new(RefCell::new(RepositoryMenuData::default()));
         let options = RepositoryMenu::new(
             repository_menu_data.clone(),
             RepositoryLoadTrigger::new(cx.entity().downgrade(), 0),
             RepositoryLoadState::Complete,
             palette,
+            offset,
         );
         let repository_select =
             cx.new(|cx| SelectState::new(options, None, window, cx).searchable(true));
@@ -359,13 +374,19 @@ impl IntegrationsView {
         let clone_parent = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Choisir un dossier")
-                .default_value(
-                    dirs::home_dir()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
+                .default_value(default_clone_parent())
         });
+        let profile_rename = text_input("Nom du profil", window, cx);
         let mut subscriptions = vec![];
+        subscriptions.push(cx.subscribe_in(
+            &profile_rename,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.save_profile_name(window, cx);
+                }
+            },
+        ));
         subscriptions.push(
             cx.subscribe_in(&clone_url, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -397,8 +418,12 @@ impl IntegrationsView {
             offset,
             scroll: ScrollHandle::default(),
             rail_scroll: ScrollHandle::default(),
+            focus_handle: cx.focus_handle(),
             identities: HashMap::new(),
             profile_name: text_input("Nom du nouveau profil", window, cx),
+            profile_rename,
+            renaming_profile: None,
+            deleting_profile: None,
             label: text_input("Nom du compte", window, cx),
             server: cx.new(|cx| InputState::new(window, cx).default_value("https://gitlab.com")),
             username: text_input("Adresse e-mail Atlassian (Bitbucket Cloud)", window, cx),
@@ -418,7 +443,7 @@ impl IntegrationsView {
                     .masked(true)
             }),
             browser_connection: true,
-            oauth_config_open,
+            oauth_config_open: oauth_config_required(ProviderEdition::GitLab),
             github_private_repos: false,
             github_authorization: None,
             key_path,
@@ -441,6 +466,7 @@ impl IntegrationsView {
             clone_ssh: false,
             picking_path: false,
             picker_task: None,
+            clone_prompt: false,
             repository_load_error: None,
             _subscriptions: subscriptions,
             vault: Arc::new(OsCredentialVault::new()),
@@ -482,6 +508,9 @@ impl IntegrationsView {
     }
 
     pub fn open_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cloning() {
+            return;
+        }
         self.set_section(IntegrationsSection::Repositories, cx);
         let account_id = self
             .selected_account
@@ -513,6 +542,55 @@ impl IntegrationsView {
 
     pub fn choosing_path(&self) -> bool {
         self.picking_path
+    }
+
+    pub fn cloning(&self) -> bool {
+        self.pending == Some(PendingOperation::Clone)
+    }
+
+    /// Asks before cancelling a running clone. Returns false when no clone
+    /// runs; otherwise `then` runs once the user confirms the cancellation.
+    pub fn confirm_cancel_clone(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) -> bool {
+        if !self.cloning() {
+            return false;
+        }
+        if self.clone_prompt {
+            return true;
+        }
+        self.clone_prompt = true;
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Annuler le clonage en cours ?",
+            Some("Un dossier incomplet peut subsister à l’emplacement choisi."),
+            &[
+                PromptButton::ok("Annuler le clonage"),
+                PromptButton::cancel("Continuer le clonage"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let confirmed = answer.await == Ok(0);
+            let _ = cx.update(|window, cx| {
+                let current = this.update(cx, |view, cx| {
+                    view.clone_prompt = false;
+                    // The clone may have finished while the prompt was open.
+                    if confirmed && view.cloning() {
+                        view.cancel();
+                        cx.notify();
+                    }
+                });
+                if confirmed && current.is_ok() {
+                    then(window, cx);
+                }
+            });
+        })
+        .detach();
+        true
     }
 
     pub fn set_theme(&mut self, palette: Palette, offset: f32, cx: &mut Context<Self>) {
@@ -550,21 +628,16 @@ impl IntegrationsView {
             }
             self.edition = ProviderEdition::GitLab;
             self.adding_account = false;
+            self.renaming_profile = None;
             self.direct_clone = false;
             self.clone_ssh = false;
             self.clone_parent.update(cx, |input, cx| {
-                input.set_value(
-                    dirs::home_dir()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    window,
-                    cx,
-                )
+                input.set_value(default_clone_parent(), window, cx)
             });
             self.browser_connection = true;
             self.github_private_repos = false;
             let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
-            self.oauth_config_open = client_id.is_empty();
+            self.oauth_config_open = oauth_config_required(ProviderEdition::GitLab);
             self.client_id
                 .update(cx, |input, cx| input.set_value(client_id, window, cx));
             self.server.update(cx, |input, cx| {
@@ -573,7 +646,7 @@ impl IntegrationsView {
         }
         self.key_path.update(cx, |input, cx| {
             let value = match &profile.ssh {
-                SshChoice::KeyFile { path } => path.to_string_lossy().to_string(),
+                SshChoice::KeyFile { path } => display_path(&path.to_string_lossy()),
                 _ => String::new(),
             };
             input.set_value(value, window, cx);
@@ -663,7 +736,7 @@ impl IntegrationsView {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         let client_id = configured_browser_client_id(&self.profile, edition);
-        self.oauth_config_open = client_id.is_empty();
+        self.oauth_config_open = oauth_config_required(edition);
         self.client_id
             .update(cx, |input, cx| input.set_value(client_id, window, cx));
         self.message = None;
@@ -726,7 +799,7 @@ impl IntegrationsView {
             if client_id.is_empty() {
                 self.oauth_config_open = true;
                 self.error = Some(format!(
-                    "Créez une application {} puis saisissez son ID public.",
+                    "Créez une application {} puis saisissez son ID public dans la configuration avancée.",
                     provider_label(provider)
                 ));
                 cx.notify();
@@ -747,7 +820,8 @@ impl IntegrationsView {
                 if secret.is_empty() {
                     self.oauth_config_open = true;
                     self.error = Some(
-                        "Saisissez le Secret du consumer OAuth Bitbucket dans Mangrove.".into(),
+                        "Saisissez le Secret du consumer OAuth Bitbucket dans la configuration avancée."
+                            .into(),
                     );
                     cx.notify();
                     return;
@@ -1250,6 +1324,7 @@ impl IntegrationsView {
             RepositoryLoadTrigger::new(cx.entity().downgrade(), self.repository_select_scope),
             self.repository_load_state(),
             self.palette,
+            self.offset,
         );
         if !self.repository_select_reset {
             // Pages only append sections: existing full/filtered IndexPaths stay
@@ -1387,7 +1462,7 @@ impl IntegrationsView {
                         };
                         input.update(cx, |input, cx| {
                             input.set_value(
-                                selection.path().to_string_lossy().into_owned(),
+                                display_path(&selection.path().to_string_lossy()),
                                 window,
                                 cx,
                             )
@@ -1409,7 +1484,7 @@ impl IntegrationsView {
         let Some(remote) = remote else {
             return;
         };
-        let parent = PathBuf::from(self.clone_parent.read(cx).value().trim());
+        let parent = expand_home(&self.clone_parent.read(cx).value());
         let name = self.clone_name.read(cx).value().trim().to_string();
         if !parent.is_absolute() || !valid_clone_directory_name(&name) {
             self.error =
@@ -1428,7 +1503,10 @@ impl IntegrationsView {
         let ticket = self.session.ticket(&account_id);
         let worker_ticket = ticket.clone();
         self.pending = Some(PendingOperation::Clone);
-        self.message = Some(format!("Clonage vers {}…", destination.display()));
+        self.message = Some(format!(
+            "Clonage vers {}…",
+            display_path(&destination.to_string_lossy())
+        ));
         self.error = None;
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -1466,6 +1544,16 @@ impl IntegrationsView {
         cx.notify();
     }
 
+    /// Starts a direct clone of `url`, unless a clone is already running.
+    pub fn prefill_clone_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cloning() {
+            return;
+        }
+        self.clone_url
+            .update(cx, |input, cx| input.set_value(url.to_owned(), window, cx));
+        self.select_direct_clone(window, cx);
+    }
+
     fn select_direct_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.cancel();
@@ -1498,7 +1586,7 @@ impl IntegrationsView {
     }
 
     fn add_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.favorite.read(cx).value().trim().to_string();
+        let value = favorite_entry(&self.favorite.read(cx).value());
         if !value.is_empty()
             && !self.profile.favorites.contains(&value)
             && self.profile.favorites.len() < MAX_ROWS
@@ -1511,6 +1599,167 @@ impl IntegrationsView {
             ));
             cx.notify();
         }
+    }
+
+    fn input_focused(&self, window: &Window, cx: &App) -> bool {
+        [
+            &self.profile_name,
+            &self.label,
+            &self.server,
+            &self.username,
+            &self.token,
+            &self.client_id,
+            &self.consumer_secret,
+            &self.key_path,
+            &self.favorite,
+            &self.ssh_remote,
+            &self.clone_url,
+            &self.clone_parent,
+            &self.clone_name,
+        ]
+        .into_iter()
+        .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            // An open select hands its focus to the search field of its menu;
+            // leaving that field closes the menu.
+            || self
+                .repository_select
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+    }
+
+    fn start_profile_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .map(|profile| profile.name.clone())
+        else {
+            return;
+        };
+        self.profile_rename.update(cx, |input, cx| {
+            input.set_value(name, window, cx);
+            input.focus(window, cx);
+        });
+        self.renaming_profile = Some(id);
+        self.error = None;
+        cx.notify();
+    }
+
+    fn cancel_profile_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming_profile = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// A refused name stays in its field with the reason, like a rename.
+    fn create_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.profile_name.read(cx).value().trim().to_string();
+        if let Some(error) = profile_name_error(&name) {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.error = None;
+        self.profile_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.emit(IntegrationsEvent::ProfileCreated(name));
+    }
+
+    fn save_profile_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming_profile.clone() else {
+            return;
+        };
+        let name = self.profile_rename.read(cx).value().trim().to_string();
+        if let Some(error) = profile_name_error(&name) {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
+        let changed = self
+            .profiles
+            .iter()
+            .any(|profile| profile.id == id && profile.name != name);
+        self.error = None;
+        self.cancel_profile_rename(window, cx);
+        if changed {
+            cx.emit(IntegrationsEvent::ProfileRenamed {
+                profile_id: id,
+                name,
+            });
+        }
+    }
+
+    /// A profile whose credentials are leaving the vault cannot become active.
+    fn select_profile(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.deleting_profile.as_ref() != Some(&id) {
+            cx.emit(IntegrationsEvent::ProfileSelected(id));
+        }
+    }
+
+    fn can_delete_profile(&self, id: &str) -> bool {
+        id != self.profile.id && self.profiles.len() > 1 && self.deleting_profile.is_none()
+    }
+
+    fn confirm_profile_deletion(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+            .filter(|profile| self.can_delete_profile(&profile.id))
+        else {
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Supprimer le profil « {} » ?", profile.name),
+            Some(&profile_deletion_detail(&profile)),
+            &[
+                PromptButton::ok("Supprimer le profil"),
+                PromptButton::cancel("Annuler"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |view, cx| view.delete_profile(profile, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Credentials leave the vault before the metadata, so a vault failure
+    /// keeps the profile and the deletion can be retried.
+    fn delete_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
+        if !self.can_delete_profile(&profile.id) {
+            return;
+        }
+        self.deleting_profile = Some(profile.id.clone());
+        self.error = None;
+        let vault = self.vault.clone();
+        cx.spawn(async move |this, cx| {
+            let (profile, result) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result =
+                        mangrove_remote::delete_profile_credentials(vault.as_ref(), &profile);
+                    (profile, result)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.deleting_profile = None;
+                match result {
+                    Ok(()) => cx.emit(IntegrationsEvent::ProfileDeleted(profile.id)),
+                    Err(error) => {
+                        view.error = Some(format!("Le profil n’a pas été supprimé : {error}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn ssh_choice(&mut self, choice: SshChoice, cx: &mut Context<Self>) {
@@ -1685,6 +1934,101 @@ fn provider_label(provider: Provider) -> &'static str {
     }
 }
 
+fn default_clone_parent() -> String {
+    dirs::home_dir()
+        .map(|home| display_path(&home.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// Reads a path typed with the `~` shorthand shown by `display_path`.
+fn expand_home(value: &str) -> PathBuf {
+    let value = value.trim();
+    let rest = match value.strip_prefix('~') {
+        Some("") => "",
+        Some(rest) => match rest.strip_prefix(['/', std::path::MAIN_SEPARATOR]) {
+            Some(rest) => rest,
+            None => return PathBuf::from(value),
+        },
+        None => return PathBuf::from(value),
+    };
+    match dirs::home_dir() {
+        Some(home) if rest.is_empty() => home,
+        Some(home) => home.join(rest),
+        None => PathBuf::from(value),
+    }
+}
+
+/// Local favorites are stored with `~` expanded so the home screen can open them.
+fn favorite_entry(value: &str) -> String {
+    let value = value.trim();
+    if is_remote_favorite(value) {
+        value.to_string()
+    } else {
+        expand_home(value).to_string_lossy().into_owned()
+    }
+}
+
+/// Bitbucket always needs its consumer secret. GitHub and GitLab keep their
+/// application settings folded until a connection attempt requires them.
+fn oauth_config_required(edition: ProviderEdition) -> bool {
+    edition == ProviderEdition::BitbucketCloud
+}
+
+/// Two letters keep single-word names apart, such as Personnel and Professionnel.
+fn profile_monogram(name: &str) -> String {
+    if name.split_whitespace().nth(1).is_some() {
+        return initials(name);
+    }
+    let mut letters = name.chars().filter(|c| c.is_alphanumeric());
+    let Some(first) = letters.next() else {
+        return String::new();
+    };
+    first
+        .to_uppercase()
+        .chain(letters.next().into_iter().flat_map(char::to_lowercase))
+        .collect()
+}
+
+/// A stable hue per profile id, independent of the profile's position.
+fn profile_hue(id: &str, hues: usize) -> usize {
+    // FNV-1a stays identical across launches and Rust releases.
+    let hash = id.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    hash as usize % hues
+}
+
+/// Explains why the profile store would refuse `name`.
+pub(crate) fn profile_name_error(name: &str) -> Option<String> {
+    Profile::validate_name(name).err()?;
+    Some(if name.trim().is_empty() {
+        "Saisissez un nom de profil.".into()
+    } else if name.chars().count() > Profile::MAX_NAME_CHARS {
+        format!(
+            "Choisissez un nom de profil de {} caractères au plus.",
+            Profile::MAX_NAME_CHARS
+        )
+    } else {
+        "Retirez les tabulations et autres caractères de contrôle du nom du profil.".into()
+    })
+}
+
+fn profile_deletion_detail(profile: &Profile) -> String {
+    let accounts = match profile.accounts.len() {
+        0 => String::new(),
+        1 => {
+            "Son compte connecté sera déconnecté et ses identifiants retirés du coffre du système. "
+                .into()
+        }
+        count => format!(
+            "Ses {count} comptes connectés seront déconnectés et leurs identifiants retirés du coffre du système. "
+        ),
+    };
+    format!(
+        "{accounts}Ses favoris, préférences et dépôts récents seront supprimés ; les dépôts sur le disque ne sont pas modifiés. Cette action est irréversible."
+    )
+}
+
 fn valid_clone_directory_name(name: &str) -> bool {
     let stem = name
         .split('.')
@@ -1728,12 +2072,20 @@ fn clone_directory_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IntegrationsEvent, ProviderEdition, accepts_response, bounded,
-        configured_browser_client_id, disconnect_completion,
+        InputEscape, IntegrationsEvent, IntegrationsSection, IntegrationsView, ProviderEdition,
+        accepts_response, bounded, configured_browser_client_id, disconnect_completion,
+    };
+    use crate::theme::{Palette, ThemeId};
+    use gpui_kit::{
+        AnyWindowHandle, AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement,
+        ParentElement, Render, Styled, TestAppContext, Window, WindowOptions, div,
+        test::TestWindowExt,
     };
     use mangrove_remote::{
         Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
+        providers::Repository,
     };
+    use std::{cell::RefCell, rc::Rc};
 
     #[test]
     fn repository_options_keep_full_names_and_stable_ids_in_namespace_groups() {
@@ -1954,12 +2306,323 @@ mod tests {
     }
 
     #[test]
+    fn default_profiles_get_distinct_monograms_and_hues() {
+        let profiles = mangrove_remote::Profiles::default();
+        let [personal, professional] = &profiles.profiles[..] else {
+            panic!("two default profiles");
+        };
+        assert_eq!(super::profile_monogram(&personal.name), "Pe");
+        assert_eq!(super::profile_monogram(&professional.name), "Pr");
+        assert_ne!(
+            super::profile_hue(&personal.id, 8),
+            super::profile_hue(&professional.id, 8)
+        );
+        assert_eq!(super::profile_monogram("Client Acme"), "CA");
+        assert_eq!(super::profile_monogram("é"), "É");
+        assert_eq!(super::profile_monogram("  "), "");
+    }
+
+    #[test]
+    fn profile_deletion_detail_names_the_credentials_it_removes() {
+        let mut profile = Profile::new("work", "Travail");
+        assert!(super::profile_deletion_detail(&profile).starts_with("Ses favoris"));
+        for id in ["one", "two"] {
+            profile.accounts.push(Account {
+                id: id.into(),
+                label: "Compte".into(),
+                provider: Provider::GitLab,
+                server_url: "https://gitlab.com".into(),
+                username: None,
+                authentication: Authentication::PersonalToken,
+            });
+            let detail = super::profile_deletion_detail(&profile);
+            assert!(detail.contains("coffre du système"), "{detail}");
+        }
+        assert!(super::profile_deletion_detail(&profile).starts_with("Ses 2 comptes connectés"));
+    }
+
+    #[test]
+    fn typed_paths_accept_the_displayed_home_shorthand() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(super::expand_home(" ~ "), home);
+        assert_eq!(super::expand_home("~/code"), home.join("code"));
+        assert_eq!(
+            super::expand_home(&crate::format::display_path(
+                &home.join("a b").to_string_lossy()
+            )),
+            home.join("a b")
+        );
+        assert_eq!(
+            super::expand_home("~other"),
+            std::path::PathBuf::from("~other")
+        );
+        assert_eq!(
+            super::expand_home("/tmp/repo"),
+            std::path::PathBuf::from("/tmp/repo")
+        );
+    }
+
+    #[test]
+    fn local_favorites_expand_the_home_shorthand_and_urls_stay_verbatim() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            super::favorite_entry(" ~/code/app "),
+            home.join("code/app").to_string_lossy()
+        );
+        assert_eq!(super::favorite_entry("~"), home.to_string_lossy());
+        for verbatim in [
+            "/srv/repos/app",
+            "~other/app",
+            "https://example.com/~team/app.git",
+            "ssh://git@example.com/~team/app.git",
+            "deploy@example.com:~team/app.git",
+        ] {
+            assert_eq!(super::favorite_entry(verbatim), verbatim);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn an_added_home_favorite_is_stored_as_an_absolute_path(cx: &mut TestAppContext) {
+        let (window, view, events, _) = open_integrations(cx);
+        let path = dirs::home_dir()
+            .unwrap()
+            .join("code")
+            .to_string_lossy()
+            .into_owned();
+        for typed in ["~/code", path.as_str()] {
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.favorite
+                        .update(cx, |input, cx| input.set_value(typed, window, cx));
+                    view.add_favorite(window, cx);
+                })
+            })
+            .unwrap();
+        }
+        cx.run_until_parked();
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::FavoritesChanged(favorites)] if favorites == &[path]
+        ));
+    }
+
+    #[test]
     fn stale_profile_and_account_reads_cannot_replace_current_data() {
         assert!(accepts_response(2, 2, "personal", "personal"));
         assert!(!accepts_response(1, 2, "personal", "personal"));
         assert!(!accepts_response(2, 2, "personal", "professional"));
         // Switching away and back still changes the generation.
         assert!(!accepts_response(2, 4, "personal", "personal"));
+    }
+
+    type EventLog = Rc<RefCell<Vec<IntegrationsEvent>>>;
+
+    fn open_integrations(
+        cx: &mut TestAppContext,
+    ) -> (
+        AnyWindowHandle,
+        Entity<IntegrationsView>,
+        EventLog,
+        Entity<EscapeProbe>,
+    ) {
+        cx.update(gpui_kit::init);
+        let (window, probe) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    let view = cx.new(|cx| {
+                        let mut view = IntegrationsView::new(
+                            Profile::new("personal", "Personnel"),
+                            Palette::for_theme(ThemeId::Classic),
+                            0.,
+                            window,
+                            cx,
+                        );
+                        view.set_profiles(
+                            vec![
+                                Profile::new("personal", "Personnel"),
+                                Profile::new("work", "Travail"),
+                            ],
+                            window,
+                            cx,
+                        );
+                        view.set_section(IntegrationsSection::Profiles, cx);
+                        view
+                    });
+                    cx.new(|_| EscapeProbe { view, escapes: 0 })
+                })
+            })
+            .unwrap();
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        let view = probe.read_with(cx, |probe, _| probe.view.clone());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &IntegrationsEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach()
+        });
+        (window, view, events, probe)
+    }
+
+    /// Stands for the app root, which closes the clone screen when an input
+    /// lets Escape through.
+    struct EscapeProbe {
+        view: Entity<IntegrationsView>,
+        escapes: usize,
+    }
+
+    impl Render for EscapeProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .on_action(cx.listener(|probe, _: &InputEscape, _, _| probe.escapes += 1))
+                .child(self.view.clone())
+        }
+    }
+
+    fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
+        cx.update_window(window, |_, window, cx| window.click(id, cx))
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn escape_in_the_repository_search_leaves_the_field_not_the_clone_screen(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, view, _, probe) = open_integrations(cx);
+        let repository = |id: &str, full_name: &str| Repository {
+            id: id.into(),
+            name: full_name.rsplit('/').next().unwrap().into(),
+            full_name: full_name.into(),
+            web_url: None,
+            clone_url: None,
+            ssh_clone_url: None,
+        };
+        view.update(cx, |view, cx| {
+            view.set_section(IntegrationsSection::Repositories, cx);
+            let mut repositories = Vec::new();
+            view.repository_menu_data
+                .borrow_mut()
+                .append(
+                    &mut repositories,
+                    vec![repository("1", "team/api"), repository("2", "team/web")],
+                )
+                .unwrap();
+            view.repositories = repositories;
+            cx.notify();
+        });
+        click(cx, window, "repository-select");
+        let state = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                let view = view.read(cx);
+                (
+                    view.repository_select
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    view.focus_handle.is_focused(window),
+                    probe.read(cx).escapes,
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(state(cx), (true, false, 0));
+
+        cx.update_window(window, |_, window, cx| {
+            window.input("api", cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(state(cx), (false, true, 0));
+    }
+
+    #[gpui_kit::test]
+    fn a_profile_cannot_be_selected_while_its_deletion_runs(cx: &mut TestAppContext) {
+        let (window, view, events, _) = open_integrations(cx);
+        view.update(cx, |view, cx| {
+            view.deleting_profile = Some("work".into());
+            cx.notify();
+        });
+        click(cx, window, "profile-work");
+        view.update(cx, |view, cx| view.select_profile("work".into(), cx));
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty());
+
+        view.update(cx, |view, cx| {
+            view.deleting_profile = None;
+            cx.notify();
+        });
+        click(cx, window, "profile-work");
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::ProfileSelected(id)] if id == "work"
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_profile_name_keeps_the_editor_open_with_its_reason(cx: &mut TestAppContext) {
+        let (window, view, events, _) = open_integrations(cx);
+        let rename = |cx: &mut TestAppContext, name: String| {
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.profile_rename
+                        .update(cx, |input, cx| input.set_value(name, window, cx));
+                    view.save_profile_name(window, cx);
+                })
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.start_profile_rename("work".into(), window, cx)
+            })
+        })
+        .unwrap();
+        rename(cx, "é".repeat(129));
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.renaming_profile.as_deref(), Some("work"));
+            assert_eq!(
+                view.error.as_deref(),
+                Some("Choisissez un nom de profil de 128 caractères au plus.")
+            );
+        });
+        assert!(events.borrow().is_empty());
+
+        rename(cx, "é".repeat(128));
+        view.read_with(cx, |view, _| {
+            assert!(view.renaming_profile.is_none());
+            assert!(view.error.is_none());
+        });
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::ProfileRenamed { profile_id, name }]
+                if profile_id == "work" && name.chars().count() == 128
+        ));
+    }
+
+    #[test]
+    fn profile_name_errors_match_the_store_rules() {
+        assert_eq!(super::profile_name_error("Client Acme"), None);
+        assert_eq!(super::profile_name_error(&"é".repeat(128)), None);
+        assert_eq!(
+            super::profile_name_error("  ").as_deref(),
+            Some("Saisissez un nom de profil.")
+        );
+        assert!(
+            super::profile_name_error(&"x".repeat(129))
+                .unwrap()
+                .contains("128 caractères")
+        );
+        assert!(
+            super::profile_name_error("tab\tname")
+                .unwrap()
+                .contains("caractères de contrôle")
+        );
     }
 
     #[test]

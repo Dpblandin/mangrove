@@ -5,7 +5,9 @@ use std::{
     sync::Mutex,
 };
 
-use crate::{model::validate_id, ExposeSecret, Profiles, RemoteError, Result, SecretToken};
+use crate::{
+    model::validate_id, ExposeSecret, Profile, Profiles, RemoteError, Result, SecretToken,
+};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 // Credential stores (notably Windows) do not promise write ordering. This also
@@ -109,6 +111,15 @@ pub trait CredentialVault: Send + Sync {
     ) -> Result<bool> {
         Err(RemoteError::VaultUnavailable)
     }
+}
+
+/// Deletes the credential of every account in `profile`. Vaults treat a
+/// missing entry as deleted, so a partially failed cleanup can be retried.
+pub fn delete_profile_credentials(vault: &dyn CredentialVault, profile: &Profile) -> Result<()> {
+    profile
+        .accounts
+        .iter()
+        .try_for_each(|account| vault.delete(&profile.id, &account.id))
 }
 
 /// Explicit native backends are enabled per platform in Cargo.toml. A missing
@@ -277,6 +288,51 @@ mod tests {
         assert_eq!(store.load(), Err(RemoteError::Storage));
         fs::write(store.path(), vec![b' '; MAX_CONFIG_BYTES as usize + 1]).unwrap();
         assert_eq!(store.load(), Err(RemoteError::Storage));
+    }
+
+    #[test]
+    fn deleting_profile_credentials_removes_only_that_profile_entries() {
+        use std::collections::HashMap;
+        #[derive(Default)]
+        struct MemoryVault(Mutex<HashMap<(String, String), String>>);
+        impl CredentialVault for MemoryVault {
+            fn store(&self, profile_id: &str, account_id: &str, token: &SecretToken) -> Result<()> {
+                self.0.lock().unwrap().insert(
+                    (profile_id.into(), account_id.into()),
+                    token.expose_secret().into(),
+                );
+                Ok(())
+            }
+            fn read(&self, profile_id: &str, account_id: &str) -> Result<Option<SecretToken>> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .get(&(profile_id.into(), account_id.into()))
+                    .map(|token| SecretToken::from(token.clone())))
+            }
+            fn delete(&self, profile_id: &str, account_id: &str) -> Result<()> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .remove(&(profile_id.into(), account_id.into()));
+                Ok(())
+            }
+        }
+        let vault = MemoryVault::default();
+        let mut work = Profile::new("professional", "Professionnel");
+        work.accounts.push(account("https://gitlab.example"));
+        let token = SecretToken::from("synthetic-fixture");
+        vault.store("professional", "same-account", &token).unwrap();
+        vault.store("personal", "same-account", &token).unwrap();
+        delete_profile_credentials(&vault, &work).unwrap();
+        assert!(vault
+            .read("professional", "same-account")
+            .unwrap()
+            .is_none());
+        assert!(vault.read("personal", "same-account").unwrap().is_some());
+        // Already deleted entries do not prevent a retry.
+        delete_profile_credentials(&vault, &work).unwrap();
     }
 
     #[test]
