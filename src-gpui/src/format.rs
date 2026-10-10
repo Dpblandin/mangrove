@@ -95,6 +95,33 @@ pub fn display_path(path: &str) -> String {
     }
 }
 
+/// A file size in mebibytes with a French decimal comma: « 5,4 Mio ».
+pub fn byte_size(bytes: u64) -> String {
+    mebibytes(bytes, f64::round)
+}
+
+/// The size of a file above `bound`, rounded up where the nearest value
+/// would read as the bound itself: « 8,1 Mio », not « 8 Mio », above 8 Mio.
+pub fn byte_size_above(bytes: u64, bound: u64) -> String {
+    let nearest = byte_size(bytes);
+    if nearest == byte_size(bound) {
+        mebibytes(bytes, f64::ceil)
+    } else {
+        nearest
+    }
+}
+
+fn mebibytes(bytes: u64, round: fn(f64) -> f64) -> String {
+    let value = bytes as f64 / 1_048_576.;
+    // One decimal below ten, where it still tells sizes apart.
+    if value < 9.95 {
+        let value = round(value * 10.) / 10.;
+        format!("{}\u{a0}Mio", value.to_string().replace('.', ","))
+    } else {
+        format!("{}\u{a0}Mio", format_count(round(value) as usize))
+    }
+}
+
 pub fn format_count(value: usize) -> String {
     let digits = value.to_string();
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
@@ -129,7 +156,9 @@ pub fn control_shortcut_label(key: &str, shift: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{alt_shortcut_label, compact_date_at, count_label, display_path};
+    use super::{
+        alt_shortcut_label, byte_size, byte_size_above, compact_date_at, count_label, display_path,
+    };
     use chrono::TimeZone;
 
     #[test]
@@ -143,6 +172,20 @@ mod tests {
         let last_year = chrono::Local.with_ymd_and_hms(2025, 3, 2, 8, 5, 0).unwrap();
         assert_eq!(compact_date_at(this_year.timestamp(), now), "9 oct. 14:32");
         assert_eq!(compact_date_at(last_year.timestamp(), now), "2 mars 2025");
+    }
+
+    #[test]
+    fn byte_sizes_use_mebibytes_and_a_decimal_comma() {
+        const MIB: u64 = 1_048_576;
+        assert_eq!(byte_size(5_666_173), "5,4\u{a0}Mio");
+        assert_eq!(byte_size(8 * MIB), "8\u{a0}Mio");
+        assert_eq!(byte_size(10_380_000), "9,9\u{a0}Mio");
+        assert_eq!(byte_size(10_480_000), "10\u{a0}Mio");
+        assert_eq!(byte_size(3 * 1024 * MIB), "3\u{202f}072\u{a0}Mio");
+        // A size above a bound never reads as the bound.
+        assert_eq!(byte_size_above(5_666_173, 2 * MIB), "5,4\u{a0}Mio");
+        assert_eq!(byte_size_above(8 * MIB + 40_000, 8 * MIB), "8,1\u{a0}Mio");
+        assert_eq!(byte_size_above(64 * MIB + 1, 64 * MIB), "65\u{a0}Mio");
     }
 
     #[test]

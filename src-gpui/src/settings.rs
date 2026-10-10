@@ -1,12 +1,12 @@
 pub(crate) mod ui;
 
 use crate::{
-    format::count_label,
+    format::{byte_size, count_label},
     integrations::{IntegrationsSection, IntegrationsView},
     preferences::{
         DEFAULT_DIFF_FONT_SIZE, DEFAULT_FONT_SIZE_OFFSET, MAX_AUTO_FETCH_INTERVAL,
-        MAX_DIFF_FONT_SIZE, MAX_FONT_SIZE_OFFSET, MIN_DIFF_FONT_SIZE, MIN_FONT_SIZE_OFFSET,
-        Preferences, parse_auto_fetch_interval,
+        MAX_DIFF_FONT_SIZE, MAX_FONT_SIZE_OFFSET, MAX_PREVIEW_LIMIT, MIN_DIFF_FONT_SIZE,
+        MIN_FONT_SIZE_OFFSET, MIN_PREVIEW_LIMIT, Preferences, parse_whole_number,
     },
     theme::{Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, scrollbar_theme},
 };
@@ -24,14 +24,15 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+use mangrove_core::model::PreviewLimit;
 use std::time::Duration;
 use ui::{
     CONTENT_MAX_WIDTH, NAV_WIDTH, PAGE_GAP, PAGE_PADDING, Tone, card, card_title, field_border,
     link_action, nav_item, note, page_header,
 };
 
-/// A typing pause after which a valid interval draft is applied.
-const INTERVAL_COMMIT_DELAY: Duration = Duration::from_millis(600);
+/// A typing pause after which a valid number draft is applied.
+const NUMBER_COMMIT_DELAY: Duration = Duration::from_millis(600);
 /// How long "Enregistré" stays beside the setting that was just saved.
 const SAVED_NOTICE: Duration = Duration::from_millis(2500);
 
@@ -41,6 +42,9 @@ pub enum SettingsEvent {
     ThemeChanged(ThemeId),
     IntervalChanged(u32),
     ImagePreviewsChanged(bool),
+    LargePreviewsChanged(bool),
+    /// In mebibytes.
+    PreviewLimitChanged(u32),
     FontSizeChanged(f32),
     DiffFontSizeChanged(f32),
 }
@@ -53,6 +57,8 @@ impl SettingsEvent {
             Self::ThemeChanged(_) => Some(SettingsField::Theme),
             Self::IntervalChanged(_) => Some(SettingsField::Interval),
             Self::ImagePreviewsChanged(_) => Some(SettingsField::ImagePreviews),
+            Self::LargePreviewsChanged(_) => Some(SettingsField::LargePreviews),
+            Self::PreviewLimitChanged(_) => Some(SettingsField::PreviewLimit),
             Self::FontSizeChanged(_) => Some(SettingsField::FontSize),
             Self::DiffFontSizeChanged(_) => Some(SettingsField::DiffFontSize),
         }
@@ -65,7 +71,112 @@ pub enum SettingsField {
     FontSize,
     DiffFontSize,
     ImagePreviews,
+    LargePreviews,
+    PreviewLimit,
     Interval,
+}
+
+/// A whole number typed in a field with − and + steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumberSetting {
+    Interval,
+    PreviewLimit,
+}
+
+impl NumberSetting {
+    const ALL: [Self; 2] = [Self::Interval, Self::PreviewLimit];
+
+    fn range(self) -> (u32, u32) {
+        match self {
+            Self::Interval => (0, MAX_AUTO_FETCH_INTERVAL),
+            Self::PreviewLimit => (MIN_PREVIEW_LIMIT, MAX_PREVIEW_LIMIT),
+        }
+    }
+
+    /// A valid draft, in range.
+    fn parse(self, draft: &str) -> Option<u32> {
+        let (minimum, maximum) = self.range();
+        parse_whole_number(draft, minimum, maximum)
+    }
+
+    fn field(self) -> SettingsField {
+        match self {
+            Self::Interval => SettingsField::Interval,
+            Self::PreviewLimit => SettingsField::PreviewLimit,
+        }
+    }
+
+    fn changed(self, value: u32) -> SettingsEvent {
+        match self {
+            Self::Interval => SettingsEvent::IntervalChanged(value),
+            Self::PreviewLimit => SettingsEvent::PreviewLimitChanged(value),
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Interval => "auto-fetch-interval",
+            Self::PreviewLimit => "large-preview-limit",
+        }
+    }
+
+    /// The field, then its − and + steps.
+    fn labels(self) -> [&'static str; 3] {
+        match self {
+            Self::Interval => [
+                "Intervalle d’auto-fetch en minutes",
+                "Diminuer l’intervalle d’auto-fetch",
+                "Augmenter l’intervalle d’auto-fetch",
+            ],
+            Self::PreviewLimit => [
+                "Limite d’aperçu des fichiers volumineux en Mio",
+                "Diminuer la limite d’aperçu",
+                "Augmenter la limite d’aperçu",
+            ],
+        }
+    }
+
+    /// What stays applied when a draft is refused.
+    fn kept(self, saved: u32) -> String {
+        match self {
+            Self::Interval if saved == 0 => "L’auto-fetch reste désactivé.".to_string(),
+            Self::Interval => format!(
+                "L’intervalle enregistré reste de {}.",
+                count_label(saved as usize, "minute", "minutes")
+            ),
+            Self::PreviewLimit => format!(
+                "La limite enregistrée reste de {}.",
+                byte_size(PreviewLimit::from_mib(saved.into()).bytes())
+            ),
+        }
+    }
+}
+
+/// The applied value of a number field and its draft. Drafts apply only once
+/// stable, never mid-typing; an invalid draft left in the field is dropped.
+struct NumberField {
+    applied: u32,
+    input: Entity<InputState>,
+    error: Option<String>,
+    commit_task: Option<Task<()>>,
+}
+
+impl NumberField {
+    fn new(applied: u32, window: &mut Window, cx: &mut App) -> Self {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                // Stepping is bounded separately; invalid drafts stay visible
+                // with their error until blur restores the applied value.
+                .mask_pattern(MaskPattern::None)
+                .default_value(applied.to_string())
+        });
+        Self {
+            applied,
+            input,
+            error: None,
+            commit_task: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,20 +228,17 @@ impl SettingsSection {
 pub struct SettingsView {
     section: SettingsSection,
     integrations: Option<Entity<IntegrationsView>>,
-    /// The last applied interval, restored if the field is left with an
-    /// invalid draft. Drafts apply only once stable, never mid-typing.
-    interval: u32,
-    commit_task: Option<Task<()>>,
+    interval: NumberField,
+    preview_limit: NumberField,
     show_image_previews: bool,
+    show_large_previews: bool,
     diff_font_size: f32,
-    input: Entity<InputState>,
     theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     scroll: ScrollHandle,
     focus_handle: FocusHandle,
     navigation: [FocusHandle; 4],
     palette: Palette,
     font_size_offset: f32,
-    error: Option<String>,
     /// The last saved control, or why it could not be saved.
     saved: Option<(SettingsField, Result<(), String>)>,
     saved_task: Option<Task<()>>,
@@ -143,14 +251,8 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
     pub fn new(preferences: &Preferences, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let interval = preferences.auto_fetch_interval;
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                // Stepping is bounded separately; invalid drafts stay visible
-                // with their error until blur restores the focus interval.
-                .mask_pattern(MaskPattern::None)
-                .default_value(interval.to_string())
-        });
+        let interval = NumberField::new(preferences.auto_fetch_interval, window, cx);
+        let preview_limit = NumberField::new(preferences.large_preview_limit, window, cx);
         let initial_theme = ThemeId::ALL
             .iter()
             .position(|id| *id == preferences.theme)
@@ -163,41 +265,50 @@ impl SettingsView {
                 cx,
             )
         });
-        let input_subscription =
-            cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-                InputEvent::Change => this.draft_changed(cx),
-                InputEvent::PressEnter { .. } => {
-                    this.commit_draft(cx);
-                }
-                InputEvent::Blur => this.leave_draft(window, cx),
-                InputEvent::Focus => {}
-            });
-        let theme_subscription = cx.subscribe(&theme_select, |_, _, event, cx| {
+        let mut subscriptions = Vec::new();
+        for setting in NumberSetting::ALL {
+            let input = match setting {
+                NumberSetting::Interval => &interval.input,
+                NumberSetting::PreviewLimit => &preview_limit.input,
+            };
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, _, event, window, cx| match event {
+                    InputEvent::Change => this.draft_changed(setting, cx),
+                    InputEvent::PressEnter { .. } => {
+                        this.commit_draft(setting, cx);
+                    }
+                    InputEvent::Blur => this.leave_draft(setting, window, cx),
+                    InputEvent::Focus => {}
+                },
+            ));
+        }
+        subscriptions.push(cx.subscribe(&theme_select, |_, _, event, cx| {
             if let SelectEvent::Confirm(Some(label)) = event
                 && let Some(theme) = ThemeId::ALL.iter().find(|id| id.label() == *label)
             {
                 cx.emit(SettingsEvent::ThemeChanged(*theme));
             }
-        });
+        }));
         Self {
             section: SettingsSection::General,
             integrations: None,
             interval,
-            commit_task: None,
+            preview_limit,
             show_image_previews: preferences.show_image_previews,
+            show_large_previews: preferences.show_large_previews,
             diff_font_size: preferences.diff_font_size,
-            input,
             theme_select,
             scroll: ScrollHandle::default(),
             focus_handle: cx.focus_handle(),
             navigation: std::array::from_fn(|_| cx.focus_handle()),
             palette: preferences.palette(),
             font_size_offset: preferences.font_size_offset,
-            error: None,
             saved: None,
             saved_task: None,
             return_to_clone: false,
-            _subscriptions: vec![input_subscription, theme_subscription],
+            _subscriptions: subscriptions,
         }
     }
     pub fn set_integrations(
@@ -270,20 +381,54 @@ impl SettingsView {
         self.font_size_offset = preferences.font_size_offset;
         self.diff_font_size = preferences.diff_font_size;
         self.show_image_previews = preferences.show_image_previews;
+        self.show_large_previews = preferences.show_large_previews;
         if let Some(integrations) = &self.integrations {
             let (palette, offset) = (self.palette, self.font_size_offset);
             integrations.update(cx, |view, cx| view.set_theme(palette, offset, cx));
         }
         cx.notify();
     }
-    pub fn set_interval(&mut self, interval: u32, window: &mut Window, cx: &mut Context<Self>) {
-        self.interval = interval;
-        self.commit_task = None;
-        self.input.update(cx, |input, cx| {
-            input.set_value(interval.to_string(), window, cx)
+    /// Shows the applied interval and preview limit, dropping their drafts.
+    pub fn set_numbers(
+        &mut self,
+        preferences: &Preferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (setting, value) in [
+            (NumberSetting::Interval, preferences.auto_fetch_interval),
+            (NumberSetting::PreviewLimit, preferences.large_preview_limit),
+        ] {
+            self.set_number(setting, value, window, cx);
+        }
+    }
+    fn set_number(
+        &mut self,
+        setting: NumberSetting,
+        value: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = self.number_mut(setting);
+        field.applied = value;
+        field.commit_task = None;
+        field.error = None;
+        field.input.update(cx, |input, cx| {
+            input.set_value(value.to_string(), window, cx)
         });
-        self.error = None;
         cx.notify();
+    }
+    fn number(&self, setting: NumberSetting) -> &NumberField {
+        match setting {
+            NumberSetting::Interval => &self.interval,
+            NumberSetting::PreviewLimit => &self.preview_limit,
+        }
+    }
+    fn number_mut(&mut self, setting: NumberSetting) -> &mut NumberField {
+        match setting {
+            NumberSetting::Interval => &mut self.interval,
+            NumberSetting::PreviewLimit => &mut self.preview_limit,
+        }
     }
     pub fn set_selected_theme(
         &mut self,
@@ -324,8 +469,15 @@ impl SettingsView {
         cx.notify();
     }
     #[cfg(test)]
-    fn focus_interval(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| input.focus(window, cx));
+    fn focus_number(
+        &mut self,
+        setting: NumberSetting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.number(setting)
+            .input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
     /// ↑ and ↓ move between the navigation entries; Enter or Space opens one.
     fn navigation_key(
@@ -358,24 +510,26 @@ impl SettingsView {
     }
     /// Only a stable draft is applied: after a typing pause, on Enter, on a
     /// step or when the field is left.
-    fn draft_changed(&mut self, cx: &mut Context<Self>) {
-        self.commit_task = None;
-        match resolve_interval(self.input.read(cx).value().as_ref(), self.interval) {
-            Ok(interval) => {
-                self.error = None;
-                if interval != self.interval {
-                    self.commit_task = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(INTERVAL_COMMIT_DELAY).await;
-                        let _ = this.update(cx, |this, cx| this.commit_draft(cx));
+    fn draft_changed(&mut self, setting: NumberSetting, cx: &mut Context<Self>) {
+        let draft = self.number(setting).input.read(cx).value().to_string();
+        let field = self.number_mut(setting);
+        field.commit_task = None;
+        match resolve_number(setting, &draft, field.applied) {
+            Ok(value) => {
+                field.error = None;
+                if value != field.applied {
+                    field.commit_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(NUMBER_COMMIT_DELAY).await;
+                        let _ = this.update(cx, |this, cx| this.commit_draft(setting, cx));
                     }));
                 }
             }
             Err(error) => {
-                self.error = Some(error);
+                field.error = Some(error);
                 if self
                     .saved
                     .as_ref()
-                    .is_some_and(|(field, _)| *field == SettingsField::Interval)
+                    .is_some_and(|(field, _)| *field == setting.field())
                 {
                     self.saved = None;
                 }
@@ -383,38 +537,50 @@ impl SettingsView {
         }
         cx.notify();
     }
-    fn commit_draft(&mut self, cx: &mut Context<Self>) -> bool {
-        self.commit_task = None;
-        let Some(interval) = parse_auto_fetch_interval(self.input.read(cx).value().as_ref()) else {
+    fn commit_draft(&mut self, setting: NumberSetting, cx: &mut Context<Self>) -> bool {
+        let draft = self.number(setting).input.read(cx).value().to_string();
+        let field = self.number_mut(setting);
+        field.commit_task = None;
+        let Some(value) = setting.parse(&draft) else {
             return false;
         };
-        self.apply_interval(interval, cx);
+        if value != field.applied {
+            field.applied = value;
+            cx.emit(setting.changed(value));
+        }
         true
     }
-    /// A refused draft gives way to the saved interval, with the reason left
+    /// A refused draft gives way to the applied value, with the reason left
     /// under the field.
-    fn leave_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let draft = self.input.read(cx).value().trim().to_string();
-        let applied = self.commit_draft(cx);
-        self.set_interval(self.interval, window, cx);
+    fn leave_draft(&mut self, setting: NumberSetting, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self
+            .number(setting)
+            .input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let applied = self.commit_draft(setting, cx);
+        let value = self.number(setting).applied;
+        self.set_number(setting, value, window, cx);
         if !applied {
-            self.error = Some(abandoned_interval(&draft, self.interval));
+            self.number_mut(setting).error = Some(abandoned_number(setting, &draft, value));
         }
     }
-    fn apply_interval(&mut self, interval: u32, cx: &mut Context<Self>) {
-        if interval != self.interval {
-            self.interval = interval;
-            cx.emit(SettingsEvent::IntervalChanged(interval));
-        }
-    }
-    fn step(&mut self, action: StepAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| {
+    fn step(
+        &mut self,
+        setting: NumberSetting,
+        action: StepAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.number(setting).input.update(cx, |input, cx| {
             input.focus(window, cx);
-            if let Some(value) = step_interval(input.value().as_ref(), action) {
+            if let Some(value) = step_number(setting, input.value().as_ref(), action) {
                 input.replace_all(value, window, cx);
             }
         });
-        self.commit_draft(cx);
+        self.commit_draft(setting, cx);
     }
 
     fn saved_notice(&self, field: SettingsField) -> Option<Div> {
@@ -435,20 +601,32 @@ impl SettingsView {
         })
     }
 
-    fn interval_control(&self, window: &mut Window, cx: &mut Context<Self>) -> NumberInput {
+    fn number_control(
+        &self,
+        setting: NumberSetting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> NumberInput {
         let p = self.palette;
         let offset = self.font_size_offset;
-        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let field = self.number(setting);
+        let [label, decrease, increase] = setting.labels();
+        let focused = field.input.read(cx).focus_handle(cx).is_focused(window);
         let view = cx.entity().downgrade();
-        let border = if self.error.is_some() {
+        let border = if field.error.is_some() {
             p.danger
         } else if focused {
             p.accent
         } else {
             field_border(p)
         };
+        let draft = field.input.read(cx).value().to_string();
+        let bound = |action| step_number(setting, &draft, action).is_none();
+        let (at_minimum, at_maximum) = (bound(StepAction::Decrement), bound(StepAction::Increment));
         // Full-height − and + keep both steps as large as the other controls.
-        let step = move |button: Button, label: &'static str, glyph: IconName| {
+        // The kit keeps both enabled: a step that would do nothing only looks
+        // unavailable.
+        let step = move |button: Button, label: &'static str, glyph: IconName, bound: bool| {
             button
                 .accessibility_label(label)
                 .w(px(34.))
@@ -456,12 +634,15 @@ impl SettingsView {
                 .items_center()
                 .justify_center()
                 .border_color(rgb(field_border(p)))
-                .cursor_pointer()
-                .hover(move |style| style.bg(rgb(ui::hover_fill(p))))
-                .styles(|styles| styles.disabled(|style| style.opacity(0.4)))
+                .when(bound, |button| button.opacity(0.4).cursor_default())
+                .when(!bound, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(rgb(ui::hover_fill(p))))
+                })
                 .child(icon(glyph, 14., p.text))
         };
-        NumberInput::new(&self.input)
+        NumberInput::new(&field.input)
             .w(px(156.))
             .h(px(ui::CONTROL_HEIGHT))
             .flex_none()
@@ -471,9 +652,9 @@ impl SettingsView {
             .border_color(rgb(border))
             .bg(rgb(p.bg))
             .input(
-                Input::new(&self.input)
-                    .id("auto-fetch-interval")
-                    .aria_label("Intervalle d’auto-fetch en minutes")
+                Input::new(&field.input)
+                    .id(setting.id())
+                    .aria_label(label)
                     .appearance(false)
                     .with_size(px(34.))
                     .w_full()
@@ -485,21 +666,13 @@ impl SettingsView {
                     .text_color(rgb(p.text)),
             )
             .decrement_button(move |button| {
-                step(
-                    button.border_r_1(),
-                    "Diminuer l’intervalle d’auto-fetch",
-                    IconName::Minus,
-                )
+                step(button.border_r_1(), decrease, IconName::Minus, at_minimum)
             })
             .increment_button(move |button| {
-                step(
-                    button.border_l_1(),
-                    "Augmenter l’intervalle d’auto-fetch",
-                    IconName::Plus,
-                )
+                step(button.border_l_1(), increase, IconName::Plus, at_maximum)
             })
             .on_step(move |action, window, cx| {
-                let _ = view.update(cx, |view, cx| view.step(action, window, cx));
+                let _ = view.update(cx, |view, cx| view.step(setting, action, window, cx));
             })
     }
 
@@ -569,6 +742,92 @@ impl SettingsView {
                         cx.emit(event);
                     })),
             )
+    }
+
+    /// A labelled switch with its explanation and save feedback.
+    fn switch_row(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        explanation: impl Into<SharedString>,
+        (checked, field): (bool, SettingsField),
+        change: fn(&mut Self, bool) -> SettingsEvent,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.palette;
+        let offset = self.font_size_offset;
+        div()
+            .flex()
+            .items_start()
+            .gap(px(20.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    // Beside the label, the feedback never moves the rows below:
+                    // the row already has the feedback's line height.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .gap(px(8.))
+                            .min_h(px((12. + offset) * 1.5))
+                            .child(ui::field_label(label, p, offset))
+                            .children(self.saved_notice(field)),
+                    )
+                    .child(note(explanation, p)),
+            )
+            .child(
+                Switch::new(id)
+                    .checked(checked)
+                    .accessibility_label(label)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        let event = change(this, *checked);
+                        cx.emit(event);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// A number field with its unit, then its error or save feedback.
+    fn number_row(
+        &self,
+        setting: NumberSetting,
+        unit: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.palette;
+        let offset = self.font_size_offset;
+        let error = &self.number(setting).error;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(12.))
+                    .child(self.number_control(setting, window, cx))
+                    .child(
+                        div()
+                            .text_size(px(12. + offset))
+                            .text_color(rgb(p.muted))
+                            .child(unit),
+                    )
+                    .when(error.is_none(), |row| {
+                        row.children(self.saved_notice(setting.field()))
+                    }),
+            )
+            .when_some(error.clone(), |view, error| {
+                view.child(ui::feedback(Tone::Error, error, p, offset))
+            })
     }
 
     fn general_content(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -673,60 +932,51 @@ impl SettingsView {
                 p,
                 offset,
             ));
-        let previews = card(p).child(card_title("Aperçus des fichiers", offset)).child(
-            div()
-                .flex()
-                .items_start()
-                .gap(px(20.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(ui::field_label("Afficher les aperçus des images", p, offset))
-                        .child(note(
-                            "Dans les vues Diff et Fichier, avec une comparaison avant/après pour les images modifiées.",
-                            p,
-                        ))
-                        .children(self.saved_notice(SettingsField::ImagePreviews)),
-                )
-                .child(
-                    Switch::new("show-image-previews")
-                        .checked(self.show_image_previews)
-                        .accessibility_label("Afficher les aperçus des images")
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.show_image_previews = *checked;
-                            cx.emit(SettingsEvent::ImagePreviewsChanged(*checked));
-                            cx.notify();
-                        })),
-                ),
+        let image_previews = self.switch_row(
+            "show-image-previews",
+            "Afficher les aperçus des images",
+            "Dans les vues Diff et Fichier, avec une comparaison avant/après pour les images modifiées.",
+            (self.show_image_previews, SettingsField::ImagePreviews),
+            |this, checked| {
+                this.show_image_previews = checked;
+                SettingsEvent::ImagePreviewsChanged(checked)
+            },
+            cx,
         );
-        let interval = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .flex_wrap()
-                    .gap(px(12.))
-                    .child(self.interval_control(window, cx))
-                    .child(
-                        div()
-                            .text_size(px(12. + offset))
-                            .text_color(rgb(p.muted))
-                            .child("minutes"),
-                    )
-                    .when(self.error.is_none(), |row| {
-                        row.children(self.saved_notice(SettingsField::Interval))
-                    }),
-            )
-            .when_some(self.error.clone(), |view, error| {
-                view.child(ui::feedback(Tone::Error, error, p, offset))
-            })
+        let large_previews = self.switch_row(
+            "show-large-previews",
+            "Afficher l’aperçu des fichiers volumineux",
+            format!(
+                "Désactivé, les diffs et fichiers de plus de {} ne sont pas lus. Un fichier au-delà de la limite reste consultable à la demande, jusqu’à {}.",
+                byte_size(PreviewLimit::MIN.bytes()),
+                byte_size(PreviewLimit::MAX.bytes())
+            ),
+            (self.show_large_previews, SettingsField::LargePreviews),
+            |this, checked| {
+                this.show_large_previews = checked;
+                SettingsEvent::LargePreviewsChanged(checked)
+            },
+            cx,
+        );
+        let limit = self
+            .number_row(NumberSetting::PreviewLimit, "Mio", window, cx)
+            .child(note(
+                format!(
+                    "De {MIN_PREVIEW_LIMIT} à {}. Le temps de lecture et la mémoire utilisée augmentent avec la taille du fichier.",
+                    byte_size(PreviewLimit::MAX.bytes())
+                ),
+                p,
+            ));
+        let previews = card(p)
+            .gap(px(20.))
+            .child(card_title("Aperçus des fichiers", offset))
+            .child(image_previews)
+            .child(large_previews)
+            .when(self.show_large_previews, |card| {
+                card.child(setting_row("Limite", None, limit, p, offset))
+            });
+        let interval = self
+            .number_row(NumberSetting::Interval, "minutes", window, cx)
             .child(note(
                 "De 0 à 60 minutes ; 0 désactive l’auto-fetch. Récupère les références de tous les remotes du dépôt actif.",
                 p,
@@ -832,7 +1082,13 @@ impl Render for SettingsView {
             .track_focus(&self.focus_handle)
             // The first Escape leaves the field; the next one reaches the workspace.
             .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
-                if this.input.read(cx).focus_handle(cx).is_focused(window) {
+                if NumberSetting::ALL.into_iter().any(|setting| {
+                    this.number(setting)
+                        .input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                }) {
                     this.navigation[this.section.index()].focus(window, cx);
                 } else {
                     cx.propagate();
@@ -989,38 +1245,28 @@ fn interface_scale(offset: f32) -> u32 {
     ((11. + offset) / (11. + DEFAULT_FONT_SIZE_OFFSET) * 100.).round() as u32
 }
 
-/// A valid draft becomes the interval; an invalid one keeps `saved`.
-fn resolve_interval(draft: &str, saved: u32) -> Result<u32, String> {
-    parse_auto_fetch_interval(draft).ok_or_else(|| {
+/// A valid draft becomes the value; an invalid one keeps `saved`.
+fn resolve_number(setting: NumberSetting, draft: &str, saved: u32) -> Result<u32, String> {
+    let (minimum, maximum) = setting.range();
+    setting.parse(draft).ok_or_else(|| {
         format!(
-            "Indiquez un nombre entier entre 0 et {MAX_AUTO_FETCH_INTERVAL}. {}",
-            kept_interval(saved)
+            "Indiquez un nombre entier entre {minimum} et {maximum}. {}",
+            setting.kept(saved)
         )
     })
 }
 
 /// Why a draft left in the field was not applied.
-fn abandoned_interval(draft: &str, saved: u32) -> String {
+fn abandoned_number(setting: NumberSetting, draft: &str, saved: u32) -> String {
     let refused = if draft.is_empty() {
         "Le champ vide n’a pas été retenu.".to_string()
     } else {
         format!("La valeur « {draft} » n’a pas été retenue.")
     };
-    format!("{refused} {}", kept_interval(saved))
+    format!("{refused} {}", setting.kept(saved))
 }
 
-fn kept_interval(saved: u32) -> String {
-    if saved == 0 {
-        "L’auto-fetch reste désactivé.".to_string()
-    } else {
-        format!(
-            "L’intervalle enregistré reste de {}.",
-            count_label(saved as usize, "minute", "minutes")
-        )
-    }
-}
-
-fn step_interval(value: &str, action: StepAction) -> Option<String> {
+fn step_number(setting: NumberSetting, value: &str, action: StepAction) -> Option<String> {
     // Kit preserves fractional precision; the HTML step=1 reference instead
     // reaches the next integer. Start one step behind that integer so Kit can
     // still enforce its bounds and directional no-op behavior.
@@ -1040,20 +1286,21 @@ fn step_interval(value: &str, action: StepAction) -> Option<String> {
             };
             base.to_string()
         });
+    let (minimum, maximum) = setting.range();
     step_value(
         aligned.as_deref().unwrap_or(value),
         action,
         1.,
-        Some(0.),
-        Some(MAX_AUTO_FETCH_INTERVAL as f64),
+        Some(minimum.into()),
+        Some(maximum.into()),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        INTERVAL_COMMIT_DELAY, SAVED_NOTICE, SettingsEvent, SettingsField, SettingsView,
-        interface_scale, resolve_interval, step_interval,
+        NUMBER_COMMIT_DELAY, NumberSetting, SAVED_NOTICE, SettingsEvent, SettingsField,
+        SettingsView, interface_scale, resolve_number, step_number,
     };
     use crate::preferences::Preferences;
     use gpui_kit::base::StepAction::{Decrement, Increment};
@@ -1111,7 +1358,9 @@ mod tests {
         text: &str,
     ) {
         cx.update_window(window, |_, window, cx| {
-            view.update(cx, |view, cx| view.focus_interval(window, cx));
+            view.update(cx, |view, cx| {
+                view.focus_number(NumberSetting::Interval, window, cx)
+            });
             window.press("secondary-a", cx);
             window.input(text, cx);
         })
@@ -1119,39 +1368,45 @@ mod tests {
     }
 
     fn draft(cx: &mut TestAppContext, view: &Entity<SettingsView>) -> String {
-        view.read_with(cx, |view, cx| view.input.read(cx).value().to_string())
+        view.read_with(cx, |view, cx| {
+            view.interval.input.read(cx).value().to_string()
+        })
     }
 
     #[gpui_kit::test]
     fn abandoning_an_invalid_draft_restores_the_last_applied_interval(cx: &mut TestAppContext) {
         let (window, view, applied) = open_settings(cx, 15);
         cx.update_window(window, |_, window, cx| {
-            view.update(cx, |view, cx| view.focus_interval(window, cx))
+            view.update(cx, |view, cx| {
+                view.focus_number(NumberSetting::Interval, window, cx)
+            })
         })
         .unwrap();
         keys(cx, window, &["end", "backspace", "backspace"]);
-        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
-        assert!(view.read_with(cx, |view, _| view.error.is_some()));
+        cx.executor().advance_clock(NUMBER_COMMIT_DELAY * 2);
+        assert!(view.read_with(cx, |view, _| view.interval.error.is_some()));
         keys(cx, window, &["escape"]);
         assert_eq!(draft(cx, &view), "15");
         assert!(applied.borrow().is_empty());
         assert_eq!(
-            view.read_with(cx, |view, _| view.error.clone()).as_deref(),
+            view.read_with(cx, |view, _| view.interval.error.clone())
+                .as_deref(),
             Some("Le champ vide n’a pas été retenu. L’intervalle enregistré reste de 15 minutes.")
         );
 
         // A paused valid draft applies and becomes the value an abandon keeps.
         edit(cx, window, &view, "30");
-        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY);
+        cx.executor().advance_clock(NUMBER_COMMIT_DELAY);
         assert_eq!(*applied.borrow(), [30]);
         edit(cx, window, &view, "0.5");
-        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
+        cx.executor().advance_clock(NUMBER_COMMIT_DELAY * 2);
         assert_eq!(*applied.borrow(), [30]);
         keys(cx, window, &["escape"]);
         assert_eq!(*applied.borrow(), [30]);
         assert_eq!(draft(cx, &view), "30");
         assert_eq!(
-            view.read_with(cx, |view, _| view.error.clone()).as_deref(),
+            view.read_with(cx, |view, _| view.interval.error.clone())
+                .as_deref(),
             Some(
                 "La valeur « 0.5 » n’a pas été retenue. L’intervalle enregistré reste de 30 minutes."
             )
@@ -1159,7 +1414,7 @@ mod tests {
 
         // The next valid draft retires the explanation.
         edit(cx, window, &view, "45");
-        assert!(view.read_with(cx, |view, _| view.error.is_none()));
+        assert!(view.read_with(cx, |view, _| view.interval.error.is_none()));
     }
 
     #[gpui_kit::test]
@@ -1167,7 +1422,7 @@ mod tests {
         let (window, view, applied) = open_settings(cx, 15);
         edit(cx, window, &view, "20");
         cx.executor()
-            .advance_clock(INTERVAL_COMMIT_DELAY - Duration::from_millis(1));
+            .advance_clock(NUMBER_COMMIT_DELAY - Duration::from_millis(1));
         assert!(applied.borrow().is_empty());
         cx.executor().advance_clock(Duration::from_millis(1));
         assert_eq!(*applied.borrow(), [20]);
@@ -1182,7 +1437,7 @@ mod tests {
         keys(cx, window, &["escape"]);
         assert_eq!(*applied.borrow(), [20, 45, 46, 5]);
         assert_eq!(draft(cx, &view), "5");
-        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
+        cx.executor().advance_clock(NUMBER_COMMIT_DELAY * 2);
         assert_eq!(*applied.borrow(), [20, 45, 46, 5]);
     }
 
@@ -1196,7 +1451,11 @@ mod tests {
                     view.navigation
                         .iter()
                         .position(|handle| handle.is_focused(window)),
-                    view.input.read(cx).focus_handle(cx).is_focused(window),
+                    view.interval
+                        .input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
                 )
             })
             .unwrap()
@@ -1249,45 +1508,138 @@ mod tests {
 
     #[test]
     fn valid_drafts_apply_and_invalid_drafts_explain_the_kept_interval() {
-        assert_eq!(resolve_interval("15", 1), Ok(15));
-        assert_eq!(resolve_interval(" 0 ", 5), Ok(0));
-        assert_eq!(resolve_interval("60", 5), Ok(60));
+        assert_eq!(resolve_number(NumberSetting::Interval, "15", 1), Ok(15));
+        assert_eq!(resolve_number(NumberSetting::Interval, " 0 ", 5), Ok(0));
+        assert_eq!(resolve_number(NumberSetting::Interval, "60", 5), Ok(60));
         assert_eq!(
-            resolve_interval("61", 5),
+            resolve_number(NumberSetting::Interval, "61", 5),
             Err("Indiquez un nombre entier entre 0 et 60. L’intervalle enregistré reste de 5 minutes.".into())
         );
         assert!(
-            resolve_interval("1.5", 1)
+            resolve_number(NumberSetting::Interval, "1.5", 1)
                 .unwrap_err()
                 .ends_with("reste de 1 minute.")
         );
         assert!(
-            resolve_interval("", 0)
+            resolve_number(NumberSetting::Interval, "", 0)
                 .unwrap_err()
                 .ends_with("L’auto-fetch reste désactivé.")
         );
     }
 
     #[test]
+    fn preview_limits_are_whole_mebibytes_between_the_background_bound_and_the_maximum() {
+        let limit = NumberSetting::PreviewLimit;
+        assert_eq!(resolve_number(limit, "16", 8), Ok(16));
+        assert_eq!(
+            resolve_number(limit, "1", 8),
+            Err(
+                "Indiquez un nombre entier entre 2 et 64. La limite enregistrée reste de 8\u{a0}Mio."
+                    .into()
+            )
+        );
+        assert!(resolve_number(limit, "65", 8).is_err());
+        assert!(step_number(limit, "2", Decrement).is_none());
+        assert!(step_number(limit, "64", Increment).is_none());
+        assert_eq!(step_number(limit, "8", Increment).as_deref(), Some("9"));
+    }
+
+    #[gpui_kit::test]
+    fn the_preview_limit_field_applies_its_own_drafts(cx: &mut TestAppContext) {
+        let (window, view, intervals) = open_settings(cx, 15);
+        let limits = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = limits.clone();
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SettingsEvent, _| {
+                if let SettingsEvent::PreviewLimitChanged(limit) = event {
+                    captured.borrow_mut().push(*limit);
+                }
+            })
+            .detach()
+        });
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_number(NumberSetting::PreviewLimit, window, cx)
+            });
+            window.press("secondary-a", cx);
+            window.input("32", cx);
+        })
+        .unwrap();
+        cx.executor().advance_clock(NUMBER_COMMIT_DELAY);
+        assert_eq!(*limits.borrow(), [32]);
+        assert!(intervals.borrow().is_empty());
+        cx.update_window(window, |_, window, cx| {
+            window.press("secondary-a", cx);
+            window.input("100", cx);
+        })
+        .unwrap();
+        keys(cx, window, &["escape"]);
+        assert_eq!(*limits.borrow(), [32]);
+        assert_eq!(
+            view.read_with(cx, |view, cx| view
+                .preview_limit
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "32"
+        );
+        assert!(view.read_with(cx, |view, _| view.interval.error.is_none()));
+        assert!(view
+            .read_with(cx, |view, _| view.preview_limit.error.clone())
+            .is_some_and(|error| error.ends_with("La limite enregistrée reste de 32\u{a0}Mio.")));
+    }
+
+    #[test]
     fn stepping_fractional_drafts_recovers_a_whole_minute_in_the_requested_direction() {
-        assert_eq!(step_interval("1.5", Increment).as_deref(), Some("2"));
-        assert_eq!(step_interval("1.5", Decrement).as_deref(), Some("1"));
-        assert_eq!(step_interval("0.1", Increment).as_deref(), Some("1"));
-        assert_eq!(step_interval("0.1", Decrement).as_deref(), Some("0"));
+        assert_eq!(
+            step_number(NumberSetting::Interval, "1.5", Increment).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "1.5", Decrement).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "0.1", Increment).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "0.1", Decrement).as_deref(),
+            Some("0")
+        );
     }
 
     #[test]
     fn integer_steps_and_range_boundaries_preserve_direction() {
-        assert_eq!(step_interval("1", Increment).as_deref(), Some("2"));
-        assert_eq!(step_interval("1", Decrement).as_deref(), Some("0"));
-        assert_eq!(step_interval("1.0", Increment).as_deref(), Some("2"));
-        assert_eq!(step_interval("59.5", Increment).as_deref(), Some("60"));
-        assert_eq!(step_interval("60.5", Decrement).as_deref(), Some("60"));
-        assert_eq!(step_interval("-0.5", Increment).as_deref(), Some("0"));
-        assert!(step_interval("60", Increment).is_none());
-        assert!(step_interval("0", Decrement).is_none());
-        assert!(step_interval("60.5", Increment).is_none());
-        assert!(step_interval("-0.5", Decrement).is_none());
+        assert_eq!(
+            step_number(NumberSetting::Interval, "1", Increment).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "1", Decrement).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "1.0", Increment).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "59.5", Increment).as_deref(),
+            Some("60")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "60.5", Decrement).as_deref(),
+            Some("60")
+        );
+        assert_eq!(
+            step_number(NumberSetting::Interval, "-0.5", Increment).as_deref(),
+            Some("0")
+        );
+        assert!(step_number(NumberSetting::Interval, "60", Increment).is_none());
+        assert!(step_number(NumberSetting::Interval, "0", Decrement).is_none());
+        assert!(step_number(NumberSetting::Interval, "60.5", Increment).is_none());
+        assert!(step_number(NumberSetting::Interval, "-0.5", Decrement).is_none());
     }
 
     #[test]

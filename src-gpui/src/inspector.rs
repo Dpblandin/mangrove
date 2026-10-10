@@ -158,6 +158,12 @@ struct DiffSnapshot {
     error: Option<String>,
 }
 impl DiffSnapshot {
+    /// Whether the shown patch was skipped by its read's preview limit.
+    fn oversized(&self) -> bool {
+        self.prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.diff.oversized.is_some())
+    }
     fn presentation(&self, revision: u64, target: FileTarget, loading: bool) -> FilePresentation {
         if loading {
             FilePresentation::loading(revision, target, self.prepared.clone())
@@ -170,6 +176,8 @@ impl DiffSnapshot {
 }
 struct CachedDiff {
     prepared: PreparedDiff,
+    /// The preview limit this patch was read with.
+    limit: PreviewLimit,
     bytes: usize,
     tokens: usize,
 }
@@ -185,13 +193,29 @@ impl DiffCache {
     fn clear(&mut self) {
         *self = Self::default();
     }
-    fn get(&mut self, key: &str) -> Option<PreparedDiff> {
-        let prepared = self.entries.get(key)?.prepared.clone();
+    /// The patch a read with `limit` would return. A whole patch stays whole
+    /// under a higher limit; a skipped one names the limit it was read with.
+    fn get(&mut self, key: &str, limit: PreviewLimit) -> Option<PreparedDiff> {
+        let cached = self.entries.get(key)?;
+        let reusable = match cached.prepared.diff.oversized {
+            Some(oversized) => oversized.limit == limit.bytes(),
+            None => cached.limit <= limit,
+        };
+        if !reusable {
+            return None;
+        }
+        let prepared = cached.prepared.clone();
         self.order.retain(|k| k != key);
         self.order.push_back(key.into());
         Some(prepared)
     }
-    fn remember(&mut self, key: String, prepared: PreparedDiff, background: bool) {
+    fn remember(
+        &mut self,
+        key: String,
+        prepared: PreparedDiff,
+        limit: PreviewLimit,
+        background: bool,
+    ) {
         let tokens = prepared.tokens.iter().map(|line| line.len()).sum::<usize>();
         let bytes = prepared
             .diff
@@ -227,6 +251,7 @@ impl DiffCache {
             key,
             CachedDiff {
                 prepared,
+                limit,
                 bytes,
                 tokens,
             },
@@ -281,6 +306,7 @@ enum ReadKind {
         selection: Selection,
         file: FileChoice,
         background: bool,
+        limit: PreviewLimit,
     },
     Totals(String),
 }
@@ -302,6 +328,7 @@ struct ColorRequest {
     selection: Selection,
     file: FileChoice,
     prepared: PreparedDiff,
+    limit: PreviewLimit,
     background: bool,
 }
 
@@ -386,6 +413,9 @@ pub struct InspectorView {
     preload_task: Option<Task<()>>,
     preload_cursor: usize,
     preload_rows: Arc<Vec<FileChoice>>,
+    /// The area and key of the file read up to `PreviewLimit::MAX` on
+    /// request; indexes shift when the local changes are read again.
+    large_file: Option<(String, String)>,
     palette: Palette,
     preferences: Preferences,
     scroll: [UniformListScrollHandle; 3],
@@ -426,12 +456,13 @@ impl InspectorView {
         let viewer = cx.new(|cx| CodeView::new(window, cx));
         let image_preview = cx.new(|_| ImagePreview::new(engine.clone(), gate.clone()));
         let browser = cx.new(|cx| FileBrowser::new(engine.clone(), gate.clone(), window, cx));
-        let code_subscription = cx.subscribe(&viewer, |_, _, event, cx| match event {
+        let code_subscription = cx.subscribe(&viewer, |view, _, event, cx| match event {
             CodeViewEvent::FontSizeChanged(size) => cx.emit(InspectorEvent::DiffFontChanged(*size)),
             CodeViewEvent::NavigateCommit(sha) => {
                 cx.emit(InspectorEvent::NavigateCommit(sha.clone()))
             }
             CodeViewEvent::Parent => {}
+            CodeViewEvent::ShowLarge => view.show_large(cx),
         });
         let browser_subscription = cx.subscribe(&browser, |view, _, event, cx| match event {
             FileBrowserEvent::Close => view.close_workspace(cx),
@@ -441,6 +472,7 @@ impl InspectorView {
             FileBrowserEvent::FontSizeChanged(size) => {
                 cx.emit(InspectorEvent::DiffFontChanged(*size))
             }
+            FileBrowserEvent::ShowLarge => view.show_large(cx),
         });
         Self {
             engine,
@@ -492,6 +524,7 @@ impl InspectorView {
             preload_task: None,
             preload_cursor: 0,
             preload_rows: Arc::default(),
+            large_file: None,
             palette: Palette::default(),
             preferences: Preferences::default(),
             scroll: std::array::from_fn(|_| UniformListScrollHandle::new()),
@@ -531,6 +564,7 @@ impl InspectorView {
         self.pending_totals = None;
         self.line_totals = None;
         self.cache.clear();
+        self.large_file = None;
         self.preload_task = None;
         self.preload_cursor = 0;
         self.snapshot = None;
@@ -576,6 +610,7 @@ impl InspectorView {
         self.pending_status = true;
         self.pending_totals = None;
         self.cache.clear();
+        self.large_file = None;
         self.preload_task = None;
         self.preload_cursor = 0;
         self.status = None;
@@ -640,11 +675,64 @@ impl InspectorView {
         cx.notify();
     }
     pub fn set_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
-        if self.preferences.font_size_offset == preferences.font_size_offset
-            && self.preferences.diff_font_size == preferences.diff_font_size
-            && self.preferences.show_image_previews == preferences.show_image_previews
-            && self.preferences.theme == preferences.theme
+        // The file view reads with the preview limit too, and applies it itself.
+        self.browser
+            .update(cx, |view, cx| view.set_preferences(preferences.clone(), cx));
+        let old = self.preferences.preview_limit();
+        self.apply_preferences(preferences, cx);
+        if old != self.preferences.preview_limit() {
+            self.limit_changed(old, cx);
+        }
+    }
+    /// Reads the shown patch again if the new limit can change it. A read
+    /// still queued takes the new limit; one in flight is checked on arrival.
+    fn limit_changed(&mut self, old: PreviewLimit, cx: &mut Context<Self>) {
+        if let Some(mut request) = self.pending.take() {
+            if let ReadKind::Diff {
+                file,
+                limit,
+                background: false,
+                ..
+            } = &mut request.kind
+            {
+                *limit = self.limit_for(file);
+            }
+            self.pending = Some(request);
+        }
+        if self.diff_loading
+            || self.details_loading
+            || matches!(self.selection, Selection::Working) && self.status_loading
         {
+            return;
+        }
+        let (Some(snapshot), Some(id)) = (&self.snapshot, &self.repository) else {
+            return;
+        };
+        let new = self.preferences.preview_limit();
+        // A file read on request keeps the highest limit, and a whole patch
+        // read under a limit stays whole under a higher one.
+        if self.is_forced(&snapshot.file) || !snapshot.oversized() && new > old {
+            return;
+        }
+        // The file revision is kept: the result updates this patch wherever it
+        // is shown, without replacing a history revision of the file view.
+        self.pending = Some(ReadRequest {
+            revision: self.revision,
+            id: id.id.clone(),
+            kind: ReadKind::Diff {
+                selection: self.selection.clone(),
+                file: snapshot.file.clone(),
+                background: false,
+                limit: new,
+            },
+        });
+        self.diff_loading = true;
+        self.viewer_dirty = true;
+        self.pump(cx);
+        cx.notify();
+    }
+    fn apply_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
+        if self.preferences.same_appearance(&preferences) {
             self.preferences = preferences;
             return;
         }
@@ -663,8 +751,6 @@ impl InspectorView {
         }
         self.viewer_dirty = true;
         self.viewer
-            .update(cx, |v, cx| v.set_preferences(preferences.clone(), cx));
-        self.browser
             .update(cx, |v, cx| v.set_preferences(preferences, cx));
         cx.notify();
     }
@@ -934,6 +1020,7 @@ impl InspectorView {
         self.preload_rows = Arc::default();
         self.error = None;
         self.cache.clear();
+        self.large_file = None;
         self.preload_task = None;
         self.preload_cursor = 0;
         self.selection_debounce = None;
@@ -1242,8 +1329,9 @@ impl InspectorView {
             cx.notify();
             return;
         }
-        if let Some(diff) = self.cache.get(&file.cache_key()) {
-            self.color(file.clone(), diff.clone(), false, cx);
+        let limit = self.limit_for(&file);
+        if let Some(diff) = self.cache.get(&file.cache_key(), limit) {
+            self.color(file.clone(), diff.clone(), limit, false, cx);
             self.publish_diff(file, Some(diff), None, cx);
         } else {
             self.pending = Some(ReadRequest {
@@ -1253,11 +1341,38 @@ impl InspectorView {
                     selection: self.selection.clone(),
                     file,
                     background: false,
+                    limit,
                 },
             });
             self.pump(cx);
         }
         cx.notify();
+    }
+    /// User reads use the preference, except for a file shown on request.
+    fn limit_for(&self, file: &FileChoice) -> PreviewLimit {
+        if self.is_forced(file) {
+            PreviewLimit::MAX
+        } else {
+            self.preferences.preview_limit()
+        }
+    }
+    fn is_forced(&self, file: &FileChoice) -> bool {
+        self.large_file
+            .as_ref()
+            .is_some_and(|(area, key)| *area == file.area && *key == file.key)
+    }
+    /// Reads the shown patch again up to the highest preview limit.
+    fn show_large(&mut self, cx: &mut Context<Self>) {
+        let Some(file) = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.oversized())
+            .map(|snapshot| snapshot.file.clone())
+        else {
+            return;
+        };
+        self.large_file = Some((file.area.clone(), file.key.clone()));
+        self.choose(file, cx);
     }
     fn publish_diff(
         &mut self,
@@ -1384,18 +1499,28 @@ impl InspectorView {
                                 })
                                 .map(ReadResult::Totals),
                             ReadKind::Diff {
-                                selection, file, ..
+                                selection,
+                                file,
+                                limit,
+                                ..
                             } => match selection {
                                 Selection::None => Err("Aucune sélection active.".into()),
                                 Selection::Commit(sha) => {
-                                    engine.file_diff(&request.id, sha, file.index)
+                                    engine.file_diff(&request.id, sha, file.index, *limit)
                                 }
-                                Selection::Working => {
-                                    engine.working_tree_diff(&request.id, &file.area, &file.key)
-                                }
-                                Selection::Stash(sha) => {
-                                    engine.stash_diff(&request.id, sha, &file.area, &file.key)
-                                }
+                                Selection::Working => engine.working_tree_diff(
+                                    &request.id,
+                                    &file.area,
+                                    &file.key,
+                                    *limit,
+                                ),
+                                Selection::Stash(sha) => engine.stash_diff(
+                                    &request.id,
+                                    sha,
+                                    &file.area,
+                                    &file.key,
+                                    *limit,
+                                ),
                             }
                             .map(|value| ReadResult::Diff(PreparedDiff::raw(Arc::new(value)))),
                         };
@@ -1432,6 +1557,7 @@ impl InspectorView {
         &mut self,
         file: FileChoice,
         prepared: PreparedDiff,
+        limit: PreviewLimit,
         background: bool,
         cx: &mut Context<Self>,
     ) {
@@ -1443,6 +1569,7 @@ impl InspectorView {
             selection: self.selection.clone(),
             file,
             prepared,
+            limit,
             background,
         });
         self.pump_color(cx);
@@ -1489,6 +1616,7 @@ impl InspectorView {
                     view.cache.remember(
                         request.file.cache_key(),
                         request.prepared.clone(),
+                        request.limit,
                         request.background,
                     );
                     if view
@@ -1655,6 +1783,7 @@ impl InspectorView {
                                 id: request.id,
                                 kind: ReadKind::Diff {
                                     selection: self.selection.clone(),
+                                    limit: self.limit_for(&file),
                                     file,
                                     background: false,
                                 },
@@ -1734,6 +1863,7 @@ impl InspectorView {
                 file,
                 background,
                 selection,
+                limit,
             } if request.revision.selection_matches(self.revision)
                 && (!matches!(selection, Selection::Working)
                     || !self.status_loading
@@ -1742,12 +1872,30 @@ impl InspectorView {
                 match result {
                     Ok(ReadResult::Diff(diff)) => {
                         self.cache
-                            .remember(file.cache_key(), diff.clone(), background);
-                        self.color(file.clone(), diff.clone(), background, cx);
-                        if !background {
-                            self.publish_diff(file, Some(diff), None, cx);
-                        } else {
+                            .remember(file.cache_key(), diff.clone(), limit, background);
+                        let wanted = self.limit_for(&file);
+                        if !background && limit != wanted {
+                            // The preview limit changed during this read.
+                            if self.pending.is_none() {
+                                self.pending = Some(ReadRequest {
+                                    revision: request.revision,
+                                    id: request.id,
+                                    kind: ReadKind::Diff {
+                                        selection,
+                                        file,
+                                        background,
+                                        limit: wanted,
+                                    },
+                                });
+                            }
                             changed = false;
+                        } else {
+                            self.color(file.clone(), diff.clone(), limit, background, cx);
+                            if !background {
+                                self.publish_diff(file, Some(diff), None, cx);
+                            } else {
+                                changed = false;
+                            }
                         }
                     }
                     Err(error) if !background && request.revision.file_matches(self.revision) => {
@@ -1829,6 +1977,7 @@ impl InspectorView {
                             selection: view.selection.clone(),
                             file,
                             background: true,
+                            limit: PreviewLimit::MIN,
                         },
                     });
                     view.pump(cx);
@@ -3226,12 +3375,13 @@ fn split_path(path: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{DiffCache, FileChoice, FileIntent, MAX_CACHE_ENTRIES, RefreshedIntent, Revision};
-    use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+    use mangrove_core::model::{DiffHunk, DiffLine, FileDiff, Oversized, PreviewLimit};
     use std::collections::HashMap;
     use std::sync::Arc;
     fn diff(bytes: usize) -> super::PreparedDiff {
         let diff = Arc::new(FileDiff {
             binary: false,
+            oversized: None,
             truncated: false,
             additions: 1,
             deletions: 0,
@@ -3250,6 +3400,79 @@ mod tests {
             tokens: Arc::default(),
             syntax_ready: true,
         }
+    }
+    #[gpui_kit::test]
+    fn reads_made_under_an_older_limit_are_read_again_with_the_current_one(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::AppContext;
+        let root = tempfile::tempdir().unwrap();
+        let engine = Arc::new(mangrove_core::Workspace::new(root.path().join("cache")).unwrap());
+        cx.update(gpui_kit::init);
+        let inspector = cx.update(|cx| {
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| super::InspectorView::new(engine, window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let queued_limit = |view: &super::InspectorView| match &view.pending {
+            Some(super::ReadRequest {
+                kind: super::ReadKind::Diff { limit, .. },
+                ..
+            }) => Some(*limit),
+            _ => None,
+        };
+        inspector.update(cx, |view, cx| {
+            let request = super::ReadRequest {
+                revision: view.revision,
+                id: "session".into(),
+                kind: super::ReadKind::Diff {
+                    selection: super::Selection::Commit("sha".into()),
+                    file: choice("a", 0, ""),
+                    background: false,
+                    limit: PreviewLimit::MIN,
+                },
+            };
+            // The preference became 8 Mio while this read ran at 2 Mio.
+            let read = super::PreparedDiff::raw(Arc::new(FileDiff::default()));
+            view.accept(request, Ok(super::ReadResult::Diff(read)), cx);
+            assert!(view.snapshot.is_none());
+            assert_eq!(queued_limit(view), Some(PreviewLimit::from_mib(8)));
+            // A read still queued takes the newest limit.
+            let off = crate::preferences::Preferences {
+                show_large_previews: false,
+                ..Default::default()
+            };
+            view.set_preferences(off, cx);
+            assert_eq!(queued_limit(view), Some(PreviewLimit::MIN));
+        });
+    }
+
+    #[test]
+    fn cached_patches_are_reused_only_where_a_new_read_would_match() {
+        let mut cache = DiffCache::default();
+        let eight = PreviewLimit::from_mib(8);
+        // A whole patch read in the background at 2 Mio stays whole at 8.
+        cache.remember("whole".into(), diff(1), PreviewLimit::MIN, true);
+        assert!(cache.get("whole", eight).is_some());
+        // A whole patch read at 64 Mio may be skipped at 8.
+        cache.remember("forced".into(), diff(1), PreviewLimit::MAX, false);
+        assert!(cache.get("forced", eight).is_none());
+        assert!(cache.get("forced", PreviewLimit::MAX).is_some());
+        // A skipped patch names its limit: it is read again under another one.
+        let mut skipped = diff(0);
+        skipped.diff = Arc::new(FileDiff {
+            truncated: true,
+            oversized: Some(Oversized {
+                size: 10 << 20,
+                limit: PreviewLimit::MIN.bytes(),
+            }),
+            ..FileDiff::default()
+        });
+        cache.remember("skipped".into(), skipped, PreviewLimit::MIN, true);
+        assert!(cache.get("skipped", PreviewLimit::MIN).is_some());
+        assert!(cache.get("skipped", eight).is_none());
     }
     #[test]
     fn keyboard_bursts_delay_only_repeated_selection_intents() {
@@ -3292,6 +3515,7 @@ mod tests {
                 selection: super::Selection::Working,
                 file: file.clone(),
                 background: true,
+                limit: PreviewLimit::MIN,
             },
         };
         assert!(preload.current(revision));
@@ -3302,6 +3526,7 @@ mod tests {
             selection: super::Selection::Working,
             file,
             prepared: diff(1),
+            limit: PreviewLimit::MIN,
             background: true,
         };
         assert!(!color.current(next_file));
@@ -3457,10 +3682,10 @@ mod tests {
     fn diff_cache_evicts_least_recently_used_foreground_entries() {
         let mut c = DiffCache::default();
         for i in 0..MAX_CACHE_ENTRIES {
-            c.remember(i.to_string(), diff(1), false);
+            c.remember(i.to_string(), diff(1), PreviewLimit::MIN, false);
         }
-        c.get("0");
-        c.remember("new".into(), diff(1), false);
+        c.get("0", PreviewLimit::MIN);
+        c.remember("new".into(), diff(1), PreviewLimit::MIN, false);
         assert_eq!(c.entries.len(), MAX_CACHE_ENTRIES);
         assert!(c.entries.contains_key("0"));
         assert!(!c.entries.contains_key("1"));
@@ -3469,8 +3694,13 @@ mod tests {
     #[test]
     fn background_budget_stops_instead_of_rotating_through_the_commit() {
         let mut c = DiffCache::default();
-        c.remember("big".into(), diff(super::MAX_CACHE_BYTES), true);
-        c.remember("next".into(), diff(10), true);
+        c.remember(
+            "big".into(),
+            diff(super::MAX_CACHE_BYTES),
+            PreviewLimit::MIN,
+            true,
+        );
+        c.remember("next".into(), diff(10), PreviewLimit::MIN, true);
         assert!(c.full());
         assert_eq!(c.entries.len(), 1);
         assert_eq!(c.bytes, super::MAX_CACHE_BYTES);
@@ -3478,7 +3708,7 @@ mod tests {
     #[test]
     fn refresh_releases_all_diff_bytes_and_resumes_prefetch_budget() {
         let mut c = DiffCache::default();
-        c.remember("a".into(), diff(1024), false);
+        c.remember("a".into(), diff(1024), PreviewLimit::MIN, false);
         c.background_full = true;
         c.clear();
         assert_eq!(c.bytes, 0);
@@ -3570,7 +3800,9 @@ mod tests {
         let details = workspace.commit_details_shared(&repo.id, &sha).unwrap();
         let first = super::preview_choice(&details, None).unwrap();
         let raw = super::PreparedDiff::raw(Arc::new(
-            workspace.file_diff(&repo.id, &sha, first.index).unwrap(),
+            workspace
+                .file_diff(&repo.id, &sha, first.index, PreviewLimit::MIN)
+                .unwrap(),
         ));
         assert_eq!(details.sha, sha);
         assert_eq!(first.path, details.files[0].path);
@@ -3587,7 +3819,9 @@ mod tests {
         assert_eq!(restored.path, "b.rs");
         intent.restore_commit(Some(key), Some(&restored));
         assert_eq!(intent.choice().unwrap().path, "b.rs");
-        let patch = workspace.file_diff(&repo.id, &sha, restored.index).unwrap();
+        let patch = workspace
+            .file_diff(&repo.id, &sha, restored.index, PreviewLimit::MIN)
+            .unwrap();
         assert!(
             patch.hunks[0]
                 .lines
@@ -3616,7 +3850,7 @@ mod tests {
             };
             super::MAX_CACHE_TOKENS + 1
         ]]);
-        cache.remember("oversized".into(), prepared, true);
+        cache.remember("oversized".into(), prepared, PreviewLimit::MIN, true);
         assert!(cache.full());
         assert!(cache.entries.is_empty());
         assert_eq!(cache.tokens, 0);

@@ -1,7 +1,7 @@
 //! Aggregated, content-free file-view timings. Source repository paths, SHAs and authors are not emitted.
 //! cargo run --release --locked -p mangrove-core --example file_benchmark -- /repo HEAD path mode
 //! mode: content | history | blame | baseline. Measure process peak RSS with /usr/bin/time -l on macOS.
-use mangrove_core::Workspace;
+use mangrove_core::{model::PreviewLimit, Workspace};
 use serde_json::json;
 use std::{
     env,
@@ -58,7 +58,7 @@ fn main() -> Result<(), String> {
         let start = Instant::now();
         match args[3].as_str() {
             "content" => {
-                let value = workspace.file_content(&info.id, &sha, &key)?;
+                let value = workspace.file_content(&info.id, &sha, &key, PreviewLimit::MIN)?;
                 rows = value.lines.len();
                 truncated = value.truncated;
             }

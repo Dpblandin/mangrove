@@ -3,7 +3,7 @@ use std::{fs::File, io::Read, path::Path};
 use git2::{Commit, ErrorCode, Oid, Repository, Tree};
 
 use crate::{
-    changed_file, model::*, render_file_diff, repository_head_name, tree_diff, Result,
+    changed_file, model::*, patch::render_bounded, repository_head_name, tree_diff, Result,
     MAX_CHANGED_FILES,
 };
 
@@ -307,6 +307,7 @@ pub(crate) fn stash_diff(
     sha: &str,
     area: &str,
     file_key: &str,
+    limit: PreviewLimit,
 ) -> Result<FileDiff> {
     crate::file_browser::path_bytes(file_key)?;
     let stash = stash_commit(repository, sha)?;
@@ -320,7 +321,7 @@ pub(crate) fn stash_diff(
             (changed_file(index, &delta).file_key == file_key).then_some(index)
         })
         .ok_or("Fichier introuvable dans cette zone du stash.")?;
-    render_file_diff(&diff, index)
+    render_bounded(repository, &diff, index, limit)
 }
 
 pub(crate) fn stash_images(

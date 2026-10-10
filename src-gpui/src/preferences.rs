@@ -1,5 +1,6 @@
 //! Optional native preferences with validated values and bounds.
 use crate::theme::{Palette, ThemeId};
+use mangrove_core::model::PreviewLimit;
 use mangrove_remote::ProfileStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,6 +18,11 @@ pub const MIN_DIFF_FONT_SIZE: f32 = 9.;
 pub const MAX_DIFF_FONT_SIZE: f32 = 20.;
 pub const DEFAULT_AUTO_FETCH_INTERVAL: u32 = 1;
 pub const MAX_AUTO_FETCH_INTERVAL: u32 = 60;
+const MIB: u64 = 1024 * 1024;
+/// Large file previews, in mebibytes. The minimum is the background bound.
+pub const DEFAULT_PREVIEW_LIMIT: u32 = 8;
+pub const MIN_PREVIEW_LIMIT: u32 = (PreviewLimit::MIN.bytes() / MIB) as u32;
+pub const MAX_PREVIEW_LIMIT: u32 = (PreviewLimit::MAX.bytes() / MIB) as u32;
 
 pub(crate) fn profile_store() -> mangrove_remote::Result<ProfileStore> {
     #[cfg(feature = "app-benchmark")]
@@ -61,6 +67,10 @@ pub struct Preferences {
     pub right_width: f32,
     pub auto_fetch_interval: u32,
     pub show_image_previews: bool,
+    /// Off, diffs and files keep the 2 Mio background bound.
+    pub show_large_previews: bool,
+    /// In mebibytes, between `MIN_PREVIEW_LIMIT` and `MAX_PREVIEW_LIMIT`.
+    pub large_preview_limit: u32,
     pub recent: Vec<RecentRepository>,
 }
 
@@ -74,22 +84,27 @@ impl Default for Preferences {
             right_width: 390.,
             auto_fetch_interval: DEFAULT_AUTO_FETCH_INTERVAL,
             show_image_previews: true,
+            show_large_previews: true,
+            large_preview_limit: DEFAULT_PREVIEW_LIMIT,
             recent: Vec::new(),
         }
     }
 }
 
-pub fn parse_auto_fetch_interval(value: &str) -> Option<u32> {
+/// A whole number typed between `minimum` and `maximum`.
+pub fn parse_whole_number(value: &str, minimum: u32, maximum: u32) -> Option<u32> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
-    let number: f64 = value.parse().ok()?;
-    if number.is_finite() && number.fract() == 0. && (0. ..=60.).contains(&number) {
-        Some(number as u32)
-    } else {
-        None
-    }
+    whole_number(value.parse().ok()?, minimum, maximum)
+}
+
+fn whole_number(number: f64, minimum: u32, maximum: u32) -> Option<u32> {
+    (number.is_finite()
+        && number.fract() == 0.
+        && (f64::from(minimum)..=f64::from(maximum)).contains(&number))
+    .then_some(number as u32)
 }
 
 fn bounded(value: f32, minimum: f32, maximum: f32, fallback: f32) -> f32 {
@@ -191,15 +206,24 @@ impl Preferences {
         if let Some(v) = number("right_width") {
             result.right_width = bounded(v, 280., f32::MAX, 390.);
         }
-        if let Some(v) = value.get("auto_fetch_interval").and_then(Value::as_f64)
-            && v.is_finite()
-            && v.fract() == 0.
-            && (0. ..=60.).contains(&v)
-        {
-            result.auto_fetch_interval = v as u32;
+        let whole = |name, minimum, maximum| {
+            value
+                .get(name)
+                .and_then(Value::as_f64)
+                .and_then(|v| whole_number(v, minimum, maximum))
+        };
+        if let Some(v) = whole("auto_fetch_interval", 0, MAX_AUTO_FETCH_INTERVAL) {
+            result.auto_fetch_interval = v;
         }
-        if let Some(value) = value.get("show_image_previews").and_then(Value::as_bool) {
+        if let Some(v) = whole("large_preview_limit", MIN_PREVIEW_LIMIT, MAX_PREVIEW_LIMIT) {
+            result.large_preview_limit = v;
+        }
+        let flag = |name| value.get(name).and_then(Value::as_bool);
+        if let Some(value) = flag("show_image_previews") {
             result.show_image_previews = value;
+        }
+        if let Some(value) = flag("show_large_previews") {
+            result.show_large_previews = value;
         }
         if let Some(recent) = value.get("recent").and_then(Value::as_array) {
             for value in recent {
@@ -229,6 +253,21 @@ impl Preferences {
     }
     pub fn palette(&self) -> Palette {
         Palette::for_theme(self.theme)
+    }
+    /// Whether views draw the same: text sizes, theme and image previews.
+    pub fn same_appearance(&self, other: &Self) -> bool {
+        self.font_size_offset == other.font_size_offset
+            && self.diff_font_size == other.diff_font_size
+            && self.show_image_previews == other.show_image_previews
+            && self.theme == other.theme
+    }
+    /// The largest file a diff or file opened by the user reads.
+    pub fn preview_limit(&self) -> PreviewLimit {
+        if self.show_large_previews {
+            PreviewLimit::from_mib(self.large_preview_limit.into())
+        } else {
+            PreviewLimit::MIN
+        }
     }
     pub fn apply_palette(&self, cx: &mut gpui_kit::App) {
         self.palette().apply(self.font_size_offset, cx);
@@ -442,12 +481,35 @@ mod tests {
         assert_eq!((p.font_size_offset, p.diff_font_size), (1., 12.));
     }
     #[test]
-    fn interval_requires_a_whole_number_in_the_supported_range() {
-        assert_eq!(parse_auto_fetch_interval(" 0 "), Some(0));
-        assert_eq!(parse_auto_fetch_interval("60"), Some(60));
+    fn whole_numbers_must_be_typed_in_their_range() {
+        assert_eq!(parse_whole_number(" 0 ", 0, 60), Some(0));
+        assert_eq!(parse_whole_number("60", 0, 60), Some(60));
         for value in ["", "-1", "61", "1.5", "NaN", "inf"] {
-            assert_eq!(parse_auto_fetch_interval(value), None);
+            assert_eq!(parse_whole_number(value, 0, 60), None);
         }
+        assert_eq!(parse_whole_number("1", 2, 64), None);
+    }
+    #[test]
+    fn large_previews_raise_the_limit_only_while_enabled() {
+        let mut p = Preferences::default();
+        assert_eq!(p.preview_limit(), PreviewLimit::from_mib(8));
+        p.large_preview_limit = MAX_PREVIEW_LIMIT;
+        assert_eq!(p.preview_limit(), PreviewLimit::MAX);
+        p.show_large_previews = false;
+        assert_eq!(p.preview_limit(), PreviewLimit::MIN);
+        for value in [
+            serde_json::json!({"large_preview_limit": 65, "show_large_previews": "no"}),
+            serde_json::json!({"large_preview_limit": 1.5}),
+            serde_json::json!({"large_preview_limit": 1}),
+        ] {
+            let p = Preferences::from_value(value);
+            assert!(p.show_large_previews);
+            assert_eq!(p.large_preview_limit, DEFAULT_PREVIEW_LIMIT);
+        }
+        let p = Preferences::from_value(
+            serde_json::json!({"large_preview_limit": 32, "show_large_previews": false}),
+        );
+        assert_eq!((p.show_large_previews, p.large_preview_limit), (false, 32));
     }
     #[test]
     fn persisted_preferences_roundtrip_and_bad_file_is_optional() {
@@ -464,6 +526,8 @@ mod tests {
         }
         p.theme = ThemeId::Mangrove;
         p.show_image_previews = false;
+        p.show_large_previews = false;
+        p.large_preview_limit = 16;
         p.save_to(&path).unwrap();
         assert_eq!(Preferences::load_from(&path), p);
         assert_eq!(p.recent.len(), 6);

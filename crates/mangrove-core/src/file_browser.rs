@@ -12,7 +12,7 @@ use git2::{
 use crate::{
     model::*,
     working_tree::{file_key, key_bytes},
-    Result, MAX_FILE_SIZE,
+    Result, MAX_FILE_SIZE, MAX_PATCH_SIZE,
 };
 
 const MAX_LINES: usize = 2_000;
@@ -40,7 +40,7 @@ pub(crate) fn path_bytes(key: &str) -> Result<Vec<u8>> {
     Ok(path)
 }
 
-fn object_error(error: git2::Error) -> String {
+pub(crate) fn object_error(error: git2::Error) -> String {
     if error.code() == ErrorCode::NotFound {
         "Objet Git absent : dépôt partiel, shallow ou objet indisponible. Aucun fetch automatique."
             .into()
@@ -77,7 +77,12 @@ fn entry(repository: &Repository, tree: &Tree<'_>, path: &[u8]) -> Result<Option
     Ok(None)
 }
 
-pub(crate) fn content(repository: &Repository, sha: &str, key: &str) -> Result<FileContent> {
+pub(crate) fn content(
+    repository: &Repository,
+    sha: &str,
+    key: &str,
+    limit: PreviewLimit,
+) -> Result<FileContent> {
     let path = path_bytes(key)?;
     let revision = commit(repository, sha)?;
     let tree = revision.tree().map_err(object_error)?;
@@ -91,6 +96,7 @@ pub(crate) fn content(repository: &Repository, sha: &str, key: &str) -> Result<F
         truncated: false,
         ends_with_newline: false,
         parent_sha: revision.parent_ids().next().map(|id| id.to_string()),
+        oversized: None,
     };
     let Some((id, mode)) = entry(repository, &tree, &path)? else {
         return Ok(result);
@@ -109,9 +115,10 @@ pub(crate) fn content(repository: &Repository, sha: &str, key: &str) -> Result<F
         result.kind = "unsupported".into();
         return Ok(result);
     }
-    if size > MAX_FILE_SIZE as usize {
+    if let Some(oversized) = limit.exceeded_by(size as u64) {
         result.kind = "large".into();
         result.truncated = true;
+        result.oversized = Some(oversized);
         return Ok(result);
     }
     let blob = repository.find_blob(id).map_err(object_error)?;
@@ -201,7 +208,7 @@ fn metadata_diff<'a>(
     options
         .include_typechange(true)
         .skip_binary_check(true)
-        .max_size(MAX_FILE_SIZE);
+        .max_size(MAX_PATCH_SIZE);
     let diff = repository
         .diff_tree_to_tree(parent, Some(tree), Some(&mut options))
         .map_err(object_error)?;
@@ -260,7 +267,12 @@ fn find_renames(
     diff.find_similar(Some(&mut options)).map_err(object_error)
 }
 
-pub(crate) fn revision_diff(repository: &Repository, sha: &str, key: &str) -> Result<FileDiff> {
+pub(crate) fn revision_diff(
+    repository: &Repository,
+    sha: &str,
+    key: &str,
+    limit: PreviewLimit,
+) -> Result<FileDiff> {
     let path = path_bytes(key)?;
     let revision = commit(repository, sha)?;
     let tree = revision.tree().map_err(object_error)?;
@@ -281,30 +293,8 @@ pub(crate) fn revision_diff(repository: &Repository, sha: &str, key: &str) -> Re
         delta.new_file().path_bytes() == Some(path.as_slice())
             || delta.old_file().path_bytes() == Some(path.as_slice())
     }) {
-        Some(index) => {
-            let delta = diff.get_delta(index).ok_or("Fichier introuvable.")?;
-            for file in [delta.old_file(), delta.new_file()] {
-                if blob_size(repository, file.id(), file.mode().into())?
-                    .is_some_and(|size| size > MAX_FILE_SIZE as usize)
-                {
-                    return Ok(FileDiff {
-                        binary: false,
-                        truncated: true,
-                        additions: 0,
-                        deletions: 0,
-                        hunks: vec![],
-                    });
-                }
-            }
-            crate::render_file_diff(&diff, index)
-        }
-        None => Ok(FileDiff {
-            binary: false,
-            truncated: false,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        }),
+        Some(index) => crate::patch::render_bounded(repository, &diff, index, limit),
+        None => Ok(FileDiff::default()),
     }
 }
 
@@ -571,7 +561,11 @@ fn blame_boundary(repository: &Repository, sha: &str, key: &str) -> Result<(Oid,
 }
 
 pub(crate) fn blame(repository: &Repository, sha: &str, key: &str) -> Result<FileBlame> {
-    let content = content(repository, sha, key)?;
+    // Blame keeps the background bound whatever the preview showed.
+    let content = content(repository, sha, key, PreviewLimit::MIN)?;
+    if content.oversized.is_some() {
+        return Err("Blame disponible uniquement pour un fichier de 2 Mio au plus.".into());
+    }
     if content.kind != "text" {
         return Err(
             "Blame disponible uniquement pour un fichier texte présent à cette révision.".into(),

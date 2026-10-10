@@ -9,7 +9,9 @@ use std::{
 
 use git2::{Oid, Repository, Signature, Time};
 use mangrove_core::{
-    model::{FileImageData, FileImageSource, GraphEdgeKind, Reference, RepositoryInfo},
+    model::{
+        FileImageData, FileImageSource, GraphEdgeKind, PreviewLimit, Reference, RepositoryInfo,
+    },
     Workspace,
 };
 use rusqlite::Connection;
@@ -262,7 +264,9 @@ fn inspecting_commits_search_and_diffs_preserves_all_source_bytes_and_mtimes() {
             assert_eq!(file.status, expected);
         }
         for file in details.files {
-            workspace.file_diff(&info.id, &row.sha, file.index).unwrap();
+            workspace
+                .file_diff(&info.id, &row.sha, file.index, PreviewLimit::MIN)
+                .unwrap();
         }
     }
     assert_eq!(
@@ -639,7 +643,7 @@ fn unborn_detached_bare_and_linked_worktree_repositories_can_be_read() {
         1
     );
     workspace
-        .file_diff(&linked.id, &first.to_string(), 0)
+        .file_diff(&linked.id, &first.to_string(), 0, PreviewLimit::MIN)
         .unwrap();
     assert_eq!(before_source, snapshot(&fixture.source));
     assert_eq!(before_linked, snapshot(&linked_path));
@@ -685,7 +689,7 @@ fn binary_empty_and_large_diffs_have_bounded_output() {
         .unwrap();
     for file in details.files {
         let diff = workspace
-            .file_diff(&info.id, &sha.to_string(), file.index)
+            .file_diff(&info.id, &sha.to_string(), file.index, PreviewLimit::MIN)
             .unwrap();
         match file.path.as_str() {
             "binary.dat" => {
@@ -718,9 +722,148 @@ fn binary_empty_and_large_diffs_have_bounded_output() {
         }
     }
     assert!(workspace
-        .file_diff(&info.id, &sha.to_string(), usize::MAX)
+        .file_diff(&info.id, &sha.to_string(), usize::MAX, PreviewLimit::MIN)
         .is_err());
     assert!(workspace.commit_details(&info.id, "invalid").is_err());
+}
+
+#[test]
+fn preview_limits_bound_every_diff_and_content_read_but_not_background_totals() {
+    assert_eq!(PreviewLimit::from_mib(0), PreviewLimit::MIN);
+    assert_eq!(PreviewLimit::from_mib(8).bytes(), 8 * 1024 * 1024);
+    assert_eq!(PreviewLimit::from_mib(u64::MAX), PreviewLimit::MAX);
+    let lines = |changed: usize| {
+        (0..40_000)
+            .map(|number| {
+                let tag = if number == changed { "edit" } else { "kept" };
+                format!("{tag} {number:>70}\n")
+            })
+            .collect::<String>()
+    };
+    let (old, new) = (lines(usize::MAX), lines(20_000));
+    let size = old.len() as u64;
+    assert!(size > PreviewLimit::MIN.bytes() && size < 4 * 1024 * 1024);
+    let raised = PreviewLimit::from_mib(4);
+    let mut fixture = Fixture::new();
+    let parent = commit(
+        &fixture.repository,
+        "old",
+        &[],
+        &[("large.txt", old.as_bytes())],
+        Some("HEAD"),
+    );
+    let sha = commit(
+        &fixture.repository,
+        "new",
+        &[parent],
+        &[("large.txt", new.as_bytes())],
+        Some("HEAD"),
+    )
+    .to_string();
+    let key = working_key("large.txt");
+    let skipped = |diff: &mangrove_core::model::FileDiff| {
+        assert!(diff.truncated && diff.hunks.is_empty());
+        let oversized = diff.oversized.unwrap();
+        assert_eq!(oversized.size, size);
+        assert_eq!(oversized.limit, PreviewLimit::MIN.bytes());
+    };
+    let read = |diff: &mangrove_core::model::FileDiff| {
+        assert!(diff.oversized.is_none() && !diff.truncated);
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        assert!(patch_text(diff).contains(&format!("addition:edit {:>70}", 20_000)));
+    };
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let index = workspace.commit_details(&info.id, &sha).unwrap().files[0].index;
+    skipped(
+        &workspace
+            .file_diff(&info.id, &sha, index, PreviewLimit::MIN)
+            .unwrap(),
+    );
+    read(&workspace.file_diff(&info.id, &sha, index, raised).unwrap());
+    skipped(
+        &workspace
+            .file_revision_diff(&info.id, &sha, &key, PreviewLimit::MIN)
+            .unwrap(),
+    );
+    read(
+        &workspace
+            .file_revision_diff(&info.id, &sha, &key, raised)
+            .unwrap(),
+    );
+    let content = workspace
+        .file_content(&info.id, &sha, &key, PreviewLimit::MIN)
+        .unwrap();
+    assert_eq!(content.kind, "large");
+    assert_eq!(content.oversized.unwrap().size, size);
+    let content = workspace
+        .file_content(&info.id, &sha, &key, raised)
+        .unwrap();
+    assert_eq!(content.kind, "text");
+    assert!(content.oversized.is_none() && content.lines.len() == 2_000);
+    // Blame and the commit's line totals keep the background bound.
+    assert!(workspace
+        .file_blame(&info.id, &sha, &key)
+        .unwrap_err()
+        .contains("2 Mio"));
+    assert_eq!(
+        workspace
+            .commit_line_totals(&info.id, &sha, 10, &|| false)
+            .unwrap(),
+        None
+    );
+    assert_eq!(before, snapshot(&fixture.source));
+
+    checkout_head(&fixture);
+    fs::write(fixture.source.join("large.txt"), &old).unwrap();
+    for area in ["unstaged", "staged"] {
+        if area == "staged" {
+            let mut index = fixture.repository.index().unwrap();
+            index.add_path(Path::new("large.txt")).unwrap();
+            index.write().unwrap();
+        }
+        workspace.working_tree_status(&info.id).unwrap();
+        let before = snapshot(&fixture.source);
+        let diff = workspace
+            .working_tree_diff(&info.id, area, &key, PreviewLimit::MIN)
+            .unwrap();
+        skipped(&diff);
+        let diff = workspace
+            .working_tree_diff(&info.id, area, &key, raised)
+            .unwrap();
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        assert!(patch_text(&diff).contains(&format!("deletion:edit {:>70}", 20_000)));
+        assert_eq!(before, snapshot(&fixture.source));
+    }
+
+    let signature = Signature::now("Stash Author", "stash@example.test").unwrap();
+    let stash = fixture
+        .repository
+        .stash_save(&signature, "large", None)
+        .unwrap()
+        .to_string();
+    let before = snapshot(&fixture.source);
+    let stash_key = workspace
+        .stash_details(&info.id, &stash)
+        .unwrap()
+        .groups
+        .into_iter()
+        .find(|group| group.area == "index")
+        .unwrap()
+        .files[0]
+        .file_key
+        .clone();
+    let diff = workspace
+        .stash_diff(&info.id, &stash, "index", &stash_key, PreviewLimit::MIN)
+        .unwrap();
+    skipped(&diff);
+    let diff = workspace
+        .stash_diff(&info.id, &stash, "index", &stash_key, raised)
+        .unwrap();
+    assert_eq!((diff.additions, diff.deletions), (1, 1));
+    assert_eq!(before, snapshot(&fixture.source));
 }
 
 #[test]
@@ -1592,10 +1735,20 @@ fn working_tree_separates_staged_unstaged_untracked_renames_and_preserves_the_so
         .iter()
         .all(|file| file.file.path != "ignored.txt"));
     let staged = workspace
-        .working_tree_diff(&info.id, "staged", &working_key("both.txt"))
+        .working_tree_diff(
+            &info.id,
+            "staged",
+            &working_key("both.txt"),
+            PreviewLimit::MIN,
+        )
         .unwrap();
     let unstaged = workspace
-        .working_tree_diff(&info.id, "unstaged", &working_key("both.txt"))
+        .working_tree_diff(
+            &info.id,
+            "unstaged",
+            &working_key("both.txt"),
+            PreviewLimit::MIN,
+        )
         .unwrap();
     assert!(patch_text(&staged).contains("deletion:initial"));
     assert!(patch_text(&staged).contains("addition:staged"));
@@ -1603,26 +1756,41 @@ fn working_tree_separates_staged_unstaged_untracked_renames_and_preserves_the_so
     assert!(patch_text(&unstaged).contains("addition:worktree"));
     assert!(
         workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key("binary.dat"))
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &working_key("binary.dat"),
+                PreviewLimit::MIN
+            )
             .unwrap()
             .binary
     );
     assert!(patch_text(
         &workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key("deleted.txt"))
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &working_key("deleted.txt"),
+                PreviewLimit::MIN
+            )
             .unwrap()
     )
     .contains("deletion:deleted baseline"));
     assert!(patch_text(
         &workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key("untracked.txt"))
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &working_key("untracked.txt"),
+                PreviewLimit::MIN
+            )
             .unwrap()
     )
     .contains("addition:untracked addition"));
     for (area, files) in [("staged", &status.staged), ("unstaged", &status.unstaged)] {
         for file in files {
             workspace
-                .working_tree_diff(&info.id, area, &file.key)
+                .working_tree_diff(&info.id, area, &file.key, PreviewLimit::MIN)
                 .unwrap();
         }
     }
@@ -1633,7 +1801,12 @@ fn working_tree_separates_staged_unstaged_untracked_renames_and_preserves_the_so
     let before = snapshot(&fixture.source);
     assert!(patch_text(
         &workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key("untracked.txt"))
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &working_key("untracked.txt"),
+                PreviewLimit::MIN
+            )
             .unwrap()
     )
     .contains("addition:untracked addition"));
@@ -1659,13 +1832,23 @@ fn working_tree_supports_unborn_branches_and_reports_bare_repositories_unavailab
     assert_eq!(status.staged[0].file.status, "added");
     assert!(patch_text(
         &workspace
-            .working_tree_diff(&info.id, "staged", &working_key("first.txt"))
+            .working_tree_diff(
+                &info.id,
+                "staged",
+                &working_key("first.txt"),
+                PreviewLimit::MIN
+            )
             .unwrap()
     )
     .contains("addition:staged first file"));
     assert!(patch_text(
         &workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key("first.txt"))
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &working_key("first.txt"),
+                PreviewLimit::MIN
+            )
             .unwrap()
     )
     .contains("addition:unstaged first file"));
@@ -1683,7 +1866,12 @@ fn working_tree_supports_unborn_branches_and_reports_bare_repositories_unavailab
     assert!(status.unstaged.is_empty());
     assert_eq!((status.staged_count, status.unstaged_count), (0, 0));
     assert!(workspace
-        .working_tree_diff(&info.id, "staged", &working_key("first.txt"))
+        .working_tree_diff(
+            &info.id,
+            "staged",
+            &working_key("first.txt"),
+            PreviewLimit::MIN
+        )
         .is_err());
     assert_eq!(before, snapshot(&bare_path));
 }
@@ -1713,14 +1901,19 @@ fn working_tree_patches_bound_large_content_and_reject_invalid_areas_and_paths()
     let before = snapshot(&fixture.source);
     for area in ["staged", "unstaged"] {
         let diff = workspace
-            .working_tree_diff(&info.id, area, &working_key("large.txt"))
+            .working_tree_diff(&info.id, area, &working_key("large.txt"), PreviewLimit::MIN)
             .unwrap();
         assert!(diff.truncated);
         assert!(!diff.binary);
         assert!(diff.hunks.is_empty());
     }
     let diff = workspace
-        .working_tree_diff(&info.id, "unstaged", &working_key("many.txt"))
+        .working_tree_diff(
+            &info.id,
+            "unstaged",
+            &working_key("many.txt"),
+            PreviewLimit::MIN,
+        )
         .unwrap();
     assert!(diff.truncated);
     assert_eq!(
@@ -1731,7 +1924,12 @@ fn working_tree_patches_bound_large_content_and_reject_invalid_areas_and_paths()
         2000
     );
     assert!(workspace
-        .working_tree_diff(&info.id, "push", &working_key("large.txt"))
+        .working_tree_diff(
+            &info.id,
+            "push",
+            &working_key("large.txt"),
+            PreviewLimit::MIN
+        )
         .is_err());
     for path in [
         "",
@@ -1745,14 +1943,19 @@ fn working_tree_patches_bound_large_content_and_reject_invalid_areas_and_paths()
         for area in ["staged", "unstaged"] {
             assert!(
                 workspace
-                    .working_tree_diff(&info.id, area, &working_key(path))
+                    .working_tree_diff(&info.id, area, &working_key(path), PreviewLimit::MIN)
                     .is_err(),
                 "{path:?}"
             );
         }
     }
     assert!(workspace
-        .working_tree_diff(&info.id, "unstaged", &working_key("absent.txt"))
+        .working_tree_diff(
+            &info.id,
+            "unstaged",
+            &working_key("absent.txt"),
+            PreviewLimit::MIN
+        )
         .is_err());
     assert_eq!(before, snapshot(&fixture.source));
 }
@@ -1815,20 +2018,25 @@ fn working_tree_symlinks_special_files_and_gitlinks_do_not_expose_external_conte
         .all(|file| !file.file.path.starts_with("escape/")));
     for path in ["link.txt", "tracked.txt"] {
         let diff = workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key(path))
+            .working_tree_diff(&info.id, "unstaged", &working_key(path), PreviewLimit::MIN)
             .unwrap();
         assert!(!patch_text(&diff).contains("EXTERNAL SECRET MUST NOT BE READ"));
         assert!(patch_text(&diff).contains("secret.txt"), "{path} {diff:?}");
     }
     let gitlink = workspace
-        .working_tree_diff(&info.id, "staged", &working_key("vendor"))
+        .working_tree_diff(
+            &info.id,
+            "staged",
+            &working_key("vendor"),
+            PreviewLimit::MIN,
+        )
         .unwrap();
     assert!(patch_text(&gitlink).contains("Subproject commit"));
     assert!(!patch_text(&gitlink).contains("EXTERNAL SECRET MUST NOT BE READ"));
     for path in ["escape/secret.txt", "socket", "vendor/secret.txt"] {
         assert!(
             workspace
-                .working_tree_diff(&info.id, "unstaged", &working_key(path))
+                .working_tree_diff(&info.id, "unstaged", &working_key(path), PreviewLimit::MIN)
                 .is_err(),
             "{path}"
         );
@@ -1883,7 +2091,12 @@ fn working_tree_conflicts_are_reported_without_modifying_the_index_or_worktree()
         .any(|file| file.file.path == "conflict.txt"));
     for area in ["staged", "unstaged"] {
         assert!(workspace
-            .working_tree_diff(&info.id, area, &working_key("conflict.txt"))
+            .working_tree_diff(
+                &info.id,
+                area,
+                &working_key("conflict.txt"),
+                PreviewLimit::MIN
+            )
             .unwrap_err()
             .contains("conflit"));
     }
@@ -1917,7 +2130,12 @@ fn working_tree_unreadable_files_fail_without_refreshing_index_stats() {
             .iter()
             .any(|entry| entry.file.path == "private.txt"));
         assert!(workspace
-            .working_tree_diff(&info.id, "unstaged", &working_key("private.txt"))
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &working_key("private.txt"),
+                PreviewLimit::MIN
+            )
             .is_err());
     }
     fs::set_permissions(&file, permissions).unwrap();
@@ -2003,7 +2221,7 @@ fn working_tree_keys_distinguish_non_utf8_names_and_unicode_display_collisions()
             let expected_key: String = name.iter().map(|byte| format!("{byte:02x}")).collect();
             let file = files.iter().find(|file| file.key == expected_key).unwrap();
             let diff = workspace
-                .working_tree_diff(&info.id, area, &file.key)
+                .working_tree_diff(&info.id, area, &file.key, PreviewLimit::MIN)
                 .unwrap();
             let expected = if area == "staged" || name == b"f\xff.txt" {
                 staged
@@ -2026,7 +2244,7 @@ fn working_tree_keys_distinguish_non_utf8_names_and_unicode_display_collisions()
     // Display paths and malformed strings are never accepted as identities.
     for key in ["f�.txt", "66f", "66zz", ""] {
         assert!(workspace
-            .working_tree_diff(&info.id, "unstaged", key)
+            .working_tree_diff(&info.id, "unstaged", key, PreviewLimit::MIN)
             .is_err());
     }
     assert_eq!(before, snapshot(&fixture.source));
@@ -2099,7 +2317,9 @@ fn working_tree_patch_races_never_follow_replaced_leaves_or_parent_directories()
         for _ in 0..200 {
             // Concurrent replacements may fail the scan/read safely. Any patch
             // which succeeds must contain only the pinned file or link text.
-            if let Ok(diff) = workspace.working_tree_diff(&info.id, "unstaged", &key) {
+            if let Ok(diff) =
+                workspace.working_tree_diff(&info.id, "unstaged", &key, PreviewLimit::MIN)
+            {
                 exposed_secret |= patch_text(&diff).contains("EXTERNAL RACE SECRET");
             }
         }
@@ -2107,7 +2327,7 @@ fn working_tree_patch_races_never_follow_replaced_leaves_or_parent_directories()
         worker.join().unwrap();
         assert!(!exposed_secret, "replace_parent={replace_parent}");
         let diff = workspace
-            .working_tree_diff(&info.id, "unstaged", &key)
+            .working_tree_diff(&info.id, "unstaged", &key, PreviewLimit::MIN)
             .unwrap();
         assert!(patch_text(&diff).contains("safe current content"));
         assert_eq!(
@@ -2190,7 +2410,12 @@ fn separate_git_directory_keeps_the_selected_worktree_and_cache_guards() {
     assert_eq!(status.unstaged[0].file.path, "tracked.txt");
     assert!(patch_text(
         &workspace
-            .working_tree_diff(&info.id, "unstaged", &status.unstaged[0].key)
+            .working_tree_diff(
+                &info.id,
+                "unstaged",
+                &status.unstaged[0].key,
+                PreviewLimit::MIN
+            )
             .unwrap()
     )
     .contains("after"));
@@ -2406,7 +2631,7 @@ fn missing_final_newlines_are_annotations_without_line_numbers() {
     let workspace = fixture.workspace();
     let info = fixture.open(&workspace);
     let patch = workspace
-        .file_diff(&info.id, &second.to_string(), 0)
+        .file_diff(&info.id, &second.to_string(), 0, PreviewLimit::MIN)
         .unwrap();
     let annotations: Vec<_> = patch
         .hunks
@@ -2469,7 +2694,7 @@ fn local_diffs_respect_clean_filters_binary_attributes_and_index_flags() {
             assert_eq!(file.file.status, "added");
         }
         let patch = workspace
-            .working_tree_diff(&info.id, "unstaged", &file.key)
+            .working_tree_diff(&info.id, "unstaged", &file.key, PreviewLimit::MIN)
             .unwrap();
         if file.file.path == "a.txt" {
             assert_eq!((patch.additions, patch.deletions), (1, 1));
@@ -2568,7 +2793,7 @@ fn file_views_use_revision_objects_and_preserve_every_source_file() {
         .unwrap();
     let key = &details.files[0].file_key;
     let content = workspace
-        .file_content(&info.id, &initial.to_string(), key)
+        .file_content(&info.id, &initial.to_string(), key, PreviewLimit::MIN)
         .unwrap();
     assert_eq!(
         content.lines,
@@ -2595,7 +2820,7 @@ fn file_views_use_revision_objects_and_preserve_every_source_file() {
     assert_eq!(blame.groups[0].author, "Élodie Müller");
     assert_eq!(
         workspace
-            .file_revision_diff(&info.id, &modified.to_string(), key)
+            .file_revision_diff(&info.id, &modified.to_string(), key, PreviewLimit::MIN)
             .unwrap()
             .additions,
         1
@@ -2679,7 +2904,7 @@ fn file_history_follows_a_rename_over_a_former_directory() {
         assert_eq!(entry.sha, sha.to_string());
         assert_eq!(entry.path, "item/contents.txt");
         let content = workspace
-            .file_content(&info.id, &entry.sha, &entry.file_key)
+            .file_content(&info.id, &entry.sha, &entry.file_key, PreviewLimit::MIN)
             .unwrap();
         assert_eq!(content.kind, "text");
         assert_eq!(content.lines, [text]);
@@ -2749,6 +2974,7 @@ fn file_history_treats_a_replacing_directory_as_a_file_deletion() {
             &info.id,
             &history.entries[1].sha,
             &history.entries[1].file_key,
+            PreviewLimit::MIN,
         )
         .unwrap();
     assert_eq!(content.kind, "text");
@@ -2819,7 +3045,7 @@ fn file_history_follows_renames_deletions_and_first_parent_merges() {
     assert_eq!(history.entries[2].old_path.as_deref(), Some("old.rs"));
     assert_eq!(history.entries[3].path, "old.rs");
     let absent = workspace
-        .file_content(&info.id, &deleted.to_string(), &key)
+        .file_content(&info.id, &deleted.to_string(), &key, PreviewLimit::MIN)
         .unwrap();
     assert_eq!(absent.kind, "deleted");
     assert_eq!(absent.parent_sha, Some(merge.to_string()));
@@ -2859,7 +3085,7 @@ fn file_views_define_binary_empty_non_newline_and_size_limits() {
     let read = |name: &str| {
         let file = details.files.iter().find(|file| file.path == name).unwrap();
         workspace
-            .file_content(&info.id, &id.to_string(), &file.file_key)
+            .file_content(&info.id, &id.to_string(), &file.file_key, PreviewLimit::MIN)
             .unwrap()
     };
     assert_eq!(read("binary.bin").kind, "binary");
@@ -3013,7 +3239,12 @@ fn missing_file_objects_report_a_partial_repository_without_fetch_or_writes() {
     .unwrap();
     let before = snapshot(&fixture.source);
     let error = workspace
-        .file_content(&info.id, &id.to_string(), &details.files[0].file_key)
+        .file_content(
+            &info.id,
+            &id.to_string(),
+            &details.files[0].file_key,
+            PreviewLimit::MIN,
+        )
         .unwrap_err();
     assert!(error.contains("Objet Git absent"), "{error}");
     assert!(error.contains("Aucun fetch"));
@@ -3033,7 +3264,12 @@ fn file_text_preserves_isolated_carriage_returns_and_normalizes_crlf() {
     let workspace = fixture.workspace();
     let info = fixture.open(&workspace);
     let content = workspace
-        .file_content(&info.id, &id.to_string(), "656e64696e67732e747874")
+        .file_content(
+            &info.id,
+            &id.to_string(),
+            "656e64696e67732e747874",
+            PreviewLimit::MIN,
+        )
         .unwrap();
     assert_eq!(content.lines, ["first", "second\rthird\r"]);
     assert!(!content.ends_with_newline);
@@ -3095,7 +3331,7 @@ fn file_views_keep_raw_name_identities_and_never_follow_tree_symlinks() {
     assert_ne!(files[0].file_key, files[1].file_key);
     for file in files {
         let content = workspace
-            .file_content(&info.id, &id.to_string(), &file.file_key)
+            .file_content(&info.id, &id.to_string(), &file.file_key, PreviewLimit::MIN)
             .unwrap();
         let expected = if file.file_key.contains("fe") {
             "content 0"
@@ -3121,13 +3357,23 @@ fn file_views_keep_raw_name_identities_and_never_follow_tree_symlinks() {
         );
     }
     let symlink = workspace
-        .file_content(&info.id, &id.to_string(), "6c696e6b2e747874")
+        .file_content(
+            &info.id,
+            &id.to_string(),
+            "6c696e6b2e747874",
+            PreviewLimit::MIN,
+        )
         .unwrap();
     assert_eq!(symlink.kind, "text");
     assert_eq!(symlink.lines, [target.to_str().unwrap()]);
     assert_eq!(
         workspace
-            .file_content(&info.id, &id.to_string(), "6469726563746f7279")
+            .file_content(
+                &info.id,
+                &id.to_string(),
+                "6469726563746f7279",
+                PreviewLimit::MIN
+            )
             .unwrap()
             .kind,
         "unsupported"
@@ -3194,7 +3440,12 @@ fn file_history_keeps_completed_entries_when_an_ancestor_tree_is_missing() {
     assert!(limitation.contains("Objet Git absent"), "{limitation}");
     assert!(limitation.contains("Aucun fetch"));
     let content_error = workspace
-        .file_content(&info.id, &initial.to_string(), "7061727469616c2e747874")
+        .file_content(
+            &info.id,
+            &initial.to_string(),
+            "7061727469616c2e747874",
+            PreviewLimit::MIN,
+        )
         .unwrap_err();
     assert!(content_error.contains("Objet Git absent"));
     let absent_commit = workspace
@@ -3202,6 +3453,7 @@ fn file_history_keeps_completed_entries_when_an_ancestor_tree_is_missing() {
             &info.id,
             "1234567890123456789012345678901234567890",
             "7061727469616c2e747874",
+            PreviewLimit::MIN,
         )
         .unwrap_err();
     assert!(absent_commit.contains("Objet Git absent"));
@@ -3297,7 +3549,12 @@ fn file_blame_stops_before_large_ancestors_and_reports_only_reached_boundaries()
     assert_eq!(resolved.groups[0].sha, newest.to_string());
     assert!(resolved.limitation.is_none());
     let diff = workspace
-        .file_revision_diff(&info.id, &reduced.to_string(), "66696c652e747874")
+        .file_revision_diff(
+            &info.id,
+            &reduced.to_string(),
+            "66696c652e747874",
+            PreviewLimit::MIN,
+        )
         .unwrap();
     assert!(diff.truncated);
     assert_eq!(before, snapshot(&fixture.source));
@@ -3410,7 +3667,7 @@ fn file_blame_reports_literal_pathspec_limits_without_confusing_other_files() {
             .file_key;
         assert_eq!(
             workspace
-                .file_content(&info.id, &changed.to_string(), key)
+                .file_content(&info.id, &changed.to_string(), key, PreviewLimit::MIN)
                 .unwrap()
                 .lines,
             ["stable"]
@@ -3768,7 +4025,13 @@ fn stash_zones_use_distinct_saved_trees_and_do_not_touch_the_source() {
             .unwrap();
         assert_eq!(group.file_count, 1);
         let diff = workspace
-            .stash_diff(&info.id, &sha.to_string(), area, &group.files[0].file_key)
+            .stash_diff(
+                &info.id,
+                &sha.to_string(),
+                area,
+                &group.files[0].file_key,
+                PreviewLimit::MIN,
+            )
             .unwrap();
         let images = workspace
             .file_images(
@@ -3803,7 +4066,13 @@ fn stash_zones_use_distinct_saved_trees_and_do_not_touch_the_source() {
         }
     }
     assert!(workspace
-        .stash_diff(&info.id, &sha.to_string(), "invalid", "626f74682e747874")
+        .stash_diff(
+            &info.id,
+            &sha.to_string(),
+            "invalid",
+            "626f74682e747874",
+            PreviewLimit::MIN
+        )
         .is_err());
     assert!(workspace
         .stash_details(&info.id, &base.to_string())
@@ -3993,7 +4262,13 @@ fn two_parent_stashes_preserve_binary_and_large_diff_limits_without_untracked_gr
     ] {
         let file = group.files.iter().find(|file| file.path == path).unwrap();
         let diff = workspace
-            .stash_diff(&info.id, &sha.to_string(), "worktree", &file.file_key)
+            .stash_diff(
+                &info.id,
+                &sha.to_string(),
+                "worktree",
+                &file.file_key,
+                PreviewLimit::MIN,
+            )
             .unwrap();
         assert_eq!(diff.binary, binary);
         assert_eq!(diff.truncated, truncated);
@@ -4009,6 +4284,7 @@ fn two_parent_stashes_preserve_binary_and_large_diff_limits_without_untracked_gr
             &sha.to_string(),
             "untracked",
             &group.files[0].file_key,
+            PreviewLimit::MIN,
         )
         .is_err());
     assert_eq!(before, snapshot(&fixture.source));

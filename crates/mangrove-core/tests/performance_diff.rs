@@ -10,7 +10,7 @@ use std::{
 
 use git2::{Oid, Repository, Signature};
 use mangrove_core::{
-    model::{FileDiff, RepositoryInfo},
+    model::{FileDiff, PreviewLimit, RepositoryInfo},
     Workspace,
 };
 use sha2::{Digest, Sha256};
@@ -133,7 +133,7 @@ fn oversized_similarity_preserves_all_files_indices_and_identical_renames() {
             assert_eq!(file.index, index);
             let patch = fixture
                 .workspace
-                .file_diff(&info.id, &oid.to_string(), index)
+                .file_diff(&info.id, &oid.to_string(), index, PreviewLimit::MIN)
                 .unwrap();
             if file.path == "small.txt" {
                 assert!(patch_text(&patch).contains("after"));
@@ -205,7 +205,7 @@ fn candidate_budget_keeps_the_complete_file_list_and_selected_patches() {
     for index in [0, 100, 101, 201] {
         let patch = fixture
             .workspace
-            .file_diff(&info.id, &oid.to_string(), index)
+            .file_diff(&info.id, &oid.to_string(), index, PreviewLimit::MIN)
             .unwrap();
         assert!(!patch.hunks.is_empty());
     }
@@ -310,7 +310,7 @@ fn text_attributes_cannot_load_an_oversized_patch_before_the_size_guard() {
     let before = source_snapshot(&fixture.source);
     let patch = fixture
         .workspace
-        .file_diff(&info.id, &oid.to_string(), file.index)
+        .file_diff(&info.id, &oid.to_string(), file.index, PreviewLimit::MIN)
         .unwrap();
     assert!(patch.truncated);
     assert!(!patch.binary);
@@ -357,7 +357,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
     assert!(patch_text(
         &fixture
             .workspace
-            .working_tree_diff(&info.id, "unstaged", &renamed.key)
+            .working_tree_diff(&info.id, "unstaged", &renamed.key, PreviewLimit::MIN)
             .unwrap()
     )
     .is_empty());
@@ -369,7 +369,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
     assert!(patch_text(
         &fixture
             .workspace
-            .working_tree_diff(&info.id, "unstaged", &literal.key)
+            .working_tree_diff(&info.id, "unstaged", &literal.key, PreviewLimit::MIN)
             .unwrap()
     )
     .contains("literal after"));
@@ -382,7 +382,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
     assert!(patch_text(
         &fixture
             .workspace
-            .working_tree_diff(&info.id, "unstaged", &literal.key)
+            .working_tree_diff(&info.id, "unstaged", &literal.key, PreviewLimit::MIN)
             .unwrap()
     )
     .contains("literal newest"));
@@ -390,7 +390,7 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
     let deleted_snapshot = source_snapshot(&fixture.source);
     assert!(fixture
         .workspace
-        .working_tree_diff(&info.id, "unstaged", &renamed.key)
+        .working_tree_diff(&info.id, "unstaged", &renamed.key, PreviewLimit::MIN)
         .is_err());
     assert_eq!(source_snapshot(&fixture.source), deleted_snapshot);
     assert_ne!(deleted_snapshot, before);
@@ -449,7 +449,7 @@ fn cached_local_selection_does_not_read_unrelated_rename_candidates() {
     let before = source_snapshot(&fixture.source);
     let patch = fixture
         .workspace
-        .working_tree_diff(&info.id, "unstaged", &selected.key)
+        .working_tree_diff(&info.id, "unstaged", &selected.key, PreviewLimit::MIN)
         .unwrap();
     assert!(patch_text(&patch).contains("selected after"));
     assert_eq!(source_snapshot(&fixture.source), before);
@@ -499,7 +499,7 @@ fn diff_performance_probe() {
                 std::hint::black_box(
                     fixture
                         .workspace
-                        .file_diff(&info.id, &oid.to_string(), small.index)
+                        .file_diff(&info.id, &oid.to_string(), small.index, PreviewLimit::MIN)
                         .unwrap(),
                 );
             }
@@ -535,7 +535,10 @@ fn commit_line_totals_match_file_patches_and_stay_unknown_past_the_size_guard() 
         .commit_details_shared(&info.id, &sha)
         .unwrap();
     let expected = (0..details.file_count).fold((0, 0), |(added, deleted), index| {
-        let diff = fixture.workspace.file_diff(&info.id, &sha, index).unwrap();
+        let diff = fixture
+            .workspace
+            .file_diff(&info.id, &sha, index, PreviewLimit::MIN)
+            .unwrap();
         (added + diff.additions, deleted + diff.deletions)
     });
     assert_eq!(expected, (4, 2));
