@@ -1,5 +1,6 @@
 //! Application chrome. The parent owns repositories, tasks and tab workspaces.
 use crate::{
+    format::display_path,
     integrations::{IntegrationsEvent, IntegrationsView},
     preferences::{Pane, Preferences, RecentRepository, profile_store},
     recent_repositories::{RecentMetadata, RecentNamesRequest},
@@ -990,7 +991,7 @@ impl Chrome {
                                     .truncate()
                                     .text_size(px(9. + offset))
                                     .text_color(rgb(p.muted))
-                                    .child(path.clone()),
+                                    .child(display_path(&path)),
                             ),
                     )
                     .child(icon(IconName::ChevronRight, 14., p.accent))
