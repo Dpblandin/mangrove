@@ -151,6 +151,16 @@ impl Preferences {
     pub fn save_for_profile(&self, profile: &str) -> io::Result<()> {
         self.save_to(&Self::profile_path(&Self::path(), profile)?)
     }
+    /// Deletes a removed profile's preferences; the legacy file is kept.
+    pub fn remove_for_profile(profile: &str) -> io::Result<()> {
+        Self::remove_profile_from(&Self::path(), profile)
+    }
+    fn remove_profile_from(base: &Path, profile: &str) -> io::Result<()> {
+        match fs::remove_file(Self::profile_path(base, profile)?) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
     pub fn load_from(path: &Path) -> Self {
         fs::read_to_string(path)
             .ok()
@@ -325,6 +335,37 @@ mod tests {
         assert_eq!(Preferences::load_profile_from(&base, "professional"), work);
         assert_eq!(fs::read(&base).unwrap(), legacy);
         assert!(Preferences::profile_path(&base, "../outside").is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn removed_profile_preferences_do_not_reach_a_reused_identifier() {
+        let directory = std::env::temp_dir().join(format!(
+            "mangrove-removed-profile-preferences-{}",
+            std::process::id()
+        ));
+        let base = directory.join("preferences.json");
+        let legacy = Preferences {
+            theme: ThemeId::Ardoise,
+            ..Preferences::default()
+        };
+        legacy.save_to(&base).unwrap();
+        let removed = Preferences {
+            theme: ThemeId::Gitlab,
+            ..Preferences::default()
+        };
+        removed
+            .save_to(&Preferences::profile_path(&base, "profile-1").unwrap())
+            .unwrap();
+        Preferences::remove_profile_from(&base, "profile-1").unwrap();
+        assert_eq!(
+            Preferences::load_profile_from(&base, "profile-1"),
+            Preferences::default()
+        );
+        // Removing twice, or the default profile without its own file, is a no-op.
+        Preferences::remove_profile_from(&base, "profile-1").unwrap();
+        Preferences::remove_profile_from(&base, "personal").unwrap();
+        assert_eq!(Preferences::load_profile_from(&base, "personal"), legacy);
+        assert!(Preferences::remove_profile_from(&base, "../outside").is_err());
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

@@ -1,8 +1,8 @@
 # Profils, connexions et clonage
 
-Les paramètres contiennent les rubriques **Profils**, **SSH** et **Intégrations**. Les profils Personnel et Professionnel existent dès le premier lancement ; d’autres profils peuvent être créés. Chacun conserve ses comptes, ses URLs de serveur, ses favoris, son choix SSH, son thème, ses tailles de texte, ses panneaux, ses récents et son intervalle d’auto-fetch.
+Les paramètres contiennent les rubriques **Profils**, **SSH** et **Intégrations**. Les profils Personnel et Professionnel existent dès le premier lancement ; d’autres profils peuvent être créés, renommés ou supprimés. Le profil actif et le dernier profil ne peuvent pas être supprimés ; après confirmation, la suppression retire du coffre de l’OS les identifiants de ses comptes, puis ses comptes, favoris et préférences. Chaque profil a un monogramme de deux lettres et une couleur propres. Chacun conserve ses comptes, ses URLs de serveur, ses favoris, son choix SSH, son thème, ses tailles de texte, ses panneaux, ses récents et son intervalle d’auto-fetch.
 
-Changer de profil annule les lectures distantes, retire leurs pages affichées et revient à un espace local vide. Ouvrir un dépôt local, rechercher des commits ou consulter un diff ne nécessite aucun compte ni réseau. Les lectures d’API et SSH sont explicites ; elles s’exécutent en arrière-plan.
+Changer de profil demande une confirmation quand des onglets de dépôts sont ouverts, puis annule les lectures distantes, retire leurs pages affichées et revient à un espace local vide. Ouvrir un dépôt local, rechercher des commits ou consulter un diff ne nécessite aucun compte ni réseau. Les lectures d’API et SSH sont explicites ; elles s’exécutent en arrière-plan.
 
 ## Parcours
 

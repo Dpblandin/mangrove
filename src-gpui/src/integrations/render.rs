@@ -1,8 +1,7 @@
 //! Native settings and remote-repository views. Credentials and background
 //! work remain owned by the parent view.
 use super::*;
-use crate::format::initials;
-use crate::theme::{RADIUS_LG, RADIUS_MD, RADIUS_SM};
+use crate::theme::{RADIUS_LG, RADIUS_MD, RADIUS_SM, mix};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::spinner::Spinner;
 
@@ -267,53 +266,134 @@ impl IntegrationsView {
         for profile in &self.profiles {
             let id = profile.id.clone();
             let active = profile.id == self.profile.id;
+            let row = div()
+                .id(SharedString::from(format!("profile-row-{id}")))
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .pr(px(12.))
+                .rounded(RADIUS_LG)
+                .border_1()
+                .border_color(rgb(if active { p.accent_border } else { p.border }))
+                .bg(rgb(if active { p.accent_soft } else { p.panel }));
+            if self.renaming_profile.as_ref() == Some(&profile.id) {
+                profiles = profiles.child(
+                    row.p(px(12.))
+                        .gap(px(12.))
+                        .child(profile_avatar(profile, p, 36.))
+                        .child(
+                            input_control(
+                                &self.profile_rename,
+                                "profile-rename",
+                                "Nom du profil",
+                                p,
+                                offset,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            primary_action("profile-rename-save", "Enregistrer", p, offset)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save_profile_name(window, cx)
+                                })),
+                        )
+                        .child(
+                            link_action("profile-rename-cancel", "Annuler", p, offset).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.cancel_profile_rename(window, cx)
+                                }),
+                            ),
+                        ),
+                );
+                continue;
+            }
+            let rename_id = id.clone();
+            let delete_id = id.clone();
+            let deleting = self.deleting_profile.as_ref() == Some(&profile.id);
             profiles = profiles.child(
-                Button::new(SharedString::from(format!("profile-{id}")))
-                    .w_full()
-                    .min_w_0()
-                    .p(px(16.))
-                    .rounded(RADIUS_LG)
-                    .border_1()
-                    .border_color(rgb(if active { p.accent_border } else { p.border }))
-                    .bg(rgb(if active { p.accent_soft } else { p.panel }))
-                    .justify_start()
-                    .gap(px(14.))
-                    .cursor_pointer()
-                    .accessibility_label(format!("Sélectionner le profil {}", profile.name))
-                    .hover(move |style| style.bg(rgb(p.hover)))
-                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                    .child(avatar(&profile.name, p, 36.))
+                row.hover(move |style| style.bg(rgb(p.hover)))
                     .child(
-                        div()
+                        Button::new(SharedString::from(format!("profile-{id}")))
                             .flex_1()
                             .min_w_0()
-                            .text_left()
+                            .p(px(16.))
+                            .rounded(RADIUS_LG)
+                            .border_1()
+                            .border_color(transparent_black())
+                            .justify_start()
+                            .gap(px(14.))
+                            .cursor_pointer()
+                            .accessibility_label(format!("Sélectionner le profil {}", profile.name))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .child(profile_avatar(profile, p, 36.))
                             .child(
                                 div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(profile.name.clone()),
-                            )
-                            .child(
-                                note(
-                                    &format!(
-                                        "{} compte{} connecté{}",
-                                        profile.accounts.len(),
-                                        if profile.accounts.len() > 1 { "s" } else { "" },
-                                        if profile.accounts.len() > 1 { "s" } else { "" }
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_left()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(profile.name.clone()),
+                                    )
+                                    .child(
+                                        note(
+                                            &count_label(
+                                                profile.accounts.len(),
+                                                "compte connecté",
+                                                "comptes connectés",
+                                            ),
+                                            p,
+                                        )
+                                        .text_size(px(11. + offset)),
                                     ),
-                                    p,
-                                )
-                                .text_size(px(11. + offset)),
-                            ),
+                            )
+                            .when(active, |view| {
+                                view.child(badge("Actif", p.accent, p.accent_soft, offset))
+                            })
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
+                            })),
                     )
-                    .when(active, |view| {
-                        view.child(badge("Actif", p.accent, p.accent_soft))
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
-                    })),
+                    .child(
+                        link_action(format!("profile-rename-{rename_id}"), "Renommer", p, offset)
+                            .accessibility_label(format!("Renommer le profil {}", profile.name))
+                            .disabled(deleting)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_profile_rename(rename_id.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        link_action(
+                            format!("profile-delete-{delete_id}"),
+                            if deleting {
+                                "Suppression…"
+                            } else {
+                                "Supprimer"
+                            },
+                            p,
+                            offset,
+                        )
+                        .text_color(rgb(p.danger))
+                        .accessibility_label(format!("Supprimer le profil {}", profile.name))
+                        .disabled(!self.can_delete_profile(&profile.id))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.confirm_profile_deletion(&delete_id, window, cx)
+                            },
+                        )),
+                    ),
             );
         }
+        profiles = profiles.child(
+            note(
+                "Le profil actif ne peut pas être supprimé. Supprimer un profil retire ses comptes du coffre du système.",
+                p,
+            )
+            .text_size(px(11. + offset)),
+        );
         content = content.child(profiles).child(
             card(p).child(subtitle("Nouveau profil", offset)).child(
                 div()
@@ -1409,6 +1489,7 @@ impl Render for IntegrationsView {
         };
         div()
             .id("integrations-view")
+            .track_focus(&self.focus_handle)
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1544,19 +1625,34 @@ fn card(p: Palette) -> Div {
         .bg(rgb(p.panel))
 }
 
-fn badge(label: &str, color: u32, background: u32) -> Div {
+fn badge(label: &str, color: u32, background: u32, offset: f32) -> Div {
     div()
         .flex_none()
         .px(px(8.))
         .py(px(3.))
         .rounded(RADIUS_SM)
-        .text_size(px(10.))
+        .text_size(px(11. + offset))
         .text_color(rgb(color))
         .bg(rgb(background))
         .child(label.to_string())
 }
 
 fn avatar(label: &str, p: Palette, size: f32) -> Div {
+    avatar_shape(size)
+        .bg(rgb(p.accent_soft))
+        .text_color(rgb(p.accent))
+        .child(initials(label))
+}
+
+fn profile_avatar(profile: &Profile, p: Palette, size: f32) -> Div {
+    let hue = p.graph[profile_hue(&profile.id, p.graph.len())];
+    avatar_shape(size)
+        .bg(rgb(mix(hue, p.panel, 0.18)))
+        .text_color(rgb(hue))
+        .child(profile_monogram(&profile.name))
+}
+
+fn avatar_shape(size: f32) -> Div {
     div()
         .size(px(size))
         .flex_none()
@@ -1564,11 +1660,8 @@ fn avatar(label: &str, p: Palette, size: f32) -> Div {
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(rgb(p.accent_soft))
-        .text_color(rgb(p.accent))
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(size * 0.34))
-        .child(initials(label))
 }
 
 fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
