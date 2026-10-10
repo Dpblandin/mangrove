@@ -20,9 +20,12 @@ Le clonage explicite disponible depuis **Nouvel onglet → Cloner** est une acti
 - Installer Git et OpenSSH et les rendre accessibles à l’application.
 - Pour le mode agent, utiliser un agent déjà démarré avec l’identité autorisée
   déjà chargée. Sur Unix, `SSH_AUTH_SOCK` doit désigner un socket existant.
-- Pour le mode fichier, sélectionner un fichier existant par son chemin absolu.
-  Une clé chiffrée nécessitant une saisie de passphrase ne fonctionne pas dans
-  ce mode ; charger cette clé dans l’agent et sélectionner le mode agent.
+- Pour le mode fichier, choisir **Clé privée** puis un fichier existant par son
+  chemin absolu ou avec **Parcourir…**. Un chemin absent, un dossier, une clé
+  publique `.pub` ou un fichier illisible est refusé avec un message sous le
+  champ, et le choix précédent reste actif. Une clé chiffrée nécessitant une
+  saisie de passphrase ne fonctionne pas dans ce mode ; charger cette clé dans
+  l’agent et sélectionner le mode agent.
 - Vérifier préalablement la clé d’hôte et l’ajouter à son fichier `known_hosts`
   au moyen des outils SSH habituels. Mangrove n’accepte ni n’ajoute une nouvelle
   clé d’hôte automatiquement et refuse une clé d’hôte modifiée.
