@@ -1,0 +1,48 @@
+# Licenses accepted in the third-party notices shipped with release builds.
+accepted = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "MPL-2.0",
+  "NCSA",
+  "bzip2-1.0.6",
+]
+# The notices cover every platform the releases target.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
+ignore-build-dependencies = true
+# Mangrove's own crates are not third-party components.
+private = { ignore = true }
+ignore-dev-dependencies = true
+
+# The crate embeds Lucide icons, distributed under their own ISC license.
+[gpui-kit-assets.clarify]
+license = "Apache-2.0 AND ISC"
+
+[[gpui-kit-assets.clarify.files]]
+path = "LICENSE-LUCIDE"
+license = "ISC"
+checksum = "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57"
+
+# The crate ships an MIT LICENSE file without declaring it in Cargo.toml.
+[tree-sitter-graphql.clarify]
+license = "MIT"
+
+[[tree-sitter-graphql.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "5ea7d9ec06cb21ca0a800b69cd954e346bafba94620eb115c4b1fead3f3b30f8"

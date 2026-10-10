@@ -19,7 +19,7 @@
       "configuration": "release, app-benchmark compiled; normal UI mode without benchmark variables",
       "captured_on": "2026-09-30T23:45:30.480195+00:00",
       "bundle_identifier": "dev.mangrove.desktop.benchmark",
-      "source_git_revision": "77b15d5ba5a3671ebeef8f1e8f8384429bc81e58",
+      "source_git_revision": "dbce1c713858dd02ed294eaaf85bed676f4e42d5",
       "display": "main Built-in Retina Display, scale 2"
     }
   },
@@ -121,7 +121,7 @@
   "full_native_qa_verified_at": "2026-09-30T23:45:30.480195+00:00",
   "post_series_regression_validation": {
     "verified_at": "2026-09-30T23:59:36.294870+00:00",
-    "source_git_revision": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
+    "source_git_revision": "872d9aef24b2b6a3af88b2e8177f6c19f73c8413",
     "production_binary_sha256": "eb4bf4aaec84ef2aa30b80610bbc8fc9f5fcdd5924e547ee632c74f5c527d1e3",
     "configuration": "release, default features, production bundle",
     "checks": [
@@ -141,7 +141,7 @@
   },
   "post_comparison_ui_validation": {
     "verified_at": "2026-10-01T05:55:24.488763+00:00",
-    "source_git_revision": "07aad7952e1476dd9706ee8612d3a3e6a2fac37d",
+    "source_git_revision": "5d91e7d56a8bb87a9556863f5ff3fe6c2e1fc38b",
     "production_binary_sha256": "573da56576202c20a3b93b0728ebcb44908bcfad1a99d0ff3fcfa037071b8f3c",
     "configuration": "release, default features, production bundle; classic theme",
     "bundle_identifier": "dev.mangrove.gpui",
@@ -156,7 +156,7 @@
       "Back returns to the selected file; Escape returns to the workspace; Cmd+K reveals the history search and typing reaches that visible input",
       "reopening Settings resets a discarded draft 2 to persisted 1 and clears feedback; initial field does not receive autofocus",
       "Cmd+O from Settings opens the native picker; cancellation returns to the workspace without losing its repository",
-      "docs/performance-gpui.html at cbbdd05: empty truncated diff shows its complete warning under file tabs, wrapped in the narrow viewport",
+      "docs/performance-gpui.html at 360ec1b: empty truncated diff shows its complete warning under file tabs, wrapped in the narrow viewport",
       "release clippy all-targets -D warnings passes in normal and instrumented configurations; normal and instrumented suites retain 75 and 80 passing tests",
       "production bundle Info.plist passes plutil; frozen benchmark data and historical capture attestations remain unchanged"
     ],
@@ -176,7 +176,7 @@
   },
   "post_settings_interaction_validation": {
     "verified_at": "2026-10-01T06:14:30.342506+00:00",
-    "source_git_revision": "c0611c5b668019a5dd8a2cb47e34ccc40c8cbac3",
+    "source_git_revision": "ad2c8db9899bf28f21cad7fefeed51c9c2f24962",
     "production_binary_sha256": "20f487e64e2d162f5341d71f533f58917ce6b46e04380ace366cc10db8e2cd05",
     "configuration": "release, default features, production bundle; classic theme",
     "bundle_identifier": "dev.mangrove.gpui",
@@ -201,7 +201,7 @@
   },
   "post_commit_file_selection_validation": {
     "verified_at": "2026-10-01T06:34:20.055388+00:00",
-    "source_git_revision": "29a1e7d50cfc3f11ae56eb80447d3da827a8bb1c",
+    "source_git_revision": "94902c6adfb22f56e34bb7284c0c9b57fea0790c",
     "production_binary_sha256": "b1c1fa170b8a573a0c9ced2e120a635f36a08801aeabad0c942f2fbda85e791e",
     "configuration": "release, default features, production bundle; classic theme",
     "bundle_identifier": "dev.mangrove.gpui",
@@ -224,7 +224,7 @@
   },
   "post_tauri_removal_validation": {
     "verified_at": "2026-10-01T06:48:57+00:00",
-    "source_commit": "820bcb0a4b605d844ab085a5d31d77897337f7c9",
+    "source_commit": "3e71c1260c6a2edcb74a86d3dd7fc7dc8f8562aa",
     "build_profile": "release; default production features",
     "normal_application_identifier": "dev.mangrove.gpui",
     "gpui_binary_sha256": "d329e43785480a5ae63de7eb0ef1c66a5824893859710645e4931de6337fa0b5",

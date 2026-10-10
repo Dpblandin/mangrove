@@ -115,9 +115,10 @@ jobs:
           key: gpui-release
       - name: Build the production application bundle
         run: sh src-gpui/scripts/package-macos.sh
-      - name: Check packaged executable, identity, and original Dock icon
+      - name: Check packaged executable, identity, signature, and original Dock icon
         run: |
           test -x src-gpui/target/release/bundle/Mangrove.app/Contents/MacOS/mangrove-gpui
+          codesign --verify --strict src-gpui/target/release/bundle/Mangrove.app
           test "$(plutil -extract CFBundleIdentifier raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = dev.mangrove.gpui
           test "$(plutil -extract CFBundleExecutable raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = mangrove-gpui
           test "$(plutil -extract CFBundleIconFile raw -o - src-gpui/target/release/bundle/Mangrove.app/Contents/Info.plist)" = icon.icns

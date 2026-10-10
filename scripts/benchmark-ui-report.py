@@ -50,7 +50,7 @@ def render(report):
                          for label, mode, key in items)
 
     sections = ["# Résultats de la comparaison Vue/Tauri et GPUI"]
-    sections.append("**Comparaison historique archivée.** Les 120 mesures restent associées à leur provenance d’origine : base `77b15d5ba5a3671ebeef8f1e8f8384429bc81e58` et hash de l’arbre source alors non committé, conservés dans le JSON. Le code comparatif complet avant retrait de Tauri est disponible à `32c80b4eb153617909a1980b82030cc6469c0bbd`, avec des correctifs ultérieurs ; cette révision n’est pas celle de l’arbre mesuré. Le runner courant mesure GPUI seul. Les chiffres ci-dessous ne sont pas des mesures du binaire courant.")
+    sections.append("**Comparaison historique archivée.** Les 120 mesures restent associées à leur provenance d’origine : base `dbce1c713858dd02ed294eaaf85bed676f4e42d5` et hash de l’arbre source alors non committé, conservés dans le JSON. Le code comparatif complet avant retrait de Tauri est disponible à `0476530b84bbd4bb36c8592cded6b85ad65127f6`, avec des correctifs ultérieurs ; cette révision n’est pas celle de l’arbre mesuré. Le runner courant mesure GPUI seul. Les chiffres ci-dessous ne sont pas des mesures du binaire courant.")
     stage = context.get("series_stage", "")
     if "before production" in stage:
         sections.append("Cette série porte sur les corrections de fidélité **avant la migration d’architecture production**. Elle est archivée séparément ; les chiffres de publication devront porter les artefacts production finaux.")

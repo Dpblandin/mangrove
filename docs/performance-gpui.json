@@ -60,13 +60,13 @@
       }
     },
     "source_provenance": {
-      "base_git_revision": "77b15d5ba5a3671ebeef8f1e8f8384429bc81e58",
+      "base_git_revision": "dbce1c713858dd02ed294eaaf85bed676f4e42d5",
       "uncommitted_source_tree_sha256": "ca137b7e0ed0391d4e9beb4f9a3b037205bb99469e5064856067fe3a6a5c8415",
       "source_files_hashed": 130,
       "source_hash_algorithm": "sorted selected git tracked/untracked nonignored app source/assets/package scripts, manifests/locks/configs and benchmark/fixture scripts; SHA256(path UTF8 + NUL + bytes + NUL)",
       "captured_at_utc": "2026-09-30T23:14:34.101389+00:00",
-      "git_revision_at_start": "77b15d5ba5a3671ebeef8f1e8f8384429bc81e58",
-      "git_revision_at_end": "77b15d5ba5a3671ebeef8f1e8f8384429bc81e58",
+      "git_revision_at_start": "dbce1c713858dd02ed294eaaf85bed676f4e42d5",
+      "git_revision_at_end": "dbce1c713858dd02ed294eaaf85bed676f4e42d5",
       "source_hash_before_after_identical": true
     },
     "build_configuration": {
@@ -122,11 +122,11 @@
     "report_generator_source_sha256": "697938fb90cc0afb243c44356c174499f5bf15525c2939e787ce95b1e6bf0ffb",
     "report_generator_post_measurement_change": "After original source/binary attestation: correct committed-source wording, display start/end revisions and shared dependencies, use one decimal for physical-footprint gains, and display separately attested post-series correctness validation. Historical measurements and summary remain unchanged; post-series app source revision and hashes are recorded separately.",
     "post_series_validation": {
-      "note": "La série de 120 lancements reste associée à la révision 77b15d5 (binaire GPUI 9be0a07486be…). Après cette série, le correctif bb1c900 refuse les résultats de coloration dont le budget de 500 ms est épuisé ; cette limite reste inchangée. Les nouveaux bundles ont passé un contrôle séparé de quatre lancements complets, avec 30 sélections de commit et 30 diffs réellement colorés par lancement, le même baseline Tauri, la même fixture et le même viewport. Leurs sources et binaires sont inchangés pendant ce contrôle. Les mesures et quantiles des 120 lancements restent inchangés ; aucun nouveau quantile de performance n’est publié. Le manifeste QA distingue les captures initiales et le contrôle natif du nouveau bundle de production.",
+      "note": "La série de 120 lancements reste associée à la révision dbce1c7 (binaire GPUI 9be0a07486be…). Après cette série, le correctif 872d9ae refuse les résultats de coloration dont le budget de 500 ms est épuisé ; cette limite reste inchangée. Les nouveaux bundles ont passé un contrôle séparé de quatre lancements complets, avec 30 sélections de commit et 30 diffs réellement colorés par lancement, le même baseline Tauri, la même fixture et le même viewport. Leurs sources et binaires sont inchangés pendant ce contrôle. Les mesures et quantiles des 120 lancements restent inchangés ; aucun nouveau quantile de performance n’est publié. Le manifeste QA distingue les captures initiales et le contrôle natif du nouveau bundle de production.",
       "started_at_utc": "2026-09-30T23:59:45.839609+00:00",
       "completed_at_utc": "2026-10-01T00:01:06.765634+00:00",
-      "git_revision_at_start": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
-      "git_revision_at_end": "bb1c900bad6100ef3d97f10f69ab9aac39508f0f",
+      "git_revision_at_start": "872d9aef24b2b6a3af88b2e8177f6c19f73c8413",
+      "git_revision_at_end": "872d9aef24b2b6a3af88b2e8177f6c19f73c8413",
       "source_files_hashed": 130,
       "source_sha256_at_start": "aae562cbef34b78a4e98b4b9089e95213cfdfc141cd5b8444623bc485f7ab3ec",
       "source_sha256_at_end": "aae562cbef34b78a4e98b4b9089e95213cfdfc141cd5b8444623bc485f7ab3ec",

@@ -2,7 +2,7 @@
 
 Application native de Mangrove, construite avec GPUI et le moteur `mangrove-core`. Ce dossier possède son propre workspace Cargo, son lockfile et son répertoire `target` ; le workspace principal contient le moteur et ses benchmarks.
 
-Les couleurs, arrondis et polices sont définis dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans [l’issue #9](https://github.com/Dpblandin/mangrove/issues/9) et le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
+Les couleurs, arrondis et polices sont définis dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
 
 ## Lancer
 
@@ -50,16 +50,18 @@ Le fetch manuel récupère les références de tous les remotes du dépôt actif
 
 La coloration native utilise Tree-sitter et un fallback lexical lorsque la grammaire ou sa requête est indisponible, notamment pour CMake et Kotlin avec les dépendances actuelles. Les budgets de coloration et les limites du moteur peuvent produire un affichage en texte simple ou un patch tronqué ; voir [l’architecture](../docs/architecture.md) et [la consultation des fichiers](../docs/file-browser.md).
 
-## Packaging macOS
+## Packaging
 
-Le script construit une application autonome locale avec l’icône de Mangrove et l’identifiant `dev.mangrove.gpui` :
+Le script macOS construit une application autonome locale avec l’icône de Mangrove et l’identifiant `dev.mangrove.gpui` :
 
 ```sh
 sh src-gpui/scripts/package-macos.sh
 open "src-gpui/target/release/bundle/Mangrove.app"
+# Build Intel depuis un Mac Apple Silicon, dans target/x86_64-apple-darwin/release/bundle :
+sh src-gpui/scripts/package-macos.sh --target x86_64-apple-darwin
 ```
 
-Le bundle n’est pas signé ni notarisé. La distribution, la signature et la notarisation restent à préparer ; les parcours interactifs et le packaging Windows/Linux restent à valider sur ces plateformes.
+Le bundle est signé ad hoc, sans certificat Developer ID ni notarisation. Sous Linux, `sh src-gpui/scripts/package-linux.sh` prépare dans `target/release/bundle/mangrove` un préfixe `bin/` et `share/` avec l’entrée du lanceur et les icônes de `packaging/linux`. Sous Windows, `build.rs` intègre à l’exécutable l’icône et le manifeste DPI de `packaging/windows`, et les builds release s’ouvrent sans console. `sh src-gpui/scripts/third-party-licenses.sh <fichier>` écrit les licences des composants tiers avec [cargo-about](https://github.com/EmbarkStudios/cargo-about) et la configuration de `packaging/about.toml`. Le [workflow de release](../docs/releases.md) assemble ces builds en DMG, archive `.tar.gz` et archive `.zip`, avec la licence de Mangrove et ces licences tierces. Les parcours interactifs restent à valider sous Windows et Linux.
 
 ## Vérification et limites de QA
 

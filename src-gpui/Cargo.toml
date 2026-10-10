@@ -3,7 +3,7 @@ name = "mangrove-gpui"
 version = "0.1.0"
 edition = "2024"
 publish = false
-license = "UNLICENSED"
+license = "FSL-1.1-MIT"
 
 # Keep native app and benchmark build profiles independent from the Git engine.
 [workspace]
@@ -26,6 +26,9 @@ accesskit = "0.24"
 icu_collator = "=2.3.0"
 icu_normalizer = "=2.3.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
+
+[build-dependencies]
+embed-resource = "3.0.11"
 
 [dev-dependencies]
 gpui-kit = { version = "=0.7.0", features = ["test-support"] }
