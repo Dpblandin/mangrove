@@ -336,6 +336,10 @@ impl IntegrationsView {
                             .cursor_pointer()
                             .accessibility_label(format!("Sélectionner le profil {}", profile.name))
                             .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .disabled(deleting)
+                            .styles(|styles| {
+                                styles.disabled(|style| style.opacity(0.5).cursor_default())
+                            })
                             .child(profile_avatar(profile, p, 36.))
                             .child(
                                 div()
@@ -362,8 +366,8 @@ impl IntegrationsView {
                             .when(active, |view| {
                                 view.child(badge("Actif", p.accent, p.accent_soft, offset))
                             })
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_profile(id.clone(), cx)
                             })),
                     )
                     .child(

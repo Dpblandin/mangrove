@@ -164,6 +164,9 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// The longest accepted name, in characters.
+    pub const MAX_NAME_CHARS: usize = 128;
+
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -174,9 +177,14 @@ impl Profile {
         }
     }
 
+    /// Checks a profile name with the rules applied to persisted names.
+    pub fn validate_name(name: &str) -> Result<()> {
+        validate_text(name, Self::MAX_NAME_CHARS)
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_id(&self.id)?;
-        validate_text(&self.name, 128)?;
+        Self::validate_name(&self.name)?;
         if self.accounts.len() > 32 || self.favorites.len() > 256 {
             return Err(RemoteError::InvalidConfiguration);
         }
@@ -238,7 +246,7 @@ impl Profiles {
     /// Renames a profile with the rules applied to persisted names.
     pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
         let name = name.trim();
-        validate_text(name, 128)?;
+        Profile::validate_name(name)?;
         let profile = self
             .profiles
             .iter_mut()
@@ -277,8 +285,11 @@ pub(crate) fn validate_id(id: &str) -> Result<()> {
     }
 }
 
-fn validate_text(value: &str, max: usize) -> Result<()> {
-    if value.trim().is_empty() || value.len() > max || value.chars().any(char::is_control) {
+fn validate_text(value: &str, max_chars: usize) -> Result<()> {
+    if value.trim().is_empty()
+        || value.chars().count() > max_chars
+        || value.chars().any(char::is_control)
+    {
         Err(RemoteError::InvalidConfiguration)
     } else {
         Ok(())
@@ -292,9 +303,11 @@ mod tests {
     #[test]
     fn renaming_trims_and_validates_the_name_of_an_existing_profile() {
         let mut profiles = Profiles::default();
+        // The limit counts characters, not UTF-8 bytes.
+        profiles.rename("professional", &"é".repeat(128)).unwrap();
         profiles.rename("professional", "  Client Acme ").unwrap();
         assert_eq!(profiles.profiles[1].name, "Client Acme");
-        for invalid in ["", "   ", "line\nfeed", &"x".repeat(129)] {
+        for invalid in ["", "   ", "line\nfeed", "tab\tname", &"é".repeat(129)] {
             assert_eq!(
                 profiles.rename("professional", invalid),
                 Err(RemoteError::InvalidConfiguration)

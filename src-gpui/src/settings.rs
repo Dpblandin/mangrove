@@ -18,6 +18,10 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+use std::time::Duration;
+
+/// A typing pause after which a valid interval draft is applied.
+const INTERVAL_COMMIT_DELAY: Duration = Duration::from_millis(600);
 
 #[derive(Clone, Debug)]
 pub enum SettingsEvent {
@@ -39,6 +43,10 @@ pub struct SettingsView {
     section: SettingsSection,
     integrations: Option<Entity<IntegrationsView>>,
     interval: u32,
+    /// The interval when the field took focus, restored if it is left with an
+    /// invalid draft.
+    focus_interval: u32,
+    commit_task: Option<Task<()>>,
     show_image_previews: bool,
     input: Entity<InputState>,
     theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
@@ -65,7 +73,7 @@ impl SettingsView {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 // Stepping is bounded separately; invalid drafts stay visible
-                // with their error until blur restores the saved interval.
+                // with their error until blur restores the focus interval.
                 .mask_pattern(MaskPattern::None)
                 .default_value(interval.to_string())
         });
@@ -80,11 +88,12 @@ impl SettingsView {
         });
         let input_subscription =
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-                InputEvent::Change => this.apply_draft(cx),
-                InputEvent::Blur if this.error.is_some() => {
-                    this.set_interval(this.interval, window, cx)
+                InputEvent::Change => this.draft_changed(cx),
+                InputEvent::PressEnter { .. } => {
+                    this.commit_draft(cx);
                 }
-                _ => {}
+                InputEvent::Blur => this.leave_draft(window, cx),
+                InputEvent::Focus => {}
             });
         let theme_subscription = cx.subscribe(&theme_select, |_, _, event, cx| {
             if let SelectEvent::Confirm(Some(label)) = event
@@ -97,6 +106,8 @@ impl SettingsView {
             section: SettingsSection::General,
             integrations: None,
             interval,
+            focus_interval: interval,
+            commit_task: None,
             show_image_previews,
             input,
             theme_select,
@@ -173,6 +184,8 @@ impl SettingsView {
     }
     pub fn set_interval(&mut self, interval: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.interval = interval;
+        self.focus_interval = interval;
+        self.commit_task = None;
         self.input.update(cx, |input, cx| {
             input.set_value(interval.to_string(), window, cx)
         });
@@ -198,18 +211,52 @@ impl SettingsView {
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
-    fn apply_draft(&mut self, cx: &mut Context<Self>) {
-        match resolve_interval(self.input.read(cx).value().as_ref(), self.interval) {
+    /// Only a stable draft is applied: after a typing pause, on Enter, on a
+    /// step or when the field is left.
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.commit_task = None;
+        match resolve_interval(self.input.read(cx).value().as_ref(), self.focus_interval) {
             Ok(interval) => {
                 self.error = None;
                 if interval != self.interval {
-                    self.interval = interval;
-                    cx.emit(SettingsEvent::IntervalChanged(interval));
+                    self.commit_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(INTERVAL_COMMIT_DELAY).await;
+                        let _ = this.update(cx, |this, cx| this.commit_draft(cx));
+                    }));
                 }
             }
             Err(error) => self.error = Some(error),
         }
         cx.notify();
+    }
+    fn commit_draft(&mut self, cx: &mut Context<Self>) -> bool {
+        self.commit_task = None;
+        let Some(interval) = parse_auto_fetch_interval(self.input.read(cx).value().as_ref()) else {
+            return false;
+        };
+        self.apply_interval(interval, cx);
+        true
+    }
+    fn leave_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.commit_draft(cx) {
+            self.apply_interval(self.focus_interval, cx);
+        }
+        self.set_interval(self.interval, window, cx);
+    }
+    fn apply_interval(&mut self, interval: u32, cx: &mut Context<Self>) {
+        if interval != self.interval {
+            self.interval = interval;
+            cx.emit(SettingsEvent::IntervalChanged(interval));
+        }
+    }
+    fn step(&mut self, action: StepAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            if let Some(value) = step_interval(input.value().as_ref(), action) {
+                input.replace_all(value, window, cx);
+            }
+        });
+        self.commit_draft(cx);
     }
 }
 
@@ -218,7 +265,7 @@ impl Render for SettingsView {
         let p = self.palette;
         let offset = self.font_size_offset;
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let step_input = self.input.clone();
+        let view = cx.entity().downgrade();
         let number = NumberInput::new(&self.input)
             .controls_right()
             .w(px(120.))
@@ -267,12 +314,7 @@ impl Render for SettingsView {
                     .child(icon(IconName::ChevronDown, 10., p.muted))
             })
             .on_step(move |action, window, cx| {
-                step_input.update(cx, |input, cx| {
-                    input.focus(window, cx);
-                    if let Some(value) = step_interval(input.value().as_ref(), action) {
-                        input.replace_all(value, window, cx);
-                    }
-                });
+                let _ = view.update(cx, |view, cx| view.step(action, window, cx));
             });
 
         div()
@@ -507,7 +549,7 @@ impl Render for SettingsView {
                                                                     .flex()
                                                                     .flex_col()
                                                                     .child(div().flex().items_center().gap(px(12.)).child(number).child(div().text_size(px(12. + offset)).line_height(px(16. + 2. * offset)).text_color(rgb(p.muted)).child("minutes")))
-                                                                    .child(div().mt(px(12.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Entre 0 et 60 minutes ; 0 désactive l’auto-fetch. Récupère les références de tous les remotes du dépôt actif. Chaque valeur valide est enregistrée immédiatement."))
+                                                                    .child(div().mt(px(12.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Entre 0 et 60 minutes ; 0 désactive l’auto-fetch. Récupère les références de tous les remotes du dépôt actif. Une valeur valide est enregistrée après une courte pause de saisie, avec Entrée ou les flèches, ou en quittant le champ."))
                                                                     .when_some(self.error.clone(), |view, error| view.child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(px(16. + 2. * offset)).text_color(rgb(p.danger)).whitespace_normal().child(error))),
                                                             ),
                                                     )
@@ -536,7 +578,7 @@ impl Render for SettingsView {
     }
 }
 
-/// A valid draft becomes the interval; an invalid one keeps the saved value.
+/// A valid draft becomes the interval; an invalid one keeps `saved`.
 fn resolve_interval(draft: &str, saved: u32) -> Result<u32, String> {
     parse_auto_fetch_interval(draft).ok_or_else(|| {
         let kept = if saved == 0 {
@@ -582,8 +624,125 @@ fn step_interval(value: &str, action: StepAction) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_interval, step_interval};
+    use super::{
+        INTERVAL_COMMIT_DELAY, SettingsEvent, SettingsView, resolve_interval, step_interval,
+    };
+    use crate::theme::{Palette, ThemeId};
     use gpui_kit::base::StepAction::{Decrement, Increment};
+    use gpui_kit::{
+        AnyWindowHandle, AppContext, Entity, TestAppContext, WindowOptions, test::TestWindowExt,
+    };
+    use std::{cell::RefCell, rc::Rc, time::Duration};
+
+    fn open_settings(
+        cx: &mut TestAppContext,
+        interval: u32,
+    ) -> (AnyWindowHandle, Entity<SettingsView>, Rc<RefCell<Vec<u32>>>) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    let palette = Palette::for_theme(ThemeId::Classic);
+                    cx.new(|cx| {
+                        SettingsView::new(interval, ThemeId::Classic, true, palette, 0., window, cx)
+                    })
+                })
+            })
+            .unwrap();
+        // Blur is only reported for an active window.
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        let applied = Rc::new(RefCell::new(Vec::new()));
+        let captured = applied.clone();
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SettingsEvent, _| {
+                if let SettingsEvent::IntervalChanged(interval) = event {
+                    captured.borrow_mut().push(*interval);
+                }
+            })
+            .detach()
+        });
+        (window, view, applied)
+    }
+
+    fn keys(cx: &mut TestAppContext, window: AnyWindowHandle, keys: &[&str]) {
+        for key in keys {
+            cx.update_window(window, |_, window, cx| window.press(key, cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    fn edit(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        view: &Entity<SettingsView>,
+        text: &str,
+    ) {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.focus(window, cx));
+            window.press("secondary-a", cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+    }
+
+    fn draft(cx: &mut TestAppContext, view: &Entity<SettingsView>) -> String {
+        view.read_with(cx, |view, cx| view.input.read(cx).value().to_string())
+    }
+
+    #[gpui_kit::test]
+    fn abandoning_an_invalid_draft_restores_the_interval_it_was_focused_with(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, view, applied) = open_settings(cx, 15);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.focus(window, cx))
+        })
+        .unwrap();
+        keys(cx, window, &["end", "backspace", "backspace"]);
+        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
+        assert!(view.read_with(cx, |view, _| view.error.is_some()));
+        keys(cx, window, &["escape"]);
+        assert_eq!(draft(cx, &view), "15");
+        assert!(applied.borrow().is_empty());
+
+        // A paused valid draft applies; the focus value still wins on abandon.
+        edit(cx, window, &view, "30");
+        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY);
+        assert_eq!(*applied.borrow(), [30]);
+        edit(cx, window, &view, "0.5");
+        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
+        assert_eq!(*applied.borrow(), [30]);
+        keys(cx, window, &["escape"]);
+        assert_eq!(*applied.borrow(), [30, 15]);
+        assert_eq!(draft(cx, &view), "15");
+        assert!(view.read_with(cx, |view, _| view.error.is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn valid_drafts_apply_after_a_pause_on_enter_on_steps_and_on_blur(cx: &mut TestAppContext) {
+        let (window, view, applied) = open_settings(cx, 15);
+        edit(cx, window, &view, "20");
+        cx.executor()
+            .advance_clock(INTERVAL_COMMIT_DELAY - Duration::from_millis(1));
+        assert!(applied.borrow().is_empty());
+        cx.executor().advance_clock(Duration::from_millis(1));
+        assert_eq!(*applied.borrow(), [20]);
+
+        edit(cx, window, &view, "45");
+        keys(cx, window, &["enter"]);
+        assert_eq!(*applied.borrow(), [20, 45]);
+        keys(cx, window, &["up"]);
+        assert_eq!(*applied.borrow(), [20, 45, 46]);
+
+        edit(cx, window, &view, "05");
+        keys(cx, window, &["escape"]);
+        assert_eq!(*applied.borrow(), [20, 45, 46, 5]);
+        assert_eq!(draft(cx, &view), "5");
+        cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
+        assert_eq!(*applied.borrow(), [20, 45, 46, 5]);
+    }
 
     #[test]
     fn valid_drafts_apply_and_invalid_drafts_explain_the_kept_interval() {
