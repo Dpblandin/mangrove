@@ -27,6 +27,11 @@ icu_collator = "=2.3.0"
 icu_normalizer = "=2.3.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 
+[dev-dependencies]
+gpui-kit = { version = "=0.7.0", features = ["test-support"] }
+git2 = { version = "0.21", default-features = false }
+tempfile = "3"
+
 [profile.dev]
 debug = 0
 
