@@ -493,24 +493,6 @@ fn highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {
     merged
 }
 
-/// First result offset whose walk position is at least `target`. Results
-/// keep walk order, so a present commit is found at this offset.
-pub fn result_offset<E>(
-    total: usize,
-    target: usize,
-    mut position: impl FnMut(usize) -> Result<Option<usize>, E>,
-) -> Result<usize, E> {
-    let (mut low, mut high) = (0, total);
-    while low < high {
-        let middle = low + (high - low) / 2;
-        match position(middle)? {
-            Some(found) if found < target => low = middle + 1,
-            _ => high = middle,
-        }
-    }
-    Ok(low)
-}
-
 /// Text used by a virtualized row, and its search highlights, are prepared
 /// once, away from the UI thread. The full commit remains available for
 /// selection and inspector operations.
@@ -1111,34 +1093,6 @@ mod tests {
         assert_eq!(measurement.subject_highlights, first.subject_highlights);
         let unfiltered = HistoryRow::new(rows(0, 1).pop().unwrap(), &[]);
         assert!(unfiltered.subject_highlights.is_empty());
-    }
-
-    #[test]
-    fn result_offsets_are_found_by_walk_position_in_logarithmic_reads() {
-        let positions = [3, 8, 13, 21, 34, 55];
-        let mut reads = 0;
-        let mut offset = |target| {
-            result_offset(positions.len(), target, |index| {
-                reads += 1;
-                Ok::<_, ()>(positions.get(index).copied())
-            })
-            .unwrap()
-        };
-        assert_eq!(offset(21), 3);
-        assert_eq!(offset(3), 0);
-        assert_eq!(offset(55), 5);
-        // Absent commits resolve to a neighbour, rejected by the SHA check.
-        assert_eq!(offset(22), 4);
-        assert_eq!(offset(99), 6);
-        assert!(reads <= 5 * 3);
-        assert_eq!(
-            result_offset(0, 1, |_| Err::<Option<usize>, _>("unused")),
-            Ok(0)
-        );
-        assert_eq!(
-            result_offset(4, 1, |_| Err::<Option<usize>, _>("io")),
-            Err("io")
-        );
     }
 
     fn rows(offset: usize, count: usize) -> Vec<CommitRow> {

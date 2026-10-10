@@ -4,7 +4,7 @@ use crate::{
     history::{
         HistoryCache, HistoryPage, HistoryReadSlots, HistoryRow, PAGE_SIZE, PageRequests,
         PositionRead, PositionRequests, ReferenceBadge, ReferenceGroup, ReferenceRank, fold,
-        group_references, highlight_terms, result_offset,
+        group_references, highlight_terms,
     },
     theme::{self, Palette, RADIUS_MD, RADIUS_SM},
 };
@@ -1201,7 +1201,7 @@ impl HistoryView {
                         let result = if filter.is_empty() {
                             engine.commit_position_with_status(&id, &sha)
                         } else {
-                            search_position(&engine, &id, &filter, &sha)
+                            engine.search_offset(&id, &filter, &sha)
                         };
                         (lease, result)
                     })
@@ -2579,29 +2579,6 @@ impl Render for HistoryView {
 // run that it started with, but never restore a run superseded while in flight.
 fn position_snapshot_can_publish(started: &str, current: &str, snapshot: &str) -> bool {
     started == current || snapshot == current
-}
-
-/// Result offset of a commit in a search, from one-row reads of the cached
-/// result snapshot.
-fn search_position(
-    engine: &Workspace,
-    id: &str,
-    filter: &str,
-    sha: &str,
-) -> mangrove_core::Result<(Option<usize>, IndexProgress)> {
-    let (position, progress) = engine.commit_position_with_status(id, sha)?;
-    let Some(position) = position else {
-        return Ok((None, progress));
-    };
-    let total = engine.list_commits(id, 0, 1, filter)?.total;
-    let offset = result_offset(total, position, |offset| {
-        engine
-            .list_commits(id, offset, 1, filter)
-            .map(|page| page.commits.first().map(|commit| commit.position))
-    })?;
-    let page = engine.list_commits(id, offset, 1, filter)?;
-    let found = page.commits.first().is_some_and(|commit| commit.sha == sha);
-    Ok((found.then_some(offset), page.index))
 }
 
 fn normalized_query(query: &str) -> String {
