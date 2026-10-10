@@ -2,7 +2,7 @@
 //! replacing a view only replaces the queued intent, never creates an unbounded queue.
 use crate::{
     code_view::{CodeView, CodeViewEvent},
-    format::{commit_date, short_sha},
+    format::{commit_date, count_label, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax::{self, Tokens},
@@ -1226,9 +1226,9 @@ impl Render for FileBrowser {
                             .as_ref()
                             .map(|h| {
                                 format!(
-                                    "{} changements · {} commits parcourus",
-                                    h.entries.len(),
-                                    h.scanned
+                                    "{} · {} parcourus",
+                                    count_label(h.entries.len(), "changement", "changements"),
+                                    count_label(h.scanned, "commit", "commits")
                                 )
                             })
                             .unwrap_or_else(|| {

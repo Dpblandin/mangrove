@@ -277,7 +277,7 @@ impl HistoryRow {
             subject: subject.into(),
             author: commit.author.clone().into(),
             initials: crate::format::initials(&commit.author).into(),
-            date: crate::history_view::short_date(commit.time).into(),
+            date: crate::format::compact_date(commit.time).into(),
             short_sha: crate::format::short_sha(&commit.sha).into(),
             commit: Arc::new(commit),
         }
