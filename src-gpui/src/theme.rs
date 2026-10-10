@@ -36,15 +36,17 @@ pub enum ThemeId {
     Macchiato,
     Ardoise,
     Gitlab,
+    Octopus,
 }
 
 impl ThemeId {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Classic,
         Self::Mangrove,
         Self::Macchiato,
         Self::Ardoise,
         Self::Gitlab,
+        Self::Octopus,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -53,6 +55,7 @@ impl ThemeId {
             Self::Macchiato => "Catppuccin Macchiato",
             Self::Ardoise => "Ardoise",
             Self::Gitlab => "GitLab",
+            Self::Octopus => "Octopus",
         }
     }
 }
@@ -82,7 +85,8 @@ pub struct Palette {
     pub hunk_bg: u32,
     pub addition_gutter: u32,
     pub deletion_gutter: u32,
-    pub graph: [u32; 8],
+    /// Lane colors, cycled in order.
+    pub graph: &'static [u32],
     /// keyword, string, comment, number, type, function, punctuation, property.
     pub syntax: [u32; 8],
 }
@@ -121,7 +125,7 @@ impl Palette {
             addition_bg: 0x315638,
             deletion_bg: 0x542e32,
             on_accent: 0x13212f,
-            graph: [
+            graph: &[
                 0x64b5ff, 0x9fd190, 0xc49af2, 0xe2bf77, 0xec98a5, 0x82ccd2, 0xf1ad80, 0xc3b3f3,
             ],
             syntax: [
@@ -155,7 +159,7 @@ impl Palette {
                 palette.addition_bg = 0x234532;
                 palette.deletion_bg = 0x4c2a31;
                 palette.on_accent = 0x0d1724;
-                palette.graph = [
+                palette.graph = &[
                     0x72bbf5, 0x8bd99a, 0xc7a2f4, 0xe9c37a, 0xee9eab, 0x77d0d6, 0xf2b088, 0xb9adf6,
                 ];
                 palette.syntax = [
@@ -178,7 +182,7 @@ impl Palette {
                 palette.addition_bg = 0x244d3f;
                 palette.deletion_bg = 0x542f33;
                 palette.on_accent = 0x10261d;
-                palette.graph = [
+                palette.graph = &[
                     0x78dfb9, 0x88aefa, 0xcf9ce8, 0xe8be79, 0xea97a6, 0x73c6ce, 0xb5ce81, 0xb5a1ef,
                 ];
             }
@@ -198,7 +202,7 @@ impl Palette {
                 palette.addition_bg = 0x354b39;
                 palette.deletion_bg = 0x4c313b;
                 palette.on_accent = 0x181926;
-                palette.graph = [
+                palette.graph = &[
                     0x8aadf4, 0xa6da95, 0xc6a0f6, 0xeed49f, 0xed8796, 0x8bd5ca, 0xf5a97f, 0xb7bdf8,
                 ];
             }
@@ -220,11 +224,45 @@ impl Palette {
                 palette.addition_bg = 0x233726;
                 palette.deletion_bg = 0x4b2526;
                 palette.on_accent = 0x18171d;
-                palette.graph = [
+                palette.graph = &[
                     0x9dc8f2, 0x84d4b6, 0xa997e1, 0xf7b951, 0xffafb8, 0x32c5d2, 0xe99b60, 0xf88aaf,
                 ];
                 palette.syntax = [
                     0xb294bb, 0xb5bd68, 0x969896, 0xde935f, 0xf0c674, 0x81a2be, 0xc5c8c6, 0x81a2be,
+                ];
+            }
+            // Neutral charcoal with a saturated blue: white text and borders
+            // are translucent, so they are flattened onto their background.
+            ThemeId::Octopus => {
+                palette.bg = 0x1c1e23;
+                palette.reading_bg = palette.bg;
+                palette.panel = 0x272a31;
+                palette.surface = 0x33363f;
+                palette.border = mix(0xffffff, palette.panel, 0.08);
+                palette.text = mix(0xffffff, palette.bg, 0.75);
+                palette.muted = mix(0xffffff, palette.bg, 0.60);
+                palette.accent = 0x4d88ff;
+                palette.success = 0x5cb85c;
+                palette.danger = 0xd9413d;
+                palette.warning = 0xde9b43;
+                palette.renamed = palette.accent;
+                palette.addition_bg = mix(palette.success, palette.reading_bg, 0.20);
+                palette.deletion_bg = mix(palette.danger, palette.reading_bg, 0.20);
+                palette.on_accent = 0x000000;
+                palette.graph = &[
+                    0x15a0bf, 0x0669f7, 0x8e00c2, 0xc517b6, 0xd90171, 0xcd0101, 0xf25d2e, 0xf2ca33,
+                    0x7bd938, 0x2ece9d,
+                ];
+                // Functions and punctuation keep the code foreground.
+                palette.syntax = [
+                    0x569cd6,
+                    0xce9178,
+                    0x608b4e,
+                    0xb5cea8,
+                    0x3dc9b0,
+                    palette.text,
+                    palette.text,
+                    0x9cdcfe,
                 ];
             }
         }
@@ -235,10 +273,17 @@ impl Palette {
         palette.hunk_bg = mix(palette.accent, palette.reading_bg, 0.12);
         palette.addition_gutter = mix(palette.success, palette.addition_bg, 0.10);
         palette.deletion_gutter = mix(palette.danger, palette.deletion_bg, 0.10);
-        if theme == ThemeId::Gitlab {
+        match theme {
             // GitLab keeps navigation selection and hover neutral.
-            palette.selection = palette.surface;
-            palette.hover = palette.surface;
+            ThemeId::Gitlab => {
+                palette.selection = palette.surface;
+                palette.hover = palette.surface;
+            }
+            ThemeId::Octopus => {
+                palette.selection = mix(palette.accent, palette.bg, 0.20);
+                palette.hover = mix(palette.accent, palette.bg, 0.10);
+            }
+            _ => {}
         }
         palette
     }
