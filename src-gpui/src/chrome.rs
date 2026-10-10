@@ -914,6 +914,20 @@ impl Chrome {
         cx.notify();
     }
 
+    /// Asks before leaving the clone screen while a clone runs. Returns true
+    /// when `leave` waits for that answer; it runs once the user confirms.
+    pub fn confirm_leave_repository_browser(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        leave: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) -> bool {
+        self.repository_browser
+            && self
+                .integrations
+                .update(cx, |view, cx| view.confirm_cancel_clone(window, cx, leave))
+    }
+
     pub fn close_repository_browser(&mut self, cx: &mut Context<Self>) {
         if !self.repository_browser {
             return;
@@ -960,7 +974,7 @@ impl Chrome {
                                 div()
                                     .text_size(px(16. + offset))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Dépôts distants"),
+                                    .child("Cloner un dépôt"),
                             ),
                     )
                     .child(
@@ -995,7 +1009,7 @@ impl Chrome {
                                     .focus_visible(move |style| {
                                         style.border_1().border_color(rgb(p.accent))
                                     })
-                                    .accessibility_label("Fermer les dépôts distants")
+                                    .accessibility_label("Fermer l’écran de clonage")
                                     .tooltip(|window, cx| {
                                         Tooltip::new("Fermer (Échap)").build(window, cx)
                                     })

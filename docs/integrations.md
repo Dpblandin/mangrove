@@ -18,7 +18,7 @@ Chaque option affiche le nom court du dépôt sous son namespace. Les titres de 
 
 ## Cloner un dépôt
 
-Depuis **Nouvel onglet → Cloner**, choisir un dépôt du compte ou **URL d’un dépôt** pour saisir une URL HTTPS/SSH. Choisir le dossier parent, le nom du nouveau dossier et le protocole proposé par la forge, puis **Cloner le dépôt**. Le clone s’exécute en arrière-plan et ouvre le dépôt local après réussite ; Échap ou Fermer annule le travail en cours.
+Depuis **Nouvel onglet → Cloner**, choisir un dépôt du compte ou **URL d’un dépôt** pour saisir une URL HTTPS/SSH. Choisir le dossier parent, le nom du nouveau dossier et le protocole proposé par la forge, puis **Cloner le dépôt**. Le dossier parent accepte `~` pour le dossier personnel et la destination complète est affichée. Le clone s’exécute en arrière-plan et ouvre le dépôt local après réussite ; quitter l’écran pendant le clonage, par Échap, Fermer ou un changement d’onglet, demande de confirmer son annulation.
 
 Le clonage écrit uniquement dans un dossier neuf réservé atomiquement. Un dossier existant, même vide, est refusé. En cas d’échec ou d’annulation, le dossier partiel est conservé ; sélectionner un autre nom pour réessayer ou gérer ce dossier avec les outils habituels. Mangrove ne supprime aucun dossier de clone.
 

@@ -1,5 +1,5 @@
 use crate::{
-    format::{count_label, initials},
+    format::{count_label, display_path, initials},
     theme::{Palette, icon, scrollbar_theme},
 };
 use gpui_kit::assets::IconName;
@@ -303,6 +303,7 @@ pub struct IntegrationsView {
     clone_ssh: bool,
     picking_path: bool,
     picker_task: Option<Task<()>>,
+    clone_prompt: bool,
     repository_load_error: Option<mangrove_remote::RemoteError>,
     _subscriptions: Vec<Subscription>,
     session: Arc<ProfileSession>,
@@ -346,10 +347,10 @@ impl IntegrationsView {
             |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
                 cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
             };
-        let key_path = text_input("/Users/…/.ssh/id_ed25519", window, cx);
+        let key_path = text_input("~/.ssh/id_ed25519", window, cx);
         if let SshChoice::KeyFile { path } = &profile.ssh {
             key_path.update(cx, |input, cx| {
-                input.set_value(path.to_string_lossy().to_string(), window, cx)
+                input.set_value(display_path(&path.to_string_lossy()), window, cx)
             });
         }
         let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
@@ -372,11 +373,7 @@ impl IntegrationsView {
         let clone_parent = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Choisir un dossier")
-                .default_value(
-                    dirs::home_dir()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
+                .default_value(default_clone_parent())
         });
         let profile_rename = text_input("Nom du profil", window, cx);
         let mut subscriptions = vec![];
@@ -468,6 +465,7 @@ impl IntegrationsView {
             clone_ssh: false,
             picking_path: false,
             picker_task: None,
+            clone_prompt: false,
             repository_load_error: None,
             _subscriptions: subscriptions,
             vault: Arc::new(OsCredentialVault::new()),
@@ -509,6 +507,9 @@ impl IntegrationsView {
     }
 
     pub fn open_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cloning() {
+            return;
+        }
         self.set_section(IntegrationsSection::Repositories, cx);
         let account_id = self
             .selected_account
@@ -540,6 +541,55 @@ impl IntegrationsView {
 
     pub fn choosing_path(&self) -> bool {
         self.picking_path
+    }
+
+    pub fn cloning(&self) -> bool {
+        self.pending == Some(PendingOperation::Clone)
+    }
+
+    /// Asks before cancelling a running clone. Returns false when no clone
+    /// runs; otherwise `then` runs once the user confirms the cancellation.
+    pub fn confirm_cancel_clone(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) -> bool {
+        if !self.cloning() {
+            return false;
+        }
+        if self.clone_prompt {
+            return true;
+        }
+        self.clone_prompt = true;
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Annuler le clonage en cours ?",
+            Some("Un dossier incomplet peut subsister à l’emplacement choisi."),
+            &[
+                PromptButton::ok("Annuler le clonage"),
+                PromptButton::cancel("Continuer le clonage"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let confirmed = answer.await == Ok(0);
+            let _ = cx.update(|window, cx| {
+                let current = this.update(cx, |view, cx| {
+                    view.clone_prompt = false;
+                    // The clone may have finished while the prompt was open.
+                    if confirmed && view.cloning() {
+                        view.cancel();
+                        cx.notify();
+                    }
+                });
+                if confirmed && current.is_ok() {
+                    then(window, cx);
+                }
+            });
+        })
+        .detach();
+        true
     }
 
     pub fn set_theme(&mut self, palette: Palette, offset: f32, cx: &mut Context<Self>) {
@@ -581,13 +631,7 @@ impl IntegrationsView {
             self.direct_clone = false;
             self.clone_ssh = false;
             self.clone_parent.update(cx, |input, cx| {
-                input.set_value(
-                    dirs::home_dir()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    window,
-                    cx,
-                )
+                input.set_value(default_clone_parent(), window, cx)
             });
             self.browser_connection = true;
             self.github_private_repos = false;
@@ -601,7 +645,7 @@ impl IntegrationsView {
         }
         self.key_path.update(cx, |input, cx| {
             let value = match &profile.ssh {
-                SshChoice::KeyFile { path } => path.to_string_lossy().to_string(),
+                SshChoice::KeyFile { path } => display_path(&path.to_string_lossy()),
                 _ => String::new(),
             };
             input.set_value(value, window, cx);
@@ -1415,7 +1459,7 @@ impl IntegrationsView {
                         };
                         input.update(cx, |input, cx| {
                             input.set_value(
-                                selection.path().to_string_lossy().into_owned(),
+                                display_path(&selection.path().to_string_lossy()),
                                 window,
                                 cx,
                             )
@@ -1437,7 +1481,7 @@ impl IntegrationsView {
         let Some(remote) = remote else {
             return;
         };
-        let parent = PathBuf::from(self.clone_parent.read(cx).value().trim());
+        let parent = expand_home(&self.clone_parent.read(cx).value());
         let name = self.clone_name.read(cx).value().trim().to_string();
         if !parent.is_absolute() || !valid_clone_directory_name(&name) {
             self.error =
@@ -1456,7 +1500,10 @@ impl IntegrationsView {
         let ticket = self.session.ticket(&account_id);
         let worker_ticket = ticket.clone();
         self.pending = Some(PendingOperation::Clone);
-        self.message = Some(format!("Clonage vers {}…", destination.display()));
+        self.message = Some(format!(
+            "Clonage vers {}…",
+            display_path(&destination.to_string_lossy())
+        ));
         self.error = None;
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -1826,6 +1873,30 @@ fn provider_label(provider: Provider) -> &'static str {
     }
 }
 
+fn default_clone_parent() -> String {
+    dirs::home_dir()
+        .map(|home| display_path(&home.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// Reads a path typed with the `~` shorthand shown by `display_path`.
+fn expand_home(value: &str) -> PathBuf {
+    let value = value.trim();
+    let rest = match value.strip_prefix('~') {
+        Some("") => "",
+        Some(rest) => match rest.strip_prefix(['/', std::path::MAIN_SEPARATOR]) {
+            Some(rest) => rest,
+            None => return PathBuf::from(value),
+        },
+        None => return PathBuf::from(value),
+    };
+    match dirs::home_dir() {
+        Some(home) if rest.is_empty() => home,
+        Some(home) => home.join(rest),
+        None => PathBuf::from(value),
+    }
+}
+
 /// Two letters keep single-word names apart, such as Personnel and Professionnel.
 fn profile_monogram(name: &str) -> String {
     if name.split_whitespace().nth(1).is_some() {
@@ -2168,6 +2239,27 @@ mod tests {
             assert!(detail.contains("coffre du système"), "{detail}");
         }
         assert!(super::profile_deletion_detail(&profile).starts_with("Ses 2 comptes connectés"));
+    }
+
+    #[test]
+    fn typed_paths_accept_the_displayed_home_shorthand() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(super::expand_home(" ~ "), home);
+        assert_eq!(super::expand_home("~/code"), home.join("code"));
+        assert_eq!(
+            super::expand_home(&crate::format::display_path(
+                &home.join("a b").to_string_lossy()
+            )),
+            home.join("a b")
+        );
+        assert_eq!(
+            super::expand_home("~other"),
+            std::path::PathBuf::from("~other")
+        );
+        assert_eq!(
+            super::expand_home("/tmp/repo"),
+            std::path::PathBuf::from("/tmp/repo")
+        );
     }
 
     #[test]

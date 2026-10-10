@@ -13,16 +13,17 @@ impl IntegrationsView {
         let ssh = remote
             .as_ref()
             .is_some_and(|url| url.starts_with("ssh://") || !url.starts_with("https://"));
-        let destination_valid = PathBuf::from(self.clone_parent.read(cx).value().trim())
-            .is_absolute()
-            && valid_clone_directory_name(self.clone_name.read(cx).value().trim());
+        let parent = expand_home(&self.clone_parent.read(cx).value());
+        let name = self.clone_name.read(cx).value().trim().to_string();
+        let destination = (parent.is_absolute() && valid_clone_directory_name(&name))
+            .then(|| display_path(&parent.join(&name).to_string_lossy()));
         let mut form = card(p)
             .gap(px(18.))
             .child(subtitle(
                 if self.direct_clone {
-                    "Cloner avec une URL"
+                    "Depuis une URL"
                 } else {
-                    "Cloner un dépôt"
+                    "Depuis un compte connecté"
                 },
                 offset,
             ))
@@ -140,13 +141,26 @@ impl IntegrationsView {
             "Nouveau dossier",
             p,
             offset,
-            input_control(
-                &self.clone_name,
-                "clone-directory-name",
-                "Nouveau dossier",
-                p,
-                offset,
-            ),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(input_control(
+                    &self.clone_name,
+                    "clone-directory-name",
+                    "Nouveau dossier",
+                    p,
+                    offset,
+                ))
+                .when_some(
+                    destination.as_ref().filter(|_| remote.is_some()),
+                    |view, destination| {
+                        view.child(
+                            note(&format!("Destination : {destination}"), p)
+                                .text_size(px(11. + offset)),
+                        )
+                    },
+                ),
         ));
         if let Some(repository) = repository {
             let mut protocols = div().flex().items_center().gap(px(8.));
@@ -200,7 +214,7 @@ impl IntegrationsView {
                 primary_action("clone-repository", "Cloner le dépôt", p, offset)
                     .disabled(
                         remote.is_none()
-                            || !destination_valid
+                            || destination.is_none()
                             || self.pending.is_some()
                             || self.picking_path,
                     )
@@ -444,7 +458,7 @@ impl IntegrationsView {
                             .flex_1()
                             .min_w_0()
                             .whitespace_normal()
-                            .child(value.clone()),
+                            .child(display_path(&value)),
                     )
                     .when(PathBuf::from(favorite).is_absolute(), |view| {
                         let path = favorite.clone();
@@ -525,7 +539,7 @@ impl IntegrationsView {
                     .child(action("ssh-key-browse", "Parcourir…", p, offset).disabled(self.pending.is_some() || self.picking_path)
                         .on_click(cx.listener(|this, _, window, cx| this.pick_path(PathPickerTarget::SshKey, window, cx))))
                     .child(action("ssh-key-save", "Utiliser cette clé", p, offset).on_click(cx.listener(|this, _, _, cx| {
-                        let value = this.key_path.read(cx).value().trim().to_string(); let path = PathBuf::from(&value);
+                        let value = this.key_path.read(cx).value().trim().to_string(); let path = expand_home(&value);
                         if path.is_absolute() && !value.chars().any(char::is_control) { this.error = None; this.ssh_choice(SshChoice::KeyFile { path }, cx); }
                         else { this.error = Some("Indiquez un chemin absolu de clé SSH.".into()); cx.notify(); }
                     })))))
@@ -1173,7 +1187,7 @@ impl IntegrationsView {
                 .text_color(rgb(p.text))
                 .cursor_pointer()
                 .accessibility_label("Cloner avec une URL")
-                .disabled(self.direct_clone)
+                .disabled(self.direct_clone || self.cloning())
                 .hover(move |style| style.bg(rgb(p.hover)))
                 .focus_visible(move |style| style.bg(rgb(p.selection)))
                 .child(icon(IconName::Link, 18., p.muted))
@@ -1202,7 +1216,7 @@ impl IntegrationsView {
                     }))
                     .cursor_pointer()
                     .accessibility_label(format!("Parcourir les dépôts de {}", account.label))
-                    .disabled(self.selected_account.as_ref() == Some(&id))
+                    .disabled(self.selected_account.as_ref() == Some(&id) || self.cloning())
                     .hover(move |style| style.bg(rgb(p.hover)))
                     .focus_visible(move |style| style.bg(rgb(p.selection)))
                     .child(provider_mark(edition, p, 28.))
