@@ -1,5 +1,6 @@
 use crate::{
     format::{count_label, display_path, initials},
+    recent_repositories::is_remote_favorite,
     theme::{Palette, icon, scrollbar_theme},
 };
 use gpui_kit::assets::IconName;
@@ -1585,7 +1586,7 @@ impl IntegrationsView {
     }
 
     fn add_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.favorite.read(cx).value().trim().to_string();
+        let value = favorite_entry(&self.favorite.read(cx).value());
         if !value.is_empty()
             && !self.profile.favorites.contains(&value)
             && self.profile.favorites.len() < MAX_ROWS
@@ -1933,6 +1934,16 @@ fn expand_home(value: &str) -> PathBuf {
         Some(home) if rest.is_empty() => home,
         Some(home) => home.join(rest),
         None => PathBuf::from(value),
+    }
+}
+
+/// Local favorites are stored with `~` expanded so the home screen can open them.
+fn favorite_entry(value: &str) -> String {
+    let value = value.trim();
+    if is_remote_favorite(value) {
+        value.to_string()
+    } else {
+        expand_home(value).to_string_lossy().into_owned()
     }
 }
 
@@ -2325,6 +2336,50 @@ mod tests {
             super::expand_home("/tmp/repo"),
             std::path::PathBuf::from("/tmp/repo")
         );
+    }
+
+    #[test]
+    fn local_favorites_expand_the_home_shorthand_and_urls_stay_verbatim() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            super::favorite_entry(" ~/code/app "),
+            home.join("code/app").to_string_lossy()
+        );
+        assert_eq!(super::favorite_entry("~"), home.to_string_lossy());
+        for verbatim in [
+            "/srv/repos/app",
+            "~other/app",
+            "https://example.com/~team/app.git",
+            "ssh://git@example.com/~team/app.git",
+            "deploy@example.com:~team/app.git",
+        ] {
+            assert_eq!(super::favorite_entry(verbatim), verbatim);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn an_added_home_favorite_is_stored_as_an_absolute_path(cx: &mut TestAppContext) {
+        let (window, view, events) = open_integrations(cx);
+        let path = dirs::home_dir()
+            .unwrap()
+            .join("code")
+            .to_string_lossy()
+            .into_owned();
+        for typed in ["~/code", path.as_str()] {
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.favorite
+                        .update(cx, |input, cx| input.set_value(typed, window, cx));
+                    view.add_favorite(window, cx);
+                })
+            })
+            .unwrap();
+        }
+        cx.run_until_parked();
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::FavoritesChanged(favorites)] if favorites == &[path]
+        ));
     }
 
     #[test]
