@@ -2,7 +2,7 @@
   "schema_version": 1,
   "recorded_at": "2026-10-01T11:00:38.727113+00:00",
   "scope": "Working-tree unstaged file list scroll with an unchanged colored diff open in the central pane; CPU draw timing is not a physical smoothness measurement.",
-  "renderer_base": "de3050f9839ae773a3e0c9612158400f137c46e0",
+  "renderer_base": "19451cebb11d30d7ebdc54e22bd36c0609435f93",
   "measured_binary_sha256": {
     "before": "c54fc364db678c4dfe66897a762f02ac98a7f4bee0ac5008ea470b4c2486bb48",
     "after": "5a14d0139fa7bac3c370202afbc4a91290ec199979c2925241435b4fcf685322"
@@ -14,7 +14,7 @@
     "displayed_files": 5000,
     "adjacent_colored_diff_rows": 1619,
     "selected_path": "00-large.rs",
-    "source_blob": "941b0ed433a990a81418508280955425ce788dde:src-gpui/src/code_view.rs",
+    "source_blob": "cbf00ed834a68bcb935cc9e6baff219c030333cb:src-gpui/src/code_view.rs",
     "remaining_files": "10 178 generated one-line JavaScript files under node_modules/@lucide/vue/dist/esm/icons"
   },
   "protocol": {

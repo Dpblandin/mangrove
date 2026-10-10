@@ -2,7 +2,7 @@
 
 Application native de Mangrove, construite avec GPUI et le moteur `mangrove-core`. Ce dossier possède son propre workspace Cargo, son lockfile et son répertoire `target` ; le workspace principal contient le moteur et ses benchmarks.
 
-Les couleurs, arrondis et polices sont définis dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans [l’issue #9](https://github.com/Dpblandin/mangrove/issues/9) et le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
+Les couleurs, arrondis et polices sont définis dans `src/theme.rs` ; les vues GPUI portent les espacements, contrôles et interactions. Les icônes originales de packaging sont dans `assets/icons`. La migration depuis l’ancienne interface Vue/Tauri et sa fidélité sont documentées dans le [rapport de comparaison](../docs/performance-gpui.md). Les sources de cette ancienne interface ont été retirées ; les résultats et captures de la comparaison restent historiques, avec les limites de leur [protocole](../docs/performance-gpui-protocol.md).
 
 ## Lancer
 

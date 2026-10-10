@@ -2,7 +2,7 @@
 
 Ce document conserve les mesures datées du moteur `mangrove-core`, indépendant de l'interface. Les commandes ci-dessous utilisent Cargo ; le générateur de fixture nécessite Node.js et Git, sans installation npm. La comparaison historique des interfaces est conservée séparément dans [performance-gpui.md](performance-gpui.md), avec ses limites de protocole.
 
-Les corrections de l’audit #17, leurs mesures avant/après et la vérification de l’application courante sont décrites dans [performance-17.md](performance-17.md).
+Les corrections de l’audit des diffs et de l’historique, leurs mesures avant/après et la vérification de l’application courante sont décrites dans [performance-17.md](performance-17.md).
 
 ## Ouverture, indexation et recherche
 
@@ -43,7 +43,7 @@ Le benchmark place son cache dans un dossier temporaire de l’OS et le supprime
 
 Avant de fixer des objectifs chiffrés, mesurer plusieurs tailles et vrais dépôts : graphes denses, refs nombreuses, messages longs, fichiers volumineux et changements de références. Pour les campagnes GPUI, mesurer le temps jusqu’au premier affichage natif, la fluidité du scroll et les mémoires RSS du processus. Répéter les ouvertures à cache filesystem froid et chaud. Conserver les percentiles et le contexte matériel pour comparer les futures optimisations. Les benchmarks du moteur seul n'incluent pas ces coûts de rendu.
 
-## Contenu, historique de fichier et blame (issue #3)
+## Contenu, historique de fichier et blame
 
 Mesure du 30 septembre 2026, Apple M4 Pro, 48 Gio de RAM, macOS ARM, Rust release avec ThinLTO. Le benchmark `file_benchmark` attend la fin de l’indexation avant de mesurer. Chaque opération utilise un processus distinct et un cache applicatif temporaire hors du dépôt source : une première lecture, puis 30 lectures, cache filesystem chaud. Les chiffres concernent le moteur natif ; ils excluent le transport vers l'interface, son rendu et sa coloration. La QA historique du bundle de l'époque est décrite dans [qa-file-browser.md](qa-file-browser.md) ; la QA GPUI est décrite dans le [README natif](../src-gpui/README.md).
 
@@ -65,7 +65,7 @@ cargo build --release --locked -p mangrove-core --example file_benchmark
 
 Pour un dépôt réel, remplacer seulement le dépôt et le chemin de fichier dans ces commandes. La sortie JSON du programme ne contient que des données agrégées. Conserver les logs locaux hors du dépôt si l’outil externe de mesure y imprime le chemin de la commande.
 
-## Worktrees, stashes et Solo (issue #4)
+## Worktrees, stashes et Solo
 
 Mesure du 30 septembre 2026, Apple M4 Pro, 48 Gio de RAM, macOS ARM, Rust release avec ThinLTO. Le benchmark `context_benchmark` termine l’indexation initiale, puis mesure 30 lectures de chaque opération dans un même processus, avec cache filesystem chaud et cache applicatif temporaire hors du dépôt. Le changement Solo alterne entre une branche et deux références distinctes, attend la fin du nouveau parcours et lit une page de 128 commits. Les métadonnées SQLite sont réutilisées. Les chiffres excluent le transport vers l'interface, son rendu et sa coloration.
 

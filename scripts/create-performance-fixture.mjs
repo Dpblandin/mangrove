@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Isolated stress cases for issue #17; never reuse an existing directory.
+// Isolated stress cases for diff and history benchmarks; never reuse an existing directory.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';

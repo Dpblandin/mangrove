@@ -1,6 +1,6 @@
 {
   "operation": "core graph Layout::push, 128 commits keeping 5000 simultaneous active lanes; graph-owned allocation capacities and page destruction; no UI or Git",
-  "baseline_revision": "28825b7001775ac17bfaabbb23c3818537650f3b",
+  "baseline_revision": "01ba260043faecc612ccf6f2c9e71d19edb35df4",
   "build": "rustc --edition=2021 -O",
   "execution": "before then after sequentially, five passes; background system load not neutralized",
   "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",

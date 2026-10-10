@@ -1,5 +1,5 @@
 {
-  "revision_before": "28825b7",
+  "revision_before": "01ba260",
   "note": "20 fresh processes per revision, filesystem cache uncontrolled, release component probe, no UI or queueing; first sample excluded after a separate warmup",
   "samples": {
     "before": [

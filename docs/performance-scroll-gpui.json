@@ -1,5 +1,5 @@
 {
-  "renderer_base": "1b7d8d0",
+  "renderer_base": "dba0efb",
   "launch_method": "NSWorkspace new instance, foreground activation on main display",
   "sha256": {
     "before": "8e03310f0db9691564a76d8dd960f7622fb865fdc2cb34eb766a32c6f7cc7441",
@@ -442,7 +442,7 @@
   "schema_version": 1,
   "date": "2026-10-01",
   "workload": {
-    "commit": "941b0ed433a990a81418508280955425ce788dde",
+    "commit": "cbf00ed834a68bcb935cc9e6baff219c030333cb",
     "changed_files": 145,
     "heavy_file": "src-gpui/src/code_view.rs",
     "heavy_diff_rows": 1619,

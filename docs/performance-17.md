@@ -1,6 +1,6 @@
-# Performance des diffs et de l’historique — issue #17
+# Performance des diffs et de l’historique
 
-Corrections et mesures du 1er octobre 2026, comparées à `28825b7001775ac17bfaabbb23c3818537650f3b`. Le périmètre reprend [l’issue](https://github.com/Dpblandin/mangrove/issues/17) et [son complément](https://github.com/Dpblandin/mangrove/issues/17#issuecomment-5935287552).
+Corrections et mesures du 1er octobre 2026, comparées à `01ba260043faecc612ccf6f2c9e71d19edb35df4`.
 
 ## Comportement livré
 
