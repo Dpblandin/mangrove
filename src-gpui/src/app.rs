@@ -39,7 +39,9 @@ actions!(
         Search,
         ZoomIn,
         ZoomOut,
-        ZoomReset
+        ZoomReset,
+        MinimizeWindow,
+        ZoomWindow
     ]
 );
 
@@ -79,6 +81,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
         KeyBinding::new("escape", Escape, None),
+        KeyBinding::new("cmd-m", MinimizeWindow, None),
     ]);
     cx.set_menus([
         Menu::new("Mangrove").items([
@@ -107,7 +110,12 @@ pub fn bind_keys(cx: &mut App) {
             MenuItem::action("Réduire le texte", ZoomOut),
             MenuItem::action("Taille du texte par défaut", ZoomReset),
         ]),
+        // GPUI hands only a menu named "Window" to macOS, which then adds its
+        // own window items; this localized menu provides them itself.
         Menu::new("Fenêtre").items([
+            MenuItem::action("Placer dans le Dock", MinimizeWindow),
+            MenuItem::action("Zoom", ZoomWindow),
+            MenuItem::separator(),
             MenuItem::action("Onglet suivant", NextTab),
             MenuItem::action("Onglet précédent", PreviousTab),
             MenuItem::separator(),
@@ -899,6 +907,12 @@ impl Mangrove {
                     .update(cx, |chrome, cx| chrome.open_repository_browser(window, cx));
                 cx.notify();
             }
+            ChromeEvent::CloneRemote(url) => {
+                self.leave_settings(window, cx);
+                self.chrome
+                    .update(cx, |chrome, cx| chrome.clone_remote(url, window, cx));
+                cx.notify();
+            }
             ChromeEvent::CloseRepositoryBrowser => {
                 self.chrome
                     .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
@@ -1224,6 +1238,8 @@ impl Render for Mangrove {
                     view.activate_tab(id, window, cx);
                 }
             }))
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
                 view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
             }))

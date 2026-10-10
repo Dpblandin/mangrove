@@ -68,6 +68,7 @@ pub enum ChromeEvent {
     CloseTab(u64),
     NewTab,
     BrowseRepositories,
+    CloneRemote(String),
     CloseRepositoryBrowser,
     ManageIntegrations,
     ShowSettings,
@@ -970,6 +971,13 @@ impl Chrome {
         cx.notify();
     }
 
+    /// Opens the clone screen on a direct clone of `url`.
+    pub fn clone_remote(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_repository_browser(window, cx);
+        self.integrations
+            .update(cx, |view, cx| view.prefill_clone_url(url, window, cx));
+    }
+
     /// Asks before leaving the clone screen while a clone runs. Returns true
     /// when `leave` waits for that answer; it runs once the user confirms.
     pub fn confirm_leave_repository_browser(
@@ -1228,12 +1236,12 @@ impl Chrome {
                     display_path(favorite)
                 },
                 tooltip: if remote {
-                    format!("{favorite}\nCloner depuis l’écran des dépôts distants")
+                    format!("{favorite}\nCloner ce dépôt")
                 } else {
                     favorite.to_owned()
                 },
                 open: if remote {
-                    ChromeEvent::BrowseRepositories
+                    ChromeEvent::CloneRemote(favorite.to_owned())
                 } else {
                     ChromeEvent::OpenRepository(favorite.to_owned())
                 },

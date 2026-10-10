@@ -1543,6 +1543,16 @@ impl IntegrationsView {
         cx.notify();
     }
 
+    /// Starts a direct clone of `url`, unless a clone is already running.
+    pub fn prefill_clone_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cloning() {
+            return;
+        }
+        self.clone_url
+            .update(cx, |input, cx| input.set_value(url.to_owned(), window, cx));
+        self.select_direct_clone(window, cx);
+    }
+
     fn select_direct_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.cancel();

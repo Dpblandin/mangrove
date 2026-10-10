@@ -656,7 +656,7 @@ impl SidebarView {
         });
         let bounds_subscription =
             cx.observe_window_bounds(window, |view, _, cx| view.close_menu(cx));
-        let tree_focus = cx.focus_handle();
+        let tree_focus = cx.focus_handle().tab_stop(true);
         let focus_subscription = cx.on_focus(&tree_focus, window, |view, _, cx| {
             view.ensure_active_row(cx)
         });
