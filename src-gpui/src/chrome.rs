@@ -2,7 +2,7 @@
 use crate::{
     command_palette::key_hint,
     format::{display_path, shortcut_label},
-    integrations::{IntegrationsEvent, IntegrationsView},
+    integrations::{IntegrationsEvent, IntegrationsView, Spot},
     preferences::{Pane, Preferences, RecentRepository, profile_store},
     recent_repositories::{RecentMetadata, RecentNamesRequest, favorite_name, is_remote_favorite},
     settings::{SettingsEvent, SettingsView},
@@ -106,6 +106,8 @@ pub struct Chrome {
     integrations: Entity<IntegrationsView>,
     recent_metadata: RecentMetadata,
     applied_theme: ThemeId,
+    /// The interval that re-enabling the auto-fetch restores.
+    resumed_interval: u32,
     pub settings: Entity<SettingsView>,
     tabs: Vec<ChromeTab>,
     active_tab: Option<u64>,
@@ -152,22 +154,12 @@ impl Chrome {
         integrations.update(cx, |view, cx| {
             view.set_profiles(profiles.profiles.clone(), window, cx);
             if let Some(error) = profile_error.clone() {
-                view.set_error(error, cx);
+                view.set_error(Spot::Page, error, cx);
             }
         });
         let recent_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Rechercher un dépôt récent…"));
-        let settings = cx.new(|cx| {
-            SettingsView::new(
-                preferences.auto_fetch_interval,
-                preferences.theme,
-                preferences.show_image_previews,
-                preferences.palette(),
-                preferences.font_size_offset,
-                window,
-                cx,
-            )
-        });
+        let settings = cx.new(|cx| SettingsView::new(&preferences, window, cx));
         settings.update(cx, |view, cx| {
             view.set_integrations(integrations.clone(), cx)
         });
@@ -176,23 +168,44 @@ impl Chrome {
                 this.integration_event(event, window, cx)
             }),
             cx.subscribe(&recent_filter, |_, _, _: &InputEvent, cx| cx.notify()),
-            cx.subscribe(&settings, |this, _, event, cx| match event {
-                SettingsEvent::Back => cx.emit(ChromeEvent::BackToWorkspace),
-                SettingsEvent::ThemeChanged(theme) => {
-                    this.preferences.theme = *theme;
-                    this.preferences_changed(cx);
+            cx.subscribe(&settings, |this, settings, event, cx| {
+                match event {
+                    SettingsEvent::Back => return cx.emit(ChromeEvent::BackToWorkspace),
+                    SettingsEvent::ThemeChanged(theme) => this.preferences.theme = *theme,
+                    SettingsEvent::IntervalChanged(value) => {
+                        this.preferences.auto_fetch_interval = *value;
+                        // Turning it off keeps the interval to come back to.
+                        if *value > 0 {
+                            this.resumed_interval = *value;
+                        }
+                    }
+                    SettingsEvent::ImagePreviewsChanged(value) => {
+                        this.preferences.show_image_previews = *value
+                    }
+                    SettingsEvent::FontSizeChanged(value) => {
+                        this.preferences.set_font_size_offset(*value)
+                    }
+                    SettingsEvent::DiffFontSizeChanged(value) => {
+                        this.preferences.set_diff_font_size(*value)
+                    }
                 }
-                SettingsEvent::IntervalChanged(value) => {
-                    this.preferences.auto_fetch_interval = *value;
-                    this.preferences_changed(cx);
-                }
-                SettingsEvent::ImagePreviewsChanged(value) => {
-                    this.preferences.show_image_previews = *value;
-                    this.preferences_changed(cx);
+                let saved = this.preferences_changed(cx);
+                if let Some(field) = event.field() {
+                    settings.update(cx, |view, cx| {
+                        view.confirm_saved(
+                            field,
+                            saved.then_some(()).ok_or_else(|| {
+                                "Ce réglage est appliqué, mais n’a pas pu être enregistré."
+                                    .to_string()
+                            }),
+                            cx,
+                        )
+                    });
                 }
             }),
         ];
         let applied_theme = preferences.theme;
+        let resumed_interval = resumed_interval(&preferences);
         Self {
             preferences,
             profiles,
@@ -200,6 +213,7 @@ impl Chrome {
             integrations,
             recent_metadata: RecentMetadata::default(),
             applied_theme,
+            resumed_interval,
             settings,
             tabs: Vec::new(),
             active_tab: None,
@@ -352,6 +366,23 @@ impl Chrome {
     pub fn prefs_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.preferences_changed(cx);
     }
+    /// The interval in minutes that enabling the auto-fetch would apply.
+    pub fn resumed_interval(&self) -> u32 {
+        self.resumed_interval
+    }
+    /// Turns the auto-fetch off, or back on at its last interval.
+    pub fn toggle_auto_fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let interval = if self.preferences.auto_fetch_interval == 0 {
+            self.resumed_interval
+        } else {
+            0
+        };
+        self.preferences.auto_fetch_interval = interval;
+        self.settings.update(cx, |settings, cx| {
+            settings.set_interval(interval, window, cx)
+        });
+        self.preferences_changed(cx);
+    }
     pub fn zoom(&mut self, delta: Option<i32>, cx: &mut Context<Self>) {
         self.preferences.font_shortcut(delta);
         self.preferences_changed(cx);
@@ -363,42 +394,35 @@ impl Chrome {
         });
         self.preferences_changed(cx);
     }
-    fn preferences_changed(&mut self, cx: &mut Context<Self>) {
+    /// Applies the preferences everywhere and returns whether they were saved.
+    fn preferences_changed(&mut self, cx: &mut Context<Self>) -> bool {
         if self.applied_theme != self.preferences.theme {
             self.preferences.apply_palette(cx);
             self.applied_theme = self.preferences.theme;
         }
-        self.save_preferences(cx);
-        self.integrations.update(cx, |view, cx| {
-            view.set_theme(
-                self.preferences.palette(),
-                self.preferences.font_size_offset,
-                cx,
-            )
-        });
+        let saved = self.save_preferences(cx);
         self.settings.update(cx, |settings, cx| {
-            settings.set_theme(
-                self.preferences.palette(),
-                self.preferences.font_size_offset,
-                cx,
-            )
+            settings.sync_preferences(&self.preferences, cx)
         });
         cx.emit(ChromeEvent::PreferencesChanged);
         cx.notify();
+        saved
     }
-    fn save_preferences(&mut self, cx: &mut Context<Self>) {
-        if self
+    fn save_preferences(&mut self, cx: &mut Context<Self>) -> bool {
+        let saved = self
             .preferences
             .save_for_profile(&self.profiles.active_profile_id)
-            .is_err()
-        {
+            .is_ok();
+        if !saved {
             self.integrations.update(cx, |view, cx| {
                 view.set_error(
+                    Spot::Page,
                     "Impossible d’enregistrer les préférences du profil.".into(),
                     cx,
                 )
             });
         }
+        saved
     }
     fn integration_event(
         &mut self,
@@ -582,6 +606,7 @@ impl Chrome {
         self.profiles = profiles;
         if changed_profile {
             self.preferences = Preferences::load_for_profile(&self.profiles.active_profile_id);
+            self.resumed_interval = resumed_interval(&self.preferences);
             self.recent_metadata = RecentMetadata::default();
             self.preferences.apply_palette(cx);
             self.applied_theme = self.preferences.theme;
@@ -628,7 +653,7 @@ impl Chrome {
             if let Some(profile) = self.profiles.active().cloned() {
                 view.set_profile(profile, window, cx);
             }
-            view.set_error(message, cx);
+            view.set_error(event.spot(), message, cx);
         });
     }
     /// Arrows move between tabs without reloading them; Enter or Space activates.
@@ -1937,4 +1962,12 @@ fn notice_action(id: &'static str, label: &'static str, p: Palette, offset: f32)
         .focus_visible(move |style| style.border_color(rgb(p.accent)))
         .accessibility_label(label)
         .child(label)
+}
+
+/// The current interval, or the default one while the auto-fetch is off.
+fn resumed_interval(preferences: &Preferences) -> u32 {
+    match preferences.auto_fetch_interval {
+        0 => crate::preferences::DEFAULT_AUTO_FETCH_INTERVAL,
+        interval => interval,
+    }
 }

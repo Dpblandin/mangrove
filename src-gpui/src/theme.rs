@@ -52,7 +52,7 @@ impl ThemeId {
             Self::Mangrove => "Mangrove",
             Self::Macchiato => "Catppuccin Macchiato",
             Self::Ardoise => "Ardoise",
-            Self::Gitlab => "Gitlab",
+            Self::Gitlab => "GitLab",
         }
     }
 }
@@ -286,6 +286,10 @@ impl Palette {
             c.danger = rgb(self.danger).into();
             c.success = rgb(self.success).into();
             c.warning = rgb(self.warning).into();
+            // The kit's switch keeps a near-black thumb on a dark gray track,
+            // which disappears on the panels when the switch is off.
+            c.switch = rgb(mix(self.muted, self.panel, 0.55)).into();
+            c.switch_thumb = rgb(self.bg).into();
             c.scrollbar_thumb = rgb(self.muted).opacity(0.4).into();
             c.scrollbar_thumb_hover = rgb(self.muted).opacity(0.6).into();
             c.scrollbar = gpui_kit::transparent_black();

@@ -1,16 +1,19 @@
 use crate::{
     format::{count_label, display_path, initials},
     recent_repositories::is_remote_favorite,
-    theme::{Palette, icon, scrollbar_theme},
+    settings::ui::{Tone, field_border},
+    theme::{Palette, RADIUS_MD, icon, scrollbar_theme},
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     base::Button,
     component::{
-        Disableable, Sizable,
-        input::{Escape as InputEscape, Input, InputEvent, InputState},
+        IndexPath, Sizable,
+        input::{Escape as InputEscape, InputEvent, InputState},
         scroll::Scrollbar,
-        searchable_list::{SearchableGroup, SearchableListDelegate, SearchableListItem},
+        searchable_list::{
+            SearchableGroup, SearchableListDelegate, SearchableListItem, SearchableVec,
+        },
         select::{Select, SelectEvent, SelectState},
     },
     prelude::*,
@@ -74,6 +77,53 @@ pub enum IntegrationsEvent {
     OpenIntegrationSettings,
 }
 
+/// Where a progress note, a confirmation or an error appears: next to the
+/// field or action it concerns rather than above the page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Spot {
+    /// Problems without a field of their own, such as an unreadable profile
+    /// file, and the clone screen's operations.
+    Page,
+    NewProfile,
+    ProfileRename,
+    ProfileList,
+    Favorite,
+    Ssh,
+    SshKey,
+    SshRemote,
+    /// The server or workspace URL of the connection form.
+    Server,
+    Connection,
+    /// Above the accounts of the selected edition.
+    Accounts,
+    Account(String),
+}
+
+impl IntegrationsEvent {
+    /// Where a failure to save this change is reported.
+    pub(crate) fn spot(&self) -> Spot {
+        match self {
+            Self::ProfileCreated(_) => Spot::NewProfile,
+            Self::AccountAdded { .. } => Spot::Connection,
+            Self::AccountRemoved { account_id, .. } => Spot::Account(account_id.clone()),
+            Self::FavoritesChanged(_) => Spot::Favorite,
+            Self::SshChanged(_) => Spot::Ssh,
+            Self::ProfileSelected(_)
+            | Self::ProfileRenamed { .. }
+            | Self::ProfileDeleted(_)
+            | Self::OpenLocalFavorite(_)
+            | Self::OpenIntegrationSettings => Spot::ProfileList,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Feedback {
+    spot: Spot,
+    tone: Tone,
+    text: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationsSection {
     Profiles,
@@ -128,8 +178,29 @@ impl ProviderEdition {
         match self {
             Self::GitHub => "https://github.com",
             Self::GitLab => "https://gitlab.com",
-            Self::BitbucketCloud => "https://bitbucket.org/",
             _ => "",
+        }
+    }
+
+    /// An example of the server or workspace URL the edition expects.
+    fn server_example(self) -> &'static str {
+        match self {
+            Self::GitHubEnterprise => "https://github.exemple.com",
+            Self::GitLabSelfManaged => "https://gitlab.exemple.com",
+            Self::BitbucketCloud => "https://bitbucket.org/votre-workspace",
+            Self::BitbucketDataCenter => "https://bitbucket.exemple.com",
+            _ => "",
+        }
+    }
+
+    /// The name the browser connection is offered with.
+    fn brand(self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub",
+            Self::GitHubEnterprise => "GitHub Enterprise",
+            Self::GitLab | Self::GitLabSelfManaged => "GitLab",
+            Self::BitbucketCloud => "Bitbucket Cloud",
+            Self::BitbucketDataCenter => "Bitbucket Data Center",
         }
     }
 
@@ -161,6 +232,73 @@ impl ProviderEdition {
 }
 
 type RepositorySelect = SelectState<RepositoryMenu>;
+type ProfileSelect = SelectState<SearchableVec<ProfileOption>>;
+
+/// A profile in the settings header's switcher, with its avatar colors.
+#[derive(Clone)]
+struct ProfileOption {
+    id: String,
+    name: String,
+    monogram: String,
+    color: u32,
+    background: u32,
+}
+
+impl ProfileOption {
+    fn new(profile: &Profile, p: Palette) -> Self {
+        let (color, background) = profile_colors(profile, p);
+        Self {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            monogram: profile_monogram(&profile.name),
+            color,
+            background,
+        }
+    }
+
+    fn row(&self) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .min_w_0()
+            .child(
+                div()
+                    .size(px(20.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(self.background))
+                    .text_color(rgb(self.color))
+                    .text_size(px(9.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.monogram.clone()),
+            )
+            .child(div().min_w_0().truncate().child(self.name.clone()))
+    }
+}
+
+impl SearchableListItem for ProfileOption {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.name.clone().into()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        Some(self.row().into_any_element())
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        self.row()
+    }
+
+    fn value(&self) -> &String {
+        &self.id
+    }
+}
 
 #[derive(Clone)]
 enum ReadRequest {
@@ -184,6 +322,7 @@ enum PendingOperation {
 enum PathPickerTarget {
     CloneParent,
     SshKey,
+    Favorite,
 }
 
 enum ConnectionRequest {
@@ -281,15 +420,34 @@ pub struct IntegrationsView {
     client_id: Entity<InputState>,
     consumer_secret: Entity<InputState>,
     browser_connection: bool,
-    oauth_config_open: bool,
+    /// The edition's OAuth application ID was already known when the form
+    /// opened; otherwise the form walks through creating the application.
+    app_configured: bool,
+    /// Creation instructions unfolded for an already configured application.
+    setup_open: bool,
     github_private_repos: bool,
     github_authorization: Option<GitHubAuthorization>,
     key_path: Entity<InputState>,
+    /// The key option is shown before a key has been retained.
+    choosing_key: bool,
+    /// The key field returns to the retained key once the section is left.
+    key_draft_reset: bool,
+    /// An « Activer » button that disappears hands the keyboard to the page.
+    refocus_on_switch: bool,
+    /// Radio groups take a single tab stop; arrows move the choice.
+    ssh_focus: [FocusHandle; 3],
+    provider_focus: [FocusHandle; 6],
+    /// The copied value's button reads « Copié » for a moment.
+    copied: Option<&'static str>,
+    copied_task: Option<Task<()>>,
     favorite: Entity<InputState>,
     ssh_remote: Entity<InputState>,
     ssh_references: Vec<String>,
     edition: ProviderEdition,
     adding_account: bool,
+    profile_select: Entity<ProfileSelect>,
+    /// The switcher's avatars wait for the next render to take a new theme.
+    profile_select_dirty: bool,
     repository_select: Entity<RepositorySelect>,
     repository_select_subscription: Option<Subscription>,
     repository_select_scope: u64,
@@ -324,8 +482,7 @@ pub struct IntegrationsView {
     discussions_next: Option<PageCursor>,
     statuses_next: Option<PageCursor>,
     pending: Option<PendingOperation>,
-    message: Option<String>,
-    error: Option<String>,
+    feedback: Option<Feedback>,
 }
 
 impl EventEmitter<IntegrationsEvent> for IntegrationsView {}
@@ -354,7 +511,9 @@ impl IntegrationsView {
                 input.set_value(display_path(&path.to_string_lossy()), window, cx)
             });
         }
-        let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
+        let edition = default_edition(&profile);
+        let client_id = configured_browser_client_id(&profile, edition);
+        let app_configured = !client_id.is_empty();
         let repository_menu_data = Rc::new(RefCell::new(RepositoryMenuData::default()));
         let options = RepositoryMenu::new(
             repository_menu_data.clone(),
@@ -365,6 +524,14 @@ impl IntegrationsView {
         );
         let repository_select =
             cx.new(|cx| SelectState::new(options, None, window, cx).searchable(true));
+        let profile_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(vec![ProfileOption::new(&profile, palette)]),
+                Some(IndexPath::new(0)),
+                window,
+                cx,
+            )
+        });
         let clone_url = text_input(
             "https://serveur/groupe/depot.git ou git@serveur:groupe/depot.git",
             window,
@@ -377,13 +544,74 @@ impl IntegrationsView {
                 .default_value(default_clone_parent())
         });
         let profile_rename = text_input("Nom du profil", window, cx);
-        let mut subscriptions = vec![];
-        subscriptions.push(cx.subscribe_in(
-            &profile_rename,
+        let profile_name = text_input("Par exemple : Client Acme", window, cx);
+        let label = text_input("Nom affiché dans Mangrove", window, cx);
+        let server = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(edition.server_example())
+                .default_value(edition.server())
+        });
+        let username = text_input("nom@exemple.com", window, cx);
+        let token = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Collez le token")
+                .masked(true)
+        });
+        let client_id = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Collez l’identifiant de l’application")
+                .default_value(client_id)
+        });
+        let consumer_secret = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Collez le secret du consumer")
+                .masked(true)
+        });
+        let favorite = text_input(
+            "~/projets/depot ou https://serveur/groupe/depot",
             window,
-            |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.save_profile_name(window, cx);
+            cx,
+        );
+        let ssh_remote = text_input("git@serveur:groupe/depot.git", window, cx);
+        let mut subscriptions = vec![];
+        // Typing retires the error a field caused; Enter submits its form.
+        for (input, spot) in [
+            (&profile_name, Spot::NewProfile),
+            (&profile_rename, Spot::ProfileRename),
+            (&favorite, Spot::Favorite),
+            (&key_path, Spot::SshKey),
+            (&ssh_remote, Spot::SshRemote),
+            (&label, Spot::Connection),
+            (&server, Spot::Server),
+            (&username, Spot::Connection),
+            (&token, Spot::Connection),
+            (&client_id, Spot::Connection),
+            (&consumer_secret, Spot::Connection),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, _, event, window, cx| match event {
+                    InputEvent::Change => {
+                        this.settle_feedback_at(&spot);
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => this.submit(&spot, window, cx),
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ));
+        }
+        subscriptions.push(cx.subscribe_in(
+            &profile_select,
+            window,
+            |this, _, event: &SelectEvent<SearchableVec<ProfileOption>>, window, cx| {
+                if let SelectEvent::Confirm(Some(id)) = event
+                    && *id != this.profile.id
+                {
+                    // The switcher shows the active profile until the switch,
+                    // which may still be refused or cancelled, completes.
+                    this.sync_profile_select(window, cx);
+                    this.select_profile(id.clone(), cx);
                 }
             },
         ));
@@ -420,38 +648,36 @@ impl IntegrationsView {
             rail_scroll: ScrollHandle::default(),
             focus_handle: cx.focus_handle(),
             identities: HashMap::new(),
-            profile_name: text_input("Nom du nouveau profil", window, cx),
+            profile_name,
             profile_rename,
             renaming_profile: None,
             deleting_profile: None,
-            label: text_input("Nom du compte", window, cx),
-            server: cx.new(|cx| InputState::new(window, cx).default_value("https://gitlab.com")),
-            username: text_input("Adresse e-mail Atlassian (Bitbucket Cloud)", window, cx),
-            token: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("Token personnel")
-                    .masked(true)
-            }),
-            client_id: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("ID public de l’application Mangrove")
-                    .default_value(client_id)
-            }),
-            consumer_secret: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("Secret du consumer Bitbucket")
-                    .masked(true)
-            }),
+            label,
+            server,
+            username,
+            token,
+            client_id,
+            consumer_secret,
             browser_connection: true,
-            oauth_config_open: oauth_config_required(ProviderEdition::GitLab),
+            app_configured,
+            setup_open: false,
             github_private_repos: false,
             github_authorization: None,
             key_path,
-            favorite: text_input("Chemin local ou URL d’un dépôt", window, cx),
-            ssh_remote: text_input("ssh://git@serveur/groupe/depot.git", window, cx),
+            choosing_key: false,
+            key_draft_reset: false,
+            refocus_on_switch: false,
+            ssh_focus: std::array::from_fn(|_| cx.focus_handle()),
+            provider_focus: std::array::from_fn(|_| cx.focus_handle()),
+            copied: None,
+            copied_task: None,
+            favorite,
+            ssh_remote,
             ssh_references: Vec::new(),
-            edition: ProviderEdition::GitLab,
+            edition,
             adding_account: false,
+            profile_select,
+            profile_select_dirty: false,
             repository_select,
             repository_select_subscription: None,
             repository_select_scope: 0,
@@ -485,14 +711,67 @@ impl IntegrationsView {
             discussions_next: None,
             statuses_next: None,
             pending: None,
-            message: None,
-            error: None,
+            feedback: None,
         }
     }
 
-    pub fn set_profiles(&mut self, profiles: Vec<Profile>, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_profiles(
+        &mut self,
+        profiles: Vec<Profile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.profiles = profiles;
+        self.sync_profile_select(window, cx);
         cx.notify();
+    }
+
+    pub fn profile_name(&self) -> &str {
+        &self.profile.name
+    }
+
+    /// The settings header's profile switcher.
+    pub fn profile_switcher(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        if self.profile_select_dirty {
+            self.sync_profile_select(window, cx);
+        }
+        let p = self.palette;
+        Select::new(&self.profile_select)
+            .id("profile-switcher")
+            .w(px(220.))
+            .h(px(32.))
+            .px(px(10.))
+            .border_1()
+            .border_color(rgb(field_border(p)))
+            .rounded(RADIUS_MD)
+            .bg(rgb(p.bg))
+            .text_color(rgb(p.text))
+            .text_size(px(12. + self.offset))
+            .menu_max_h(px(320.))
+            .accessibility_label(format!("Profil actif : {}", self.profile.name))
+    }
+
+    fn sync_profile_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_select_dirty = false;
+        let p = self.palette;
+        let mut options: Vec<_> = self
+            .profiles
+            .iter()
+            .map(|profile| ProfileOption::new(profile, p))
+            .collect();
+        if !options.iter().any(|option| option.id == self.profile.id) {
+            options.insert(0, ProfileOption::new(&self.profile, p));
+        }
+        let active = self.profile.id.clone();
+        self.profile_select.update(cx, |select, cx| {
+            select.set_items(SearchableVec::new(options), window, cx);
+            select.set_selected_value(&active, window, cx);
+            cx.notify();
+        });
     }
 
     pub fn set_section(&mut self, section: IntegrationsSection, cx: &mut Context<Self>) {
@@ -500,8 +779,9 @@ impl IntegrationsView {
         if self.section != section {
             self.cancel();
             self.clear_reads();
-            self.message = None;
-            self.error = None;
+            self.feedback = None;
+            self.choosing_key = false;
+            self.key_draft_reset = true;
             self.section = section;
         }
         cx.notify();
@@ -536,7 +816,11 @@ impl IntegrationsView {
     pub fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel();
         self.clear_connection_secrets(window, cx);
-        self.message = None;
+        // Reopened settings start without the previous visit's messages, and
+        // show the SSH choice that is actually saved.
+        self.feedback = None;
+        self.choosing_key = false;
+        self.key_draft_reset = true;
         cx.notify();
     }
 
@@ -597,6 +881,7 @@ impl IntegrationsView {
         self.palette = palette;
         self.offset = offset;
         self.repository_select_dirty = true;
+        self.profile_select_dirty = true;
         cx.notify();
     }
 
@@ -611,10 +896,14 @@ impl IntegrationsView {
             self.clear_reads();
             self.selected_account = None;
             self.clear_connection_secrets(window, cx);
-            self.message = None;
-            self.error = None;
         }
         if switched {
+            // Only a switch drops the messages: a confirmation of this
+            // profile's own change, such as a new account, stays visible.
+            self.feedback = None;
+            if std::mem::take(&mut self.refocus_on_switch) {
+                self.focus_handle.focus(window, cx);
+            }
             for input in [
                 &self.label,
                 &self.username,
@@ -626,8 +915,9 @@ impl IntegrationsView {
             ] {
                 input.update(cx, |state, cx| state.set_value("", window, cx));
             }
-            self.edition = ProviderEdition::GitLab;
+            self.edition = default_edition(&profile);
             self.adding_account = false;
+            self.choosing_key = false;
             self.renaming_profile = None;
             self.direct_clone = false;
             self.clone_ssh = false;
@@ -636,22 +926,28 @@ impl IntegrationsView {
             });
             self.browser_connection = true;
             self.github_private_repos = false;
-            let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
-            self.oauth_config_open = oauth_config_required(ProviderEdition::GitLab);
+            let client_id = configured_browser_client_id(&profile, self.edition);
+            self.app_configured = !client_id.is_empty();
+            self.setup_open = false;
             self.client_id
                 .update(cx, |input, cx| input.set_value(client_id, window, cx));
+            let edition = self.edition;
             self.server.update(cx, |input, cx| {
-                input.set_value("https://gitlab.com", window, cx)
+                input.set_value(edition.server(), window, cx);
+                input.set_placeholder(edition.server_example(), window, cx);
             });
         }
-        self.key_path.update(cx, |input, cx| {
-            let value = match &profile.ssh {
-                SshChoice::KeyFile { path } => display_path(&path.to_string_lossy()),
-                _ => String::new(),
-            };
-            input.set_value(value, window, cx);
-        });
+        // Choosing the agent keeps a typed key path for a later return.
+        if let SshChoice::KeyFile { path } = &profile.ssh {
+            let path = display_path(&path.to_string_lossy());
+            self.key_path
+                .update(cx, |input, cx| input.set_value(path, window, cx));
+        } else if switched {
+            self.key_path
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         self.profile = profile;
+        self.sync_profile_select(window, cx);
         cx.notify();
     }
 
@@ -673,9 +969,41 @@ impl IntegrationsView {
             .detach();
     }
 
-    pub fn set_error(&mut self, message: String, cx: &mut Context<Self>) {
-        self.error = Some(message);
+    pub fn set_error(&mut self, spot: Spot, message: String, cx: &mut Context<Self>) {
+        self.report(spot, Tone::Error, message);
         cx.notify();
+    }
+
+    fn report(&mut self, spot: Spot, tone: Tone, text: impl Into<String>) {
+        self.feedback = Some(Feedback {
+            spot,
+            tone,
+            text: text.into(),
+        });
+    }
+
+    /// Editing a field retires its error or confirmation; a running operation
+    /// keeps its progress note.
+    fn settle_feedback_at(&mut self, spot: &Spot) {
+        if self
+            .feedback
+            .as_ref()
+            .is_some_and(|feedback| &feedback.spot == spot && feedback.tone != Tone::Progress)
+        {
+            self.feedback = None;
+        }
+    }
+
+    fn submit(&mut self, spot: &Spot, window: &mut Window, cx: &mut Context<Self>) {
+        match spot {
+            Spot::NewProfile => self.create_profile(window, cx),
+            Spot::ProfileRename => self.save_profile_name(window, cx),
+            Spot::Favorite => self.add_favorite(window, cx),
+            Spot::SshKey => self.save_ssh_key(cx),
+            Spot::SshRemote => self.read_ssh(cx),
+            Spot::Connection | Spot::Server if self.can_connect(cx) => self.connect(window, cx),
+            _ => {}
+        }
     }
 
     fn cancel(&mut self) {
@@ -729,18 +1057,19 @@ impl IntegrationsView {
         self.browser_connection = true;
         self.github_private_repos = false;
         self.server.update(cx, |input, cx| {
-            input.set_value(edition.server(), window, cx)
+            input.set_value(edition.server(), window, cx);
+            input.set_placeholder(edition.server_example(), window, cx);
         });
+        // The account name may stay; credentials and addresses belong to an edition.
         self.clear_connection_secrets(window, cx);
-        for input in [&self.label, &self.username] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
+        self.username
+            .update(cx, |input, cx| input.set_value("", window, cx));
         let client_id = configured_browser_client_id(&self.profile, edition);
-        self.oauth_config_open = oauth_config_required(edition);
+        self.app_configured = !client_id.is_empty();
+        self.setup_open = false;
         self.client_id
             .update(cx, |input, cx| input.set_value(client_id, window, cx));
-        self.message = None;
-        self.error = None;
+        self.feedback = None;
         cx.notify();
     }
 
@@ -758,11 +1087,39 @@ impl IntegrationsView {
     ) {
         self.browser_connection = browser;
         self.clear_connection_secrets(window, cx);
-        self.error = None;
+        self.settle_feedback_at(&Spot::Connection);
         cx.notify();
     }
 
+    /// The edition needs its own server or workspace URL.
+    fn needs_server(&self) -> bool {
+        self.edition.custom_server() || self.edition == ProviderEdition::BitbucketCloud
+    }
+
+    /// Explains why the server or workspace URL cannot be used.
+    fn server_refusal(&self, cx: &App) -> Option<String> {
+        if !self.needs_server() {
+            return None;
+        }
+        let server = self.server.read(cx).value().trim().to_string();
+        let example = self.edition.server_example();
+        if self.edition == ProviderEdition::BitbucketCloud {
+            bitbucket_oauth::application_settings_url(&server)
+                .is_err()
+                .then(|| format!("Indiquez l’adresse HTTPS du workspace, par exemple {example}."))
+        } else {
+            mangrove_remote::SafeApiUrl::new(&server, "")
+                .is_err()
+                .then(|| format!("Indiquez l’adresse HTTPS du serveur, par exemple {example}."))
+        }
+    }
+
     fn open_application_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(refusal) = self.server_refusal(cx) {
+            self.report(Spot::Server, Tone::Error, refusal);
+            cx.notify();
+            return;
+        }
         let server_url = self.server.read(cx).value().trim().to_string();
         let result = match self.edition.provider() {
             Provider::GitHub => github_oauth::application_settings_url(&server_url),
@@ -773,7 +1130,7 @@ impl IntegrationsView {
         match result {
             Ok(url) => cx.open_url(&url),
             Err(error) => {
-                self.error = Some(error.to_string());
+                self.report(Spot::Connection, Tone::Error, error.to_string());
                 cx.notify();
             }
         }
@@ -783,11 +1140,17 @@ impl IntegrationsView {
         if self.pending.is_some() {
             return;
         }
+        if let Some(refusal) = self.server_refusal(cx) {
+            self.report(Spot::Server, Tone::Error, refusal);
+            cx.notify();
+            return;
+        }
         if self.profile.accounts.len() >= 32 {
             self.clear_connection_secrets(window, cx);
-            self.error = Some(
-                "Le profil contient déjà 32 comptes. Déconnectez un compte avant d’en ajouter un."
-                    .into(),
+            self.report(
+                Spot::Connection,
+                Tone::Error,
+                "Le profil contient déjà 32 comptes. Déconnectez un compte avant d’en ajouter un.",
             );
             cx.notify();
             return;
@@ -797,11 +1160,14 @@ impl IntegrationsView {
         let (request, authentication) = if browser {
             let client_id = self.client_id.read(cx).value().trim().to_string();
             if client_id.is_empty() {
-                self.oauth_config_open = true;
-                self.error = Some(format!(
-                    "Créez une application {} puis saisissez son ID public dans la configuration avancée.",
-                    provider_label(provider)
-                ));
+                self.report(
+                    Spot::Connection,
+                    Tone::Error,
+                    format!(
+                        "Créez l’application Mangrove dans {} puis collez son identifiant.",
+                        provider_label(provider)
+                    ),
+                );
                 cx.notify();
                 return;
             }
@@ -818,10 +1184,10 @@ impl IntegrationsView {
                 let consumer_secret = SecretToken::from(secret.to_string());
                 self.clear_connection_secrets(window, cx);
                 if secret.is_empty() {
-                    self.oauth_config_open = true;
-                    self.error = Some(
-                        "Saisissez le Secret du consumer OAuth Bitbucket dans la configuration avancée."
-                            .into(),
+                    self.report(
+                        Spot::Connection,
+                        Tone::Error,
+                        "Collez le secret du consumer OAuth Bitbucket.",
                     );
                     cx.notify();
                     return;
@@ -848,7 +1214,7 @@ impl IntegrationsView {
             // reappear through undo or be returned in an event payload.
             self.clear_connection_secrets(window, cx);
             if draft.is_empty() {
-                self.error = Some("Saisissez un token personnel.".into());
+                self.report(Spot::Connection, Tone::Error, "Collez un token personnel.");
                 cx.notify();
                 return;
             }
@@ -876,12 +1242,15 @@ impl IntegrationsView {
         };
         self.cancel();
         self.pending = Some(PendingOperation::Connect);
-        self.error = None;
-        self.message = Some(if browser {
-            format!("Préparation de la connexion {}…", provider_label(provider))
-        } else {
-            "Vérification du compte…".into()
-        });
+        self.report(
+            Spot::Connection,
+            Tone::Progress,
+            if browser {
+                format!("Préparation de la connexion {}…", provider_label(provider))
+            } else {
+                "Vérification du compte…".into()
+            },
+        );
         let ticket = self.session.ticket(&account.id);
         let session = self.session.clone();
         let vault = self.vault.clone();
@@ -938,8 +1307,10 @@ impl IntegrationsView {
                         // The listener is bound before opening the browser. A
                         // superseded profile cannot open a stale login page.
                         cx.open_url(url);
-                        view.message = Some(
-                            "Autorisez Mangrove dans votre navigateur, puis revenez ici.".into(),
+                        view.report(
+                            Spot::Connection,
+                            Tone::Progress,
+                            "Autorisez Mangrove dans votre navigateur, puis revenez ici.",
                         );
                         cx.notify();
                     }
@@ -950,7 +1321,11 @@ impl IntegrationsView {
                             copied: false,
                         });
                         cx.open_url(flow.verification_url());
-                        view.message = Some("Saisissez le code affiché ci-dessous dans GitHub, puis autorisez Mangrove.".into());
+                        view.report(
+                            Spot::Connection,
+                            Tone::Progress,
+                            "Saisissez le code affiché ci-dessous dans GitHub, puis autorisez Mangrove.",
+                        );
                         cx.notify();
                     }
                     true
@@ -1015,8 +1390,10 @@ impl IntegrationsView {
                             view.profile.accounts.push(account.clone());
                             view.clear_reads();
                             view.adding_account = false;
-                            view.message = Some(
-                                "Compte connecté. Les lectures distantes sont disponibles.".into(),
+                            view.report(
+                                Spot::Account(account.id.clone()),
+                                Tone::Success,
+                                "Compte connecté. Ses dépôts sont disponibles dans Nouvel onglet → Cloner.",
                             );
                             cx.emit(IntegrationsEvent::AccountAdded {
                                 profile_id: ticket.profile_id.clone(),
@@ -1024,8 +1401,7 @@ impl IntegrationsView {
                             });
                         }
                         Err(error) => {
-                            view.message = None;
-                            view.error = Some(error.to_string());
+                            view.report(Spot::Connection, Tone::Error, error.to_string());
                         }
                     }
                     cx.notify();
@@ -1085,8 +1461,11 @@ impl IntegrationsView {
         let worker_ticket = ticket.clone();
         let vault = self.vault.clone();
         self.pending = Some(PendingOperation::Identity);
-        self.message = Some("Vérification du compte…".into());
-        self.error = None;
+        self.report(
+            Spot::Account(account.id.clone()),
+            Tone::Progress,
+            "Vérification du compte…",
+        );
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1110,16 +1489,91 @@ impl IntegrationsView {
                         if let Some(identity) = identity {
                             view.identities.insert(ticket.account_id.clone(), identity);
                         }
-                        view.message = Some("Compte vérifié.".into());
+                        view.report(
+                            Spot::Account(ticket.account_id.clone()),
+                            Tone::Success,
+                            "Compte vérifié.",
+                        );
                     }
                     Err(error) => {
-                        view.message = None;
-                        view.error = Some(error.to_string());
+                        view.report(
+                            Spot::Account(ticket.account_id.clone()),
+                            Tone::Error,
+                            error.to_string(),
+                        );
                     }
                 }
                 cx.notify();
             });
         }));
+        cx.notify();
+    }
+
+    /// Removing the token cannot be undone from Mangrove, so ask first.
+    fn confirm_disconnect(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self
+            .profile
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+        else {
+            return;
+        };
+        let name = self
+            .identities
+            .get(&id)
+            .map(|identity| identity.display_name.clone())
+            .unwrap_or_else(|| account.label.clone());
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Déconnecter le compte « {name} » ?"),
+            Some(&format!(
+                "Son token sera retiré du coffre du système et il faudra reconnecter le compte pour consulter ses dépôts. Le token n’est pas révoqué sur {}.",
+                provider_label(account.provider)
+            )),
+            // Return must not confirm a removal: Cancel comes first and keeps
+            // Escape, so the destructive button needs an explicit choice.
+            &[
+                PromptButton::cancel("Annuler"),
+                PromptButton::ok("Déconnecter"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = this.update(cx, |view, cx| view.disconnect(id, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// The connection form's required fields hold a value.
+    fn can_connect(&self, cx: &App) -> bool {
+        let filled = |input: &Entity<InputState>| !input.read(cx).value().trim().is_empty();
+        let provider = self.edition.provider();
+        let server = !self.needs_server() || filled(&self.server);
+        let credentials = if supports_browser_connection(provider) && self.browser_connection {
+            filled(&self.client_id)
+                && (provider != Provider::BitbucketCloud || filled(&self.consumer_secret))
+        } else {
+            filled(&self.token)
+        };
+        self.pending.is_none() && server && credentials
+    }
+
+    /// Stops the running operation from its progress note.
+    fn cancel_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cloning = self.cloning();
+        self.cancel();
+        self.clear_connection_secrets(window, cx);
+        self.feedback = None;
+        if cloning {
+            self.report(
+                Spot::Page,
+                Tone::Error,
+                "Clonage annulé. Un dossier incomplet peut subsister ; choisissez un nouveau nom avant de réessayer.",
+            );
+        }
         cx.notify();
     }
 
@@ -1131,8 +1585,11 @@ impl IntegrationsView {
         self.clear_reads();
         self.selected_account = None;
         self.pending = Some(PendingOperation::Disconnect);
-        self.error = None;
-        self.message = Some("Suppression du token du coffre…".into());
+        self.report(
+            Spot::Account(id.clone()),
+            Tone::Progress,
+            "Suppression du token du coffre…",
+        );
         let ticket = self.session.ticket(&id);
         let generation = self.generation;
         let vault = self.vault.clone();
@@ -1150,14 +1607,16 @@ impl IntegrationsView {
                 if let Some(result) = completion.current_result {
                     view.pending = None;
                     match result {
-                        Ok(()) => {
-                            view.message =
-                                Some("Compte déconnecté et token supprimé du coffre.".into());
-                        }
-                        Err(error) => {
-                            view.message = None;
-                            view.error = Some(error.to_string());
-                        }
+                        Ok(()) => view.report(
+                            Spot::Accounts,
+                            Tone::Success,
+                            "Compte déconnecté et token supprimé du coffre.",
+                        ),
+                        Err(error) => view.report(
+                            Spot::Account(ticket.account_id.clone()),
+                            Tone::Error,
+                            error.to_string(),
+                        ),
                     }
                     cx.notify();
                 }
@@ -1197,8 +1656,10 @@ impl IntegrationsView {
         } else {
             PendingOperation::Read
         });
-        self.error = None;
-        self.message = (!append).then(|| "Lecture distante en cours…".into());
+        self.feedback = None;
+        if !append {
+            self.report(Spot::Page, Tone::Progress, "Lecture distante en cours…");
+        }
         let ticket = self.session.ticket(&account.id);
         let worker_ticket = ticket.clone();
         let generation = self.generation;
@@ -1224,7 +1685,7 @@ impl IntegrationsView {
                     return;
                 }
                 view.pending = None;
-                view.message = None;
+                view.feedback = None;
                 match result {
                     Ok(ReadResponse::Repositories(page)) => {
                         let result = view
@@ -1234,7 +1695,7 @@ impl IntegrationsView {
                         match result {
                             Ok(()) => view.repositories_next = page.next,
                             Err(error) => {
-                                view.error = Some(error.to_string());
+                                view.report(Spot::Page, Tone::Error, error.to_string());
                                 view.repository_load_error = Some(error);
                             }
                         }
@@ -1254,7 +1715,7 @@ impl IntegrationsView {
                         view.statuses_next = page.next;
                     }
                     Err(error) => {
-                        view.error = Some(error.to_string());
+                        view.report(Spot::Page, Tone::Error, error.to_string());
                         if repository_read {
                             view.repository_load_error = Some(error);
                         }
@@ -1390,8 +1851,7 @@ impl IntegrationsView {
                             this.generated_clone_name.clear();
                             this.clone_name
                                 .update(cx, |input, cx| input.set_value("", window, cx));
-                            this.message = None;
-                            this.error = None;
+                            this.feedback = None;
                             cx.notify();
                         }
                     }
@@ -1407,8 +1867,7 @@ impl IntegrationsView {
         cx: &mut Context<Self>,
     ) {
         self.cancel();
-        self.message = None;
-        self.error = None;
+        self.feedback = None;
         self.clone_ssh =
             repository.ssh_clone_url.is_some() && self.profile.ssh != SshChoice::Disabled;
         self.generated_clone_name = clone_directory_name(&repository.name);
@@ -1439,13 +1898,16 @@ impl IntegrationsView {
             .set_title(match target {
                 PathPickerTarget::CloneParent => "Choisir le dossier parent du clone",
                 PathPickerTarget::SshKey => "Choisir une clé privée SSH existante",
+                PathPickerTarget::Favorite => "Choisir un dépôt local",
             });
         let generation = self.generation;
         let profile_id = self.profile.id.clone();
         self.picking_path = true;
         self.picker_task = Some(cx.spawn_in(window, async move |this, cx| {
             let selection = match target {
-                PathPickerTarget::CloneParent => picker.pick_folder().await,
+                PathPickerTarget::CloneParent | PathPickerTarget::Favorite => {
+                    picker.pick_folder().await
+                }
                 PathPickerTarget::SshKey => picker.pick_file().await,
             };
             let _ = cx.update(|window, cx| {
@@ -1456,10 +1918,13 @@ impl IntegrationsView {
                     view.picking_path = false;
                     view.picker_task = None;
                     if let Some(selection) = selection {
-                        let input = match target {
-                            PathPickerTarget::CloneParent => &view.clone_parent,
-                            PathPickerTarget::SshKey => &view.key_path,
+                        let (input, spot) = match target {
+                            PathPickerTarget::CloneParent => (&view.clone_parent, Spot::Page),
+                            PathPickerTarget::SshKey => (&view.key_path, Spot::SshKey),
+                            PathPickerTarget::Favorite => (&view.favorite, Spot::Favorite),
                         };
+                        let input = input.clone();
+                        view.settle_feedback_at(&spot);
                         input.update(cx, |input, cx| {
                             input.set_value(
                                 display_path(&selection.path().to_string_lossy()),
@@ -1487,8 +1952,11 @@ impl IntegrationsView {
         let parent = expand_home(&self.clone_parent.read(cx).value());
         let name = self.clone_name.read(cx).value().trim().to_string();
         if !parent.is_absolute() || !valid_clone_directory_name(&name) {
-            self.error =
-                Some("Choisissez un dossier parent absolu et un nom de dossier simple.".into());
+            self.report(
+                Spot::Page,
+                Tone::Error,
+                "Choisissez un dossier parent absolu et un nom de dossier simple.",
+            );
             cx.notify();
             return;
         }
@@ -1503,11 +1971,14 @@ impl IntegrationsView {
         let ticket = self.session.ticket(&account_id);
         let worker_ticket = ticket.clone();
         self.pending = Some(PendingOperation::Clone);
-        self.message = Some(format!(
-            "Clonage vers {}…",
-            display_path(&destination.to_string_lossy())
-        ));
-        self.error = None;
+        self.report(
+            Spot::Page,
+            Tone::Progress,
+            format!(
+                "Clonage vers {}…",
+                display_path(&destination.to_string_lossy())
+            ),
+        );
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1528,15 +1999,12 @@ impl IntegrationsView {
                 view.repository_select_dirty = true;
                 match result {
                     Ok(path) => {
-                        view.message = None;
+                        view.feedback = None;
                         cx.emit(IntegrationsEvent::OpenLocalFavorite(
                             path.to_string_lossy().into_owned(),
                         ));
                     }
-                    Err(error) => {
-                        view.message = None;
-                        view.error = Some(error.to_string());
-                    }
+                    Err(error) => view.report(Spot::Page, Tone::Error, error.to_string()),
                 }
                 cx.notify();
             });
@@ -1565,8 +2033,7 @@ impl IntegrationsView {
         self.clone_name.update(cx, |input, cx| {
             input.set_value(self.generated_clone_name.clone(), window, cx)
         });
-        self.message = None;
-        self.error = None;
+        self.feedback = None;
         cx.notify();
     }
 
@@ -1587,18 +2054,42 @@ impl IntegrationsView {
 
     fn add_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = favorite_entry(&self.favorite.read(cx).value());
-        if !value.is_empty()
-            && !self.profile.favorites.contains(&value)
-            && self.profile.favorites.len() < MAX_ROWS
+        let local = !value.is_empty() && !is_remote_favorite(&value);
+        let refusal = if value.is_empty() {
+            Some("Indiquez le chemin ou l’URL d’un dépôt.".to_string())
+        } else if local && !PathBuf::from(&value).is_absolute() {
+            Some(
+                "Indiquez un chemin absolu, par exemple ~/projets/depot, ou l’URL du dépôt.".into(),
+            )
+        } else if local && !PathBuf::from(&value).is_dir() {
+            Some("Aucun dossier à cet emplacement.".into())
+        } else if self
+            .profile
+            .favorites
+            .iter()
+            .any(|favorite| same_favorite(favorite, &value))
         {
-            self.profile.favorites.push(value);
-            self.favorite
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            cx.emit(IntegrationsEvent::FavoritesChanged(
-                self.profile.favorites.clone(),
-            ));
+            Some("Ce dépôt est déjà dans les favoris.".into())
+        } else if self.profile.favorites.len() >= MAX_ROWS {
+            Some(format!(
+                "Les favoris sont limités à {MAX_ROWS} dépôts. Retirez-en un avant d’en ajouter."
+            ))
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            self.report(Spot::Favorite, Tone::Error, refusal);
             cx.notify();
+            return;
         }
+        self.feedback = None;
+        self.profile.favorites.push(value);
+        self.favorite
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.emit(IntegrationsEvent::FavoritesChanged(
+            self.profile.favorites.clone(),
+        ));
+        cx.notify();
     }
 
     fn input_focused(&self, window: &Window, cx: &App) -> bool {
@@ -1642,7 +2133,7 @@ impl IntegrationsView {
             input.focus(window, cx);
         });
         self.renaming_profile = Some(id);
-        self.error = None;
+        self.feedback = None;
         cx.notify();
     }
 
@@ -1652,18 +2143,35 @@ impl IntegrationsView {
         cx.notify();
     }
 
+    /// Two profiles cannot share a name: the switcher and the confirmations
+    /// identify a profile by its name.
+    fn profile_name_refusal(&self, name: &str, renamed: Option<&str>) -> Option<String> {
+        profile_name_error(name).or_else(|| {
+            self.profiles
+                .iter()
+                .filter(|profile| Some(profile.id.as_str()) != renamed)
+                .any(|profile| profile.name.trim().to_lowercase() == name.to_lowercase())
+                .then(|| "Un autre profil porte déjà ce nom.".into())
+        })
+    }
+
     /// A refused name stays in its field with the reason, like a rename.
     fn create_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.profile_name.read(cx).value().trim().to_string();
-        if let Some(error) = profile_name_error(&name) {
-            self.error = Some(error);
+        if let Some(error) = self.profile_name_refusal(&name, None) {
+            self.report(Spot::NewProfile, Tone::Error, error);
             cx.notify();
             return;
         }
-        self.error = None;
         self.profile_name
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.report(
+            Spot::NewProfile,
+            Tone::Success,
+            format!("Profil « {name} » créé. Activez-le pour l’utiliser."),
+        );
         cx.emit(IntegrationsEvent::ProfileCreated(name));
+        cx.notify();
     }
 
     fn save_profile_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1671,8 +2179,8 @@ impl IntegrationsView {
             return;
         };
         let name = self.profile_rename.read(cx).value().trim().to_string();
-        if let Some(error) = profile_name_error(&name) {
-            self.error = Some(error);
+        if let Some(error) = self.profile_name_refusal(&name, Some(&id)) {
+            self.report(Spot::ProfileRename, Tone::Error, error);
             cx.notify();
             return;
         }
@@ -1680,7 +2188,7 @@ impl IntegrationsView {
             .profiles
             .iter()
             .any(|profile| profile.id == id && profile.name != name);
-        self.error = None;
+        self.feedback = None;
         self.cancel_profile_rename(window, cx);
         if changed {
             cx.emit(IntegrationsEvent::ProfileRenamed {
@@ -1688,6 +2196,12 @@ impl IntegrationsView {
                 name,
             });
         }
+    }
+
+    /// Activates from a profile row, whose button gives way to the badge.
+    fn activate_profile(&mut self, id: String, cx: &mut Context<Self>) {
+        self.refocus_on_switch = true;
+        self.select_profile(id, cx);
     }
 
     /// A profile whose credentials are leaving the vault cannot become active.
@@ -1715,15 +2229,20 @@ impl IntegrationsView {
             PromptLevel::Warning,
             &format!("Supprimer le profil « {} » ?", profile.name),
             Some(&profile_deletion_detail(&profile)),
+            // As for a disconnection, Return cannot delete.
             &[
-                PromptButton::ok("Supprimer le profil"),
                 PromptButton::cancel("Annuler"),
+                PromptButton::ok("Supprimer le profil"),
             ],
             cx,
         );
-        cx.spawn(async move |this, cx| {
-            if answer.await == Ok(0) {
-                let _ = this.update(cx, |view, cx| view.delete_profile(profile, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = this.update_in(cx, |view, window, cx| {
+                    // The deleted row's buttons disappear; keep the keyboard in the page.
+                    view.focus_handle.focus(window, cx);
+                    view.delete_profile(profile, cx)
+                });
             }
         })
         .detach();
@@ -1736,7 +2255,7 @@ impl IntegrationsView {
             return;
         }
         self.deleting_profile = Some(profile.id.clone());
-        self.error = None;
+        self.feedback = None;
         let vault = self.vault.clone();
         cx.spawn(async move |this, cx| {
             let (profile, result) = cx
@@ -1751,9 +2270,11 @@ impl IntegrationsView {
                 view.deleting_profile = None;
                 match result {
                     Ok(()) => cx.emit(IntegrationsEvent::ProfileDeleted(profile.id)),
-                    Err(error) => {
-                        view.error = Some(format!("Le profil n’a pas été supprimé : {error}"))
-                    }
+                    Err(error) => view.report(
+                        Spot::ProfileList,
+                        Tone::Error,
+                        format!("Le profil n’a pas été supprimé : {error}"),
+                    ),
                 }
                 cx.notify();
             });
@@ -1765,23 +2286,103 @@ impl IntegrationsView {
     fn ssh_choice(&mut self, choice: SshChoice, cx: &mut Context<Self>) {
         self.cancel();
         self.ssh_references.clear();
-        self.message = None;
+        self.choosing_key = false;
+        self.feedback = None;
         self.profile.ssh = choice.clone();
         cx.emit(IntegrationsEvent::SshChanged(choice));
+        cx.notify();
+    }
+
+    /// Shows the key field; the choice applies once a key is retained.
+    fn choose_ssh_key(&mut self, focus_field: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.profile.ssh, SshChoice::KeyFile { .. }) {
+            self.choosing_key = true;
+            self.feedback = None;
+            if focus_field {
+                self.key_path
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn choose_ssh_mode(
+        &mut self,
+        index: usize,
+        focus_field: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match index {
+            0 => self.ssh_choice(SshChoice::Agent, cx),
+            1 => self.choose_ssh_key(focus_field, window, cx),
+            _ => self.ssh_choice(SshChoice::Disabled, cx),
+        }
+    }
+
+    /// Arrows choose the next SSH mode and keep the keyboard on the group.
+    fn ssh_mode_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = radio_key_target(&self.ssh_focus, 1, event, window) else {
+            return;
+        };
+        self.ssh_focus[target].focus(window, cx);
+        self.choose_ssh_mode(target, false, window, cx);
+        cx.stop_propagation();
+    }
+
+    /// Arrows move through the 3 × 2 grid of editions and select them.
+    fn provider_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending == Some(PendingOperation::Disconnect) {
+            return;
+        }
+        let Some(target) = radio_key_target(&self.provider_focus, 3, event, window) else {
+            return;
+        };
+        self.provider_focus[target].focus(window, cx);
+        self.select_provider(ProviderEdition::ALL[target], window, cx);
+        cx.stop_propagation();
+    }
+
+    fn save_ssh_key(&mut self, cx: &mut Context<Self>) {
+        match ssh_key_path(&self.key_path.read(cx).value()) {
+            Ok(path) => {
+                self.ssh_choice(SshChoice::KeyFile { path }, cx);
+                self.report(Spot::SshKey, Tone::Success, "Clé retenue pour ce profil.");
+            }
+            Err(error) => self.report(Spot::SshKey, Tone::Error, error),
+        }
         cx.notify();
     }
 
     fn read_ssh(&mut self, cx: &mut Context<Self>) {
         let remote = self.ssh_remote.read(cx).value().trim().to_string();
         if remote.is_empty() {
+            self.report(
+                Spot::SshRemote,
+                Tone::Error,
+                "Indiquez l’URL SSH d’un dépôt.",
+            );
+            cx.notify();
+            return;
+        }
+        if self.profile.ssh == SshChoice::Disabled {
+            self.report(
+                Spot::SshRemote,
+                Tone::Error,
+                "SSH est désactivé pour ce profil. Choisissez l’agent SSH ou une clé privée.",
+            );
+            cx.notify();
             return;
         }
         let choice = self.profile.ssh.clone();
         self.cancel();
         self.pending = Some(PendingOperation::Read);
-        self.error = None;
         self.ssh_references.clear();
-        self.message = Some("Lecture des références SSH…".into());
+        self.report(
+            Spot::SshRemote,
+            Tone::Progress,
+            "Lecture des références SSH…",
+        );
         let ticket = self.session.ticket("ssh-references");
         let worker_ticket = ticket.clone();
         let generation = self.generation;
@@ -1801,18 +2402,32 @@ impl IntegrationsView {
                     return;
                 }
                 view.pending = None;
-                view.message = None;
                 match result {
                     Ok(references) => {
+                        let count = references.len();
                         view.ssh_references = references
                             .into_iter()
                             .take(MAX_ROWS)
                             .map(|reference| {
                                 format!("{} · {}", reference.name, reference.object_id)
                             })
-                            .collect()
+                            .collect();
+                        view.report(
+                            Spot::SshRemote,
+                            Tone::Success,
+                            match count {
+                                0 => "Accès vérifié : le dépôt n’annonce aucune branche ni aucun tag.".to_string(),
+                                count if count > MAX_ROWS => format!(
+                                    "Accès vérifié : {count} références, dont les {MAX_ROWS} premières sont affichées."
+                                ),
+                                count => format!(
+                                    "Accès vérifié : {}.",
+                                    count_label(count, "référence", "références")
+                                ),
+                            },
+                        );
                     }
-                    Err(error) => view.error = Some(error.to_string()),
+                    Err(error) => view.report(Spot::SshRemote, Tone::Error, error.to_string()),
                 }
                 cx.notify();
             });
@@ -1964,14 +2579,104 @@ fn favorite_entry(value: &str) -> String {
     if is_remote_favorite(value) {
         value.to_string()
     } else {
-        expand_home(value).to_string_lossy().into_owned()
+        let path = expand_home(value).to_string_lossy().into_owned();
+        match path.trim_end_matches(['/', std::path::MAIN_SEPARATOR]) {
+            "" => path,
+            trimmed => trimmed.to_string(),
+        }
     }
 }
 
-/// Bitbucket always needs its consumer secret. GitHub and GitLab keep their
-/// application settings folded until a connection attempt requires them.
-fn oauth_config_required(edition: ProviderEdition) -> bool {
-    edition == ProviderEdition::BitbucketCloud
+/// Two favorites lead to the same repository: local paths are compared once
+/// links such as /tmp are resolved, URLs without a trailing slash.
+fn same_favorite(left: &str, right: &str) -> bool {
+    let key = |value: &str| {
+        if is_remote_favorite(value) {
+            value.trim_end_matches('/').to_string()
+        } else {
+            std::fs::canonicalize(value)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| value.to_string())
+        }
+    };
+    left == right || key(left) == key(right)
+}
+
+/// Resolves a typed key path, refusing what cannot serve as a private key.
+fn ssh_key_path(value: &str) -> Result<PathBuf, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Indiquez le chemin d’une clé privée.".into());
+    }
+    if value.chars().any(char::is_control) {
+        return Err("Retirez les caractères de contrôle du chemin.".into());
+    }
+    let path = expand_home(value);
+    if !path.is_absolute() {
+        return Err("Indiquez un chemin absolu, par exemple ~/.ssh/id_ed25519.".into());
+    }
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "Aucun fichier à cet emplacement.".to_string()
+        } else {
+            "Ce fichier ne peut pas être lu. Vérifiez ses permissions.".to_string()
+        }
+    })?;
+    if metadata.is_dir() {
+        return Err("Ce chemin désigne un dossier. Choisissez le fichier de la clé privée.".into());
+    }
+    if path.extension().is_some_and(|extension| extension == "pub") {
+        return Err(
+            "Ce fichier est une clé publique. Choisissez la clé privée, sans l’extension .pub."
+                .into(),
+        );
+    }
+    std::fs::File::open(&path)
+        .map_err(|_| "Ce fichier ne peut pas être lu. Vérifiez ses permissions.".to_string())?;
+    Ok(path)
+}
+
+/// The option a key leads to from the focused option of a radio group.
+fn radio_key_target(
+    options: &[FocusHandle],
+    columns: usize,
+    event: &KeyDownEvent,
+    window: &Window,
+) -> Option<usize> {
+    let current = options.iter().position(|focus| focus.is_focused(window))?;
+    radio_target(current, options.len(), columns, &event.keystroke)
+}
+
+/// The option an arrow leads to in a radio group laid out in rows of
+/// `columns`: ← and → move by one, ↑ and ↓ by a row, all wrapping around.
+fn radio_target(current: usize, len: usize, columns: usize, key: &Keystroke) -> Option<usize> {
+    if key.modifiers.alt || key.modifiers.control || key.modifiers.platform {
+        return None;
+    }
+    let row = if columns > 1 { columns } else { 1 };
+    let step = match key.key.as_str() {
+        "left" => len - 1,
+        "right" => 1,
+        "up" => len - row,
+        "down" => row,
+        "home" => return Some(0),
+        "end" => return Some(len - 1),
+        _ => return None,
+    };
+    Some((current + step) % len)
+}
+
+/// The first edition holding an account, otherwise the first of the list.
+fn default_edition(profile: &Profile) -> ProviderEdition {
+    ProviderEdition::ALL
+        .into_iter()
+        .find(|edition| {
+            profile
+                .accounts
+                .iter()
+                .any(|account| edition.matches(account))
+        })
+        .unwrap_or(ProviderEdition::ALL[0])
 }
 
 /// Two letters keep single-word names apart, such as Personnel and Professionnel.
@@ -1981,12 +2686,19 @@ fn profile_monogram(name: &str) -> String {
     }
     let mut letters = name.chars().filter(|c| c.is_alphanumeric());
     let Some(first) = letters.next() else {
-        return String::new();
+        // A name without letters, such as an emoji, shows its first symbol.
+        return name.trim().chars().take(1).collect();
     };
     first
         .to_uppercase()
         .chain(letters.next().into_iter().flat_map(char::to_lowercase))
         .collect()
+}
+
+/// A profile's monogram color and avatar fill.
+fn profile_colors(profile: &Profile, p: Palette) -> (u32, u32) {
+    let hue = p.graph[profile_hue(&profile.id, p.graph.len())];
+    (hue, crate::theme::mix(hue, p.panel, 0.18))
 }
 
 /// A stable hue per profile id, independent of the profile's position.
@@ -2073,7 +2785,8 @@ fn clone_directory_name(name: &str) -> String {
 mod tests {
     use super::{
         InputEscape, IntegrationsEvent, IntegrationsSection, IntegrationsView, ProviderEdition,
-        accepts_response, bounded, configured_browser_client_id, disconnect_completion,
+        Spot, Tone, accepts_response, bounded, configured_browser_client_id, default_edition,
+        disconnect_completion, ssh_key_path,
     };
     use crate::theme::{Palette, ThemeId};
     use gpui_kit::{
@@ -2083,7 +2796,7 @@ mod tests {
     };
     use mangrove_remote::{
         Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
-        providers::Repository,
+        providers::Repository, ssh::SshChoice,
     };
     use std::{cell::RefCell, rc::Rc};
 
@@ -2384,12 +3097,8 @@ mod tests {
     #[gpui_kit::test]
     fn an_added_home_favorite_is_stored_as_an_absolute_path(cx: &mut TestAppContext) {
         let (window, view, events, _) = open_integrations(cx);
-        let path = dirs::home_dir()
-            .unwrap()
-            .join("code")
-            .to_string_lossy()
-            .into_owned();
-        for typed in ["~/code", path.as_str()] {
+        let path = dirs::home_dir().unwrap().to_string_lossy().into_owned();
+        let add = |cx: &mut TestAppContext, typed: &str| {
             cx.update_window(window, |_, window, cx| {
                 view.update(cx, |view, cx| {
                     view.favorite
@@ -2398,8 +3107,21 @@ mod tests {
                 })
             })
             .unwrap();
-        }
-        cx.run_until_parked();
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                error_at(view, Spot::Favorite).map(str::to_string)
+            })
+        };
+        assert_eq!(add(cx, "~/"), None);
+        assert_eq!(
+            add(cx, &path).as_deref(),
+            Some("Ce dépôt est déjà dans les favoris.")
+        );
+        assert!(add(cx, "code").unwrap().contains("chemin absolu"));
+        assert_eq!(
+            add(cx, &format!("~/mangrove-absent-{}", std::process::id())).as_deref(),
+            Some("Aucun dossier à cet emplacement.")
+        );
         assert!(matches!(
             &events.borrow()[..],
             [IntegrationsEvent::FavoritesChanged(favorites)] if favorites == &[path]
@@ -2547,7 +3269,7 @@ mod tests {
             view.deleting_profile = Some("work".into());
             cx.notify();
         });
-        click(cx, window, "profile-work");
+        click(cx, window, "profile-activate-work");
         view.update(cx, |view, cx| view.select_profile("work".into(), cx));
         cx.run_until_parked();
         assert!(events.borrow().is_empty());
@@ -2556,7 +3278,7 @@ mod tests {
             view.deleting_profile = None;
             cx.notify();
         });
-        click(cx, window, "profile-work");
+        click(cx, window, "profile-activate-work");
         assert!(matches!(
             &events.borrow()[..],
             [IntegrationsEvent::ProfileSelected(id)] if id == "work"
@@ -2587,8 +3309,15 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.renaming_profile.as_deref(), Some("work"));
             assert_eq!(
-                view.error.as_deref(),
+                error_at(view, Spot::ProfileRename),
                 Some("Choisissez un nom de profil de 128 caractères au plus.")
+            );
+        });
+        rename(cx, " personnel ".into());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                error_at(view, Spot::ProfileRename),
+                Some("Un autre profil porte déjà ce nom.")
             );
         });
         assert!(events.borrow().is_empty());
@@ -2596,7 +3325,7 @@ mod tests {
         rename(cx, "é".repeat(128));
         view.read_with(cx, |view, _| {
             assert!(view.renaming_profile.is_none());
-            assert!(view.error.is_none());
+            assert!(view.feedback.is_none());
         });
         assert!(matches!(
             &events.borrow()[..],
@@ -2629,5 +3358,326 @@ mod tests {
     fn untrusted_pages_cannot_grow_retained_lists_without_bound() {
         assert_eq!(bounded((0..1_000).collect()).len(), super::MAX_ROWS);
         assert_eq!(bounded(vec![1, 2]), vec![1, 2]);
+    }
+
+    fn error_at(view: &IntegrationsView, spot: Spot) -> Option<&str> {
+        view.feedback
+            .as_ref()
+            .filter(|feedback| feedback.spot == spot && feedback.tone == Tone::Error)
+            .map(|feedback| feedback.text.as_str())
+    }
+
+    fn type_into(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        view: &Entity<IntegrationsView>,
+        input: impl Fn(&IntegrationsView) -> Entity<gpui_kit::component::input::InputState>,
+        text: &str,
+    ) {
+        cx.update_window(window, |_, window, cx| {
+            let input = input(view.read(cx));
+            input.update(cx, |input, cx| input.focus(window, cx));
+            window.press("secondary-a", cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn enter_creates_a_profile_and_an_error_waits_under_its_field_until_the_next_edit(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, view, events, _) = open_integrations(cx);
+        type_into(
+            cx,
+            window,
+            &view,
+            |view| view.profile_name.clone(),
+            "Travail",
+        );
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                error_at(view, Spot::NewProfile),
+                Some("Un autre profil porte déjà ce nom.")
+            )
+        });
+
+        cx.update_window(window, |_, window, cx| window.input(" 2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.feedback.is_none()));
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::ProfileCreated(name)] if name == "Travail 2"
+        ));
+        view.read_with(cx, |view, cx| {
+            assert!(view.profile_name.read(cx).value().is_empty())
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_duplicate_favorite_is_refused_with_a_reason(cx: &mut TestAppContext) {
+        let (window, view, events, _) = open_integrations(cx);
+        for _ in 0..2 {
+            type_into(
+                cx,
+                window,
+                &view,
+                |view| view.favorite.clone(),
+                "https://example.com/team/repo",
+            );
+            cx.update_window(window, |_, window, cx| window.press("enter", cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(events.borrow().len(), 1);
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                error_at(view, Spot::Favorite),
+                Some("Ce dépôt est déjà dans les favoris.")
+            )
+        });
+    }
+
+    #[gpui_kit::test]
+    fn disconnecting_waits_for_a_confirmation(cx: &mut TestAppContext) {
+        let (window, view, _, _) = open_integrations(cx);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                let mut profile = Profile::new("personal", "Personnel");
+                profile.accounts.push(Account {
+                    id: "github".into(),
+                    label: "Octocat".into(),
+                    provider: Provider::GitHub,
+                    server_url: "https://github.com".into(),
+                    username: None,
+                    authentication: Authentication::PersonalToken,
+                });
+                view.set_profile(profile, window, cx);
+                view.set_section(IntegrationsSection::Integrations, cx);
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+        click(cx, window, "disconnect-github");
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Annuler");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.pending.is_none());
+            assert_eq!(view.profile.accounts.len(), 1);
+        });
+    }
+
+    #[test]
+    fn missing_unreadable_and_public_keys_are_refused() {
+        let directory =
+            std::env::temp_dir().join(format!("mangrove-ssh-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let private = directory.join("id_test");
+        let public = directory.join("id_test.pub");
+        std::fs::write(&private, "key").unwrap();
+        std::fs::write(&public, "key").unwrap();
+        let path = |path: &std::path::Path| path.to_string_lossy().into_owned();
+
+        assert_eq!(ssh_key_path(&path(&private)), Ok(private.clone()));
+        assert_eq!(
+            ssh_key_path(&path(&directory.join("absent"))),
+            Err("Aucun fichier à cet emplacement.".into())
+        );
+        assert!(
+            ssh_key_path(&path(&directory))
+                .unwrap_err()
+                .contains("dossier")
+        );
+        assert!(ssh_key_path(&path(&public)).unwrap_err().contains(".pub"));
+        assert!(
+            ssh_key_path("id_test")
+                .unwrap_err()
+                .contains("chemin absolu")
+        );
+        assert!(ssh_key_path("  ").is_err());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn the_first_connected_edition_is_preselected_otherwise_the_first_listed() {
+        let mut profile = Profile::new("personal", "Personnel");
+        assert!(default_edition(&profile) == ProviderEdition::GitHub);
+        profile.accounts.push(Account {
+            id: "gitlab".into(),
+            label: "GitLab".into(),
+            provider: Provider::GitLab,
+            server_url: "https://gitlab.com".into(),
+            username: None,
+            authentication: Authentication::PersonalToken,
+        });
+        assert!(default_edition(&profile) == ProviderEdition::GitLab);
+    }
+
+    #[gpui_kit::test]
+    fn connecting_needs_the_required_fields_of_the_chosen_method(cx: &mut TestAppContext) {
+        let (window, view, _, _) = open_integrations(cx);
+        let ready = |cx: &mut TestAppContext| view.read_with(cx, |view, cx| view.can_connect(cx));
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_section(IntegrationsSection::Integrations, cx);
+                view.select_provider(ProviderEdition::GitLab, window, cx);
+                view.client_id
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            })
+        })
+        .unwrap();
+        assert!(!ready(cx));
+        type_into(
+            cx,
+            window,
+            &view,
+            |view| view.client_id.clone(),
+            "application-id",
+        );
+        assert!(ready(cx));
+
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_browser_connection(false, window, cx)
+            })
+        })
+        .unwrap();
+        assert!(!ready(cx));
+        type_into(cx, window, &view, |view| view.token.clone(), "glpat-token");
+        assert!(ready(cx));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_key_keeps_the_current_ssh_choice(cx: &mut TestAppContext) {
+        let (window, view, events, _) = open_integrations(cx);
+        let directory =
+            std::env::temp_dir().join(format!("mangrove-ssh-choice-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let key = directory.join("id_choice");
+        std::fs::write(&key, "key").unwrap();
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_section(IntegrationsSection::Ssh, cx);
+                view.choose_ssh_key(true, window, cx);
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+        type_into(
+            cx,
+            window,
+            &view,
+            |view| view.key_path.clone(),
+            &directory.join("absent").to_string_lossy(),
+        );
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.profile.ssh, SshChoice::Agent);
+            assert_eq!(
+                error_at(view, Spot::SshKey),
+                Some("Aucun fichier à cet emplacement.")
+            );
+        });
+
+        type_into(
+            cx,
+            window,
+            &view,
+            |view| view.key_path.clone(),
+            &key.to_string_lossy(),
+        );
+        view.read_with(cx, |view, _| assert!(view.feedback.is_none()));
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::SshChanged(SshChoice::KeyFile { path })] if path == &key
+        ));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn arrows_move_through_radio_groups_and_wrap() {
+        let key = |name: &str| gpui_kit::Keystroke::parse(name).unwrap();
+        // A row of three options.
+        assert_eq!(super::radio_target(0, 3, 1, &key("right")), Some(1));
+        assert_eq!(super::radio_target(0, 3, 1, &key("left")), Some(2));
+        assert_eq!(super::radio_target(2, 3, 1, &key("down")), Some(0));
+        // A 3 × 2 grid moves by rows with ↑ and ↓.
+        assert_eq!(super::radio_target(1, 6, 3, &key("down")), Some(4));
+        assert_eq!(super::radio_target(4, 6, 3, &key("up")), Some(1));
+        assert_eq!(super::radio_target(4, 6, 3, &key("end")), Some(5));
+        assert_eq!(super::radio_target(4, 6, 3, &key("cmd-right")), None);
+        assert_eq!(super::radio_target(4, 6, 3, &key("a")), None);
+    }
+
+    #[test]
+    fn a_favorite_matches_its_variants() {
+        let home = dirs::home_dir().unwrap().to_string_lossy().into_owned();
+        assert_eq!(super::favorite_entry(&format!("{home}/")), home);
+        assert!(super::same_favorite(&home, &super::favorite_entry("~/")));
+        assert!(super::same_favorite(
+            "https://example.com/team/repo",
+            "https://example.com/team/repo/"
+        ));
+        assert!(!super::same_favorite(
+            "https://example.com/team/repo",
+            "https://example.com/team/other"
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn a_server_url_is_checked_before_connecting(cx: &mut TestAppContext) {
+        let (window, view, _, _) = open_integrations(cx);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_section(IntegrationsSection::Integrations, cx);
+                view.select_provider(ProviderEdition::GitLabSelfManaged, window, cx);
+                view.set_browser_connection(false, window, cx);
+            })
+        })
+        .unwrap();
+        type_into(
+            cx,
+            window,
+            &view,
+            |view| view.server.clone(),
+            "gitlab.exemple.com",
+        );
+        type_into(cx, window, &view, |view| view.token.clone(), "glpat-token");
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert!(error_at(view, Spot::Server).unwrap().contains("HTTPS"));
+            assert!(view.pending.is_none());
+            // The refused attempt keeps the token for a corrected address.
+            assert_eq!(view.token.read(cx).value().as_ref(), "glpat-token");
+        });
+        type_into(
+            cx,
+            window,
+            &view,
+            |view| view.server.clone(),
+            "https://gitlab.exemple.com",
+        );
+        view.read_with(cx, |view, cx| {
+            assert!(view.feedback.is_none());
+            assert!(view.server_refusal(cx).is_none());
+        });
     }
 }
