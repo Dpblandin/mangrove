@@ -1167,14 +1167,15 @@ impl SidebarView {
         let Some((menu, _)) = self.menu.take() else {
             return;
         };
-        // Most callers have no window or run inside its update. Before the
-        // next frame drops a focused menu, give the keyboard back to the tree.
-        let menu_focus = menu.focus_handle(cx);
+        // Most callers have no window or run inside its update, and menu items
+        // close the menu from its own update, so it is read once that update
+        // ends. Before the next frame drops a focused menu, give the keyboard
+        // back to the tree.
         let tree_focus = self.tree_focus.clone();
         let window = self.window;
         cx.defer(move |cx| {
             let _ = window.update(cx, |_, window, cx| {
-                if menu_focus.contains_focused(window, cx) {
+                if menu.focus_handle(cx).contains_focused(window, cx) {
                     tree_focus.focus(window, cx);
                 }
             });
@@ -2718,6 +2719,39 @@ mod tests {
             assert!(view.list_state.viewport_bounds().contains(&bounds.origin));
             assert_eq!(view.menu.as_ref().unwrap().1, bounds.bottom_left());
         });
+    }
+
+    #[gpui_kit::test]
+    fn choosing_solo_in_the_branch_menu_closes_it_and_returns_focus_to_the_tree(
+        cx: &mut TestAppContext,
+    ) {
+        let (_cache, window, view) = open_menu_of_scrolled_away_row(cx);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(format!("{event:?}"));
+            })
+        });
+        render(cx, window);
+        press(cx, window, "down");
+        render(cx, window);
+        press(cx, window, "enter");
+        render(cx, window);
+        assert_eq!(
+            events.borrow().as_slice(),
+            [format!(
+                "{:?}",
+                SidebarEvent::ToggleSolo("refs/heads/b02".into())
+            )]
+        );
+        let tree_focused = cx
+            .update_window(window, |_, window, cx| {
+                let view = view.read(cx);
+                view.menu.is_none() && view.tree_focus.is_focused(window)
+            })
+            .unwrap();
+        assert!(tree_focused);
     }
 
     #[gpui_kit::test]
