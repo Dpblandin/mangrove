@@ -608,3 +608,30 @@ fn keyboard_navigation_ends_the_lookup_of_a_kept_selection(cx: &mut TestAppConte
     settle(cx);
     assert_eq!(selection(cx, &view), (base, last, true));
 }
+
+#[gpui_kit::test]
+fn search_pages_arrive_with_the_highlights_of_their_query(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (_, _, view) = open_main(cx, &fixture);
+    // Highlighted words of the first row's subject, then of its author.
+    let highlights = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let row = view.read(cx).pages.row_shared(0).unwrap();
+            [
+                (&row.subject, &row.subject_highlights),
+                (&row.author, &row.author_highlights),
+            ]
+            .map(|(text, ranges)| {
+                ranges
+                    .iter()
+                    .map(|range| text[range.clone()].to_owned())
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    assert!(highlights(cx).iter().all(Vec::is_empty));
+    search(cx, &view, "OLDER chan te");
+    assert_eq!(highlights(cx), [vec!["older", "chan"], vec!["Te"]]);
+    search(cx, &view, "");
+    assert!(highlights(cx).iter().all(Vec::is_empty));
+}

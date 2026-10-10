@@ -3,8 +3,8 @@ use crate::{
     graph::{self, ROW_HEIGHT},
     history::{
         HistoryCache, HistoryPage, HistoryReadSlots, HistoryRow, PAGE_SIZE, PageRequests,
-        PositionRead, PositionRequests, ReferenceBadge, ReferenceGroup, ReferenceRank,
-        group_references, highlight_ranges, highlight_terms, prefix_range, result_offset,
+        PositionRead, PositionRequests, ReferenceBadge, ReferenceGroup, ReferenceRank, fold,
+        group_references, highlight_terms, result_offset,
     },
     theme::{self, Palette, RADIUS_MD, RADIUS_SM},
 };
@@ -57,7 +57,8 @@ pub struct HistoryView {
     search: Entity<InputState>,
     _search_subscription: Subscription,
     filter: String,
-    highlight_terms: Vec<String>,
+    /// Folded filter, matched against reference labels.
+    folded_filter: String,
     debounce_pending: bool,
     repository_generation: u64,
     navigation_generation: u64,
@@ -280,7 +281,7 @@ impl HistoryView {
             search,
             _search_subscription: search_subscription,
             filter: String::new(),
-            highlight_terms: Vec::new(),
+            folded_filter: String::new(),
             debounce_pending: false,
             repository_generation: 0,
             navigation_generation: 0,
@@ -690,7 +691,7 @@ impl HistoryView {
     }
 
     fn set_filter(&mut self, filter: String) {
-        self.highlight_terms = highlight_terms(&filter);
+        self.folded_filter = fold(&filter);
         self.filter = filter;
     }
 
@@ -936,7 +937,7 @@ impl HistoryView {
                         let started = Instant::now();
                         let result = engine
                             .list_commits(&id, page * PAGE_SIZE, PAGE_SIZE, &filter)
-                            .map(HistoryPage::new);
+                            .map(|page| HistoryPage::new(page, &highlight_terms(&filter)));
                         #[cfg(feature = "app-benchmark")]
                         crate::perf::record_operation("history_page", started.elapsed());
                         (lease, result)
@@ -1983,16 +1984,16 @@ impl HistoryView {
                     .get(&row.sha)
                     .filter(|group| group.displayed > 0)
                     .cloned();
-                let highlighted = |text: &SharedString, ranges: Vec<Range<usize>>| {
+                let highlighted = |text: &SharedString, ranges: &[Range<usize>]| {
                     if ranges.is_empty() {
                         text.clone().into_any_element()
                     } else {
                         StyledText::new(text.clone())
-                            .with_highlights(ranges.into_iter().map(|range| (range, highlight)))
+                            .with_highlights(ranges.iter().map(|range| (range.clone(), highlight)))
                             .into_any_element()
                     }
                 };
-                let sha_ranges = sha_query
+                let sha_ranges: Vec<_> = sha_query
                     .filter(|query| {
                         row.sha
                             .get(..query.len())
@@ -2016,9 +2017,7 @@ impl HistoryView {
                             Tooltip::new(tooltip.tooltip()).build(window, cx)
                         })
                         .children(group.badges[..shown].iter().map(|badge| {
-                            let highlight = filtered
-                                .then(|| prefix_range(&badge.label, &self.filter))
-                                .flatten();
+                            let highlight = badge.highlight(&self.folded_filter);
                             reference_badge(badge, highlight, font_size, palette)
                         }))
                         .when(hidden > 0, |style| {
@@ -2127,7 +2126,7 @@ impl HistoryView {
                                     .text_color(rgb(palette.text))
                                     .child(highlighted(
                                         &prepared.subject,
-                                        highlight_ranges(&prepared.subject, &self.highlight_terms),
+                                        &prepared.subject_highlights,
                                     )),
                             )
                             .when(row.parents.len() > 1, |style| {
@@ -2164,7 +2163,7 @@ impl HistoryView {
                                 )
                                 .child(div().min_w_0().truncate().child(highlighted(
                                     &prepared.author,
-                                    highlight_ranges(&prepared.author, &self.highlight_terms),
+                                    &prepared.author_highlights,
                                 ))),
                         )
                     })
@@ -2189,7 +2188,7 @@ impl HistoryView {
                                 .flex_shrink_0()
                                 .text_right()
                                 .font_family(theme::MONO)
-                                .child(highlighted(&prepared.short_sha, sha_ranges)),
+                                .child(highlighted(&prepared.short_sha, &sha_ranges)),
                         )
                     })
                     .when(selected, |style| {
