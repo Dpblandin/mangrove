@@ -18,7 +18,7 @@ use gpui_kit::{
 use mangrove_core::model::FileDiff;
 use tree_sitter::{InputEdit, Point};
 
-use crate::diff::strip_line_ending;
+use crate::diff::{LineKind, strip_line_ending};
 
 pub const MAX_LINES: usize = 2_000;
 pub const MAX_BYTES: usize = 256 * 1_024;
@@ -701,13 +701,23 @@ fn diff_tokens_with_cancellation(
         let old: Vec<_> = hunk
             .lines
             .iter()
-            .filter(|line| matches!(line.kind.as_str(), "context" | "deletion"))
+            .filter(|line| {
+                matches!(
+                    LineKind::of(&line.kind),
+                    LineKind::Context | LineKind::Deletion
+                )
+            })
             .map(|line| strip_line_ending(&line.content))
             .collect();
         let new: Vec<_> = hunk
             .lines
             .iter()
-            .filter(|line| matches!(line.kind.as_str(), "context" | "addition"))
+            .filter(|line| {
+                matches!(
+                    LineKind::of(&line.kind),
+                    LineKind::Context | LineKind::Addition
+                )
+            })
             .map(|line| strip_line_ending(&line.content))
             .collect();
         let mut old = analysis
@@ -717,10 +727,10 @@ fn diff_tokens_with_cancellation(
             .tokenize_side(language, &new, &hunk.header)?
             .into_iter();
         for line in &hunk.lines {
-            let tokens = match line.kind.as_str() {
-                "addition" => new.next().unwrap_or_default(),
-                "deletion" => old.next().unwrap_or_default(),
-                "context" => {
+            let tokens = match LineKind::of(&line.kind) {
+                LineKind::Addition => new.next().unwrap_or_default(),
+                LineKind::Deletion => old.next().unwrap_or_default(),
+                LineKind::Context => {
                     let previous = old.next();
                     new.next().or(previous).unwrap_or_default()
                 }

@@ -19,7 +19,7 @@ use gpui_kit::{assets::IconName, prelude::*, *};
 use mangrove_core::model::{FileBlame, FileContent, FileDiff, Oversized, PreviewLimit};
 
 use crate::{
-    diff,
+    diff::{self, LineKind},
     format::{
         alt_shortcut_label, byte_size, byte_size_above, commit_date, compact_date, short_sha,
         shortcut_label,
@@ -257,14 +257,14 @@ impl DisplayLine {
 
 #[derive(Clone, Debug)]
 struct Row {
-    kind: String,
+    kind: LineKind,
     old_number: String,
     new_number: String,
     original: Arc<str>,
     display: DisplayLine,
 }
 impl Row {
-    fn new(kind: String, old_number: String, new_number: String, text: &str) -> Self {
+    fn new(kind: LineKind, old_number: String, new_number: String, text: &str) -> Self {
         let original: Arc<str> = text.into();
         let display = DisplayLine::new(original.clone());
         Self {
@@ -277,7 +277,7 @@ impl Row {
     }
     fn height_tenths(&self, index: usize, font_size: f32) -> f64 {
         f64::from(font_size) * 17.
-            + if self.kind == "hunk" {
+            + if self.kind == LineKind::Hunk {
                 100. + if index > 0 { 10. } else { 0. }
             } else {
                 0.
@@ -655,14 +655,14 @@ impl CodeView {
                 .iter()
                 .flat_map(|hunk| {
                     std::iter::once(Row::new(
-                        "hunk".into(),
+                        LineKind::Hunk,
                         String::new(),
                         String::new(),
                         hunk.header.trim_end(),
                     ))
                     .chain(hunk.lines.iter().map(|line| {
                         Row::new(
-                            line.kind.clone(),
+                            LineKind::of(&line.kind),
                             line.old_line.map(|n| n.to_string()).unwrap_or_default(),
                             line.new_line.map(|n| n.to_string()).unwrap_or_default(),
                             diff::strip_line_ending(&line.content),
@@ -716,7 +716,7 @@ impl CodeView {
             .enumerate()
             .map(|(index, text)| {
                 Row::new(
-                    "content".into(),
+                    LineKind::Content,
                     String::new(),
                     (index + 1).to_string(),
                     text,
@@ -1441,11 +1441,11 @@ impl CodeView {
     ) -> AnyElement {
         let row = &self.rows[index];
         let p = self.palette;
-        let hunk = row.kind == "hunk";
-        let background = match row.kind.as_str() {
-            "hunk" => p.hunk_bg,
-            "addition" => p.addition_bg,
-            "deletion" => p.deletion_bg,
+        let hunk = row.kind == LineKind::Hunk;
+        let background = match row.kind {
+            LineKind::Hunk => p.hunk_bg,
+            LineKind::Addition => p.addition_bg,
+            LineKind::Deletion => p.deletion_bg,
             _ if self.show_blame && index == self.active_line && self.focus.is_focused(window) => {
                 p.surface
             }
@@ -1533,9 +1533,9 @@ impl CodeView {
                 .border_color(rgb(p.border))
                 .pr(px(if self.is_diff { 5. } else { 8. }))
                 .text_right()
-                .map(|gutter| match row.kind.as_str() {
-                    "addition" => gutter.bg(rgb(p.addition_gutter)).text_color(rgb(p.text)),
-                    "deletion" => gutter.bg(rgb(p.deletion_gutter)).text_color(rgb(p.text)),
+                .map(|gutter| match row.kind {
+                    LineKind::Addition => gutter.bg(rgb(p.addition_gutter)).text_color(rgb(p.text)),
+                    LineKind::Deletion => gutter.bg(rgb(p.deletion_gutter)).text_color(rgb(p.text)),
                     _ => gutter.text_color(rgb(p.muted)),
                 })
                 .child(value)
@@ -1596,9 +1596,9 @@ impl CodeView {
                 .bg(rgb(background))
                 .block_mouse_except_scroll();
             if self.is_diff {
-                let (sign, color) = match row.kind.as_str() {
-                    "addition" => ("+", p.success),
-                    "deletion" => ("−", p.danger),
+                let (sign, color) = match row.kind {
+                    LineKind::Addition => ("+", p.success),
+                    LineKind::Deletion => ("−", p.danger),
                     _ => (" ", p.muted),
                 };
                 cells = cells
@@ -1982,7 +1982,7 @@ pub fn hunk_shortcut(event: &KeyDownEvent) -> Option<bool> {
 fn hunk_rows(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter_map(|(index, row)| (row.kind == "hunk").then_some(index))
+        .filter_map(|(index, row)| (row.kind == LineKind::Hunk).then_some(index))
         .collect()
 }
 
@@ -2033,7 +2033,7 @@ mod tests {
         StateAction, blame_unavailable, hunk_rows, hunk_target, oversized_state, row_geometry,
         selected_rows_text, visible_shaped_line,
     };
-    use crate::virtual_scroll::VirtualScrollHandle;
+    use crate::{diff::LineKind, virtual_scroll::VirtualScrollHandle};
     use gpui_kit::component::scroll::ScrollbarHandle;
     use gpui_kit::{
         Bounds, FontId, GlyphId, LineLayout, ListAlignment, ListState, ScrollHandle, ShapedGlyph,
@@ -2102,8 +2102,8 @@ mod tests {
         assert_eq!(blame_unavailable(&content("binary", 20 << 20)), None);
     }
 
-    fn row(kind: &str) -> Row {
-        Row::new(kind.into(), String::new(), String::new(), "line")
+    fn row(kind: LineKind) -> Row {
+        Row::new(kind, String::new(), String::new(), "line")
     }
 
     fn near(value: gpui_kit::Pixels, expected: f32) {
@@ -2112,7 +2112,12 @@ mod tests {
 
     #[test]
     fn unmeasured_hunks_keep_exact_scroll_targets_after_reset_and_zoom() {
-        let rows = [row("hunk"), row("context"), row("hunk"), row("addition")];
+        let rows = [
+            row(LineKind::Hunk),
+            row(LineKind::Context),
+            row(LineKind::Hunk),
+            row(LineKind::Addition),
+        ];
         let list = ListState::new(rows.len(), ListAlignment::Top, px(150.));
         let handle = VirtualScrollHandle::exact(
             list.clone(),
@@ -2146,7 +2151,7 @@ mod tests {
 
     #[test]
     fn scroll_targets_clamp_and_keep_content_blame_rows_uniform() {
-        let offsets = row_geometry(&[row("content"), row("content"), row("content")], 11., 1.);
+        let offsets = row_geometry(&[LineKind::Content; 3].map(row), 11., 1.);
         let target = offsets.list_offset(px(19.), px(0.));
         assert_eq!(target.item_ix, 1);
         near(target.offset_in_item, 0.);
@@ -2165,7 +2170,7 @@ mod tests {
 
     #[test]
     fn physical_row_boundaries_keep_css_height_at_one_and_two_times_scale() {
-        let rows: Vec<_> = (0..1_000).map(|_| row("content")).collect();
+        let rows: Vec<_> = (0..1_000).map(|_| row(LineKind::Content)).collect();
         for scale in [1., 2.] {
             for font_size in [9., 11., 20.] {
                 let offsets = row_geometry(&rows, font_size, scale);
@@ -2178,7 +2183,12 @@ mod tests {
                 }
             }
             let mixed = row_geometry(
-                &[row("hunk"), row("context"), row("hunk"), row("addition")],
+                &[
+                    row(LineKind::Hunk),
+                    row(LineKind::Context),
+                    row(LineKind::Hunk),
+                    row(LineKind::Addition),
+                ],
                 11.,
                 scale,
             );
@@ -2197,7 +2207,7 @@ mod tests {
 
     #[test]
     fn wheel_after_far_drag_moves_exact_pixels_without_measured_rows() {
-        let rows: Vec<_> = (0..2_000).map(|_| row("content")).collect();
+        let rows: Vec<_> = (0..2_000).map(|_| row(LineKind::Content)).collect();
         for scale in [1., 2.] {
             let offsets = row_geometry(&rows, 11., scale);
             let list = ListState::new(rows.len(), ListAlignment::Top, px(150.));
@@ -2213,14 +2223,15 @@ mod tests {
     #[test]
     fn hunk_navigation_moves_between_headers_and_stops_at_the_ends() {
         let rows = [
-            row("hunk"),
-            row("context"),
-            row("addition"),
-            row("hunk"),
-            row("deletion"),
-            row("hunk"),
-            row("context"),
-        ];
+            LineKind::Hunk,
+            LineKind::Context,
+            LineKind::Addition,
+            LineKind::Hunk,
+            LineKind::Deletion,
+            LineKind::Hunk,
+            LineKind::Context,
+        ]
+        .map(row);
         let hunks = hunk_rows(&rows);
         assert_eq!(hunks, [0, 3, 5]);
         assert_eq!(hunk_target(&hunks, 0, true), Some(3));
@@ -2262,7 +2273,7 @@ mod tests {
             "\t".repeat(512 * 1024),
             "\télève🦀".repeat(50_000),
         ] {
-            let row = Row::new("content".into(), String::new(), "1".into(), &original);
+            let row = Row::new(LineKind::Content, String::new(), "1".into(), &original);
             let line = &row.display;
             assert!(line.truncated());
             assert!(line.text.len() <= MAX_DISPLAY_BYTES);
@@ -2300,8 +2311,8 @@ mod tests {
     #[test]
     fn bounded_utf8_prefix_and_cross_row_selection_copy_hidden_bytes() {
         let original = "🦀".repeat(100_000);
-        let first = Row::new("deletion".into(), "1".into(), String::new(), &original);
-        let second = Row::new("addition".into(), String::new(), "1".into(), "\télève");
+        let first = Row::new(LineKind::Deletion, "1".into(), String::new(), &original);
+        let second = Row::new(LineKind::Addition, String::new(), "1".into(), "\télève");
         let start = first.display.original_end;
         let rows = [first, second];
         let selection = Selection {
@@ -2414,7 +2425,7 @@ mod tests {
                     header: "@@ -0,0 +1,400 @@".into(),
                     lines: (1..=400)
                         .map(|line| DiffLine {
-                            kind: "add".into(),
+                            kind: "addition".into(),
                             old_line: None,
                             new_line: Some(line),
                             content: format!("line {line}"),
