@@ -71,6 +71,7 @@ pub struct Palette {
     pub danger: u32,
     pub warning: u32,
     pub renamed: u32,
+    /// Text and icons on an accent fill, such as primary buttons.
     pub on_accent: u32,
     pub addition_bg: u32,
     pub deletion_bg: u32,
@@ -337,4 +338,46 @@ pub fn icon(name: gpui_kit::assets::IconName, size: f32, color: u32) -> Icon {
     Icon::new(name)
         .with_size(gpui_kit::px(size))
         .text_color(rgb(color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Palette, ThemeId, mix};
+
+    fn luminance(color: u32) -> f64 {
+        let channel = |shift: u32| {
+            let value = f64::from((color >> shift) & 255) / 255.;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast(foreground: u32, background: u32) -> f64 {
+        let (a, b) = (luminance(foreground), luminance(background));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn text_on_accent_meets_wcag_aa_in_every_theme_and_state() {
+        for theme in ThemeId::ALL {
+            let p = Palette::for_theme(theme);
+            // Rest, Kit's primary hover and the 90% opacity hover over panels.
+            for background in [
+                p.accent,
+                mix(p.accent, p.text, 0.85),
+                mix(p.accent, p.panel, 0.9),
+            ] {
+                let ratio = contrast(p.on_accent, background);
+                assert!(
+                    ratio >= 4.5,
+                    "{}: {ratio:.2}:1 on {background:06x}",
+                    theme.label()
+                );
+            }
+        }
+    }
 }
