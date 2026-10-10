@@ -234,6 +234,34 @@ impl Profiles {
         }
         Ok(())
     }
+
+    /// Renames a profile with the rules applied to persisted names.
+    pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        validate_text(name, 128)?;
+        let profile = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+            .ok_or(RemoteError::InvalidConfiguration)?;
+        profile.name = name.to_string();
+        Ok(())
+    }
+
+    /// Removes an inactive profile. The active profile and the last profile
+    /// are always kept.
+    pub fn remove(&mut self, id: &str) -> Result<()> {
+        if id == self.active_profile_id || self.profiles.len() < 2 {
+            return Err(RemoteError::InvalidConfiguration);
+        }
+        let index = self
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+            .ok_or(RemoteError::InvalidConfiguration)?;
+        self.profiles.remove(index);
+        Ok(())
+    }
 }
 
 pub(crate) fn validate_id(id: &str) -> Result<()> {
@@ -254,5 +282,49 @@ fn validate_text(value: &str, max: usize) -> Result<()> {
         Err(RemoteError::InvalidConfiguration)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renaming_trims_and_validates_the_name_of_an_existing_profile() {
+        let mut profiles = Profiles::default();
+        profiles.rename("professional", "  Client Acme ").unwrap();
+        assert_eq!(profiles.profiles[1].name, "Client Acme");
+        for invalid in ["", "   ", "line\nfeed", &"x".repeat(129)] {
+            assert_eq!(
+                profiles.rename("professional", invalid),
+                Err(RemoteError::InvalidConfiguration)
+            );
+        }
+        assert_eq!(
+            profiles.rename("missing", "Nom"),
+            Err(RemoteError::InvalidConfiguration)
+        );
+        assert_eq!(profiles.profiles[1].name, "Client Acme");
+        profiles.validate().unwrap();
+    }
+
+    #[test]
+    fn removing_keeps_the_active_and_the_last_profile() {
+        let mut profiles = Profiles::default();
+        assert_eq!(
+            profiles.remove("personal"),
+            Err(RemoteError::InvalidConfiguration)
+        );
+        assert_eq!(
+            profiles.remove("missing"),
+            Err(RemoteError::InvalidConfiguration)
+        );
+        profiles.remove("professional").unwrap();
+        assert_eq!(profiles.profiles.len(), 1);
+        profiles.validate().unwrap();
+        assert_eq!(
+            profiles.remove("personal"),
+            Err(RemoteError::InvalidConfiguration)
+        );
     }
 }

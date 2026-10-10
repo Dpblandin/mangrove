@@ -24,7 +24,7 @@ mod transport;
 
 pub use clone::clone_repository;
 pub use model::{Account, Authentication, Profile, Profiles, Provider, RemoteError, Result};
-pub use profiles::{CredentialVault, OsCredentialVault, ProfileStore};
+pub use profiles::{delete_profile_credentials, CredentialVault, OsCredentialVault, ProfileStore};
 pub use providers::{
     ChangeRequest, CiStatus, Comment, Discussion, Page, PageCursor, ProviderClient, Repository,
 };
