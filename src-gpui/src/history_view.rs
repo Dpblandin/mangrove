@@ -308,9 +308,34 @@ impl HistoryView {
         }
     }
 
-    #[cfg(feature = "app-benchmark")]
     pub fn selected_sha(&self) -> &str {
         &self.selected_sha
+    }
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+    /// Reselects a tab's commit within its search once its repository reopens.
+    pub fn restore_view(
+        &mut self,
+        sha: String,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if normalized_query(&query).is_empty() {
+            self.jump_to(sha, window, cx);
+            return;
+        }
+        // Like a search typed over a selection: the commit stays selected
+        // while its row is looked up, and an absent one yields the first result.
+        self.cancel_navigation();
+        self.working.selected = false;
+        self.selected_sha = sha.clone();
+        cx.emit(HistoryEvent::Selected {
+            sha,
+            keyboard: false,
+        });
+        self.set_query(query, cx);
     }
     #[cfg(feature = "app-benchmark")]
     pub fn selected_index(&self) -> usize {

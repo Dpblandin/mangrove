@@ -329,6 +329,14 @@ impl ColorRequest {
     }
 }
 
+/// Commit, chosen file and central view of a tab, restored on reactivation.
+#[derive(Clone, Default)]
+pub struct InspectorViewState {
+    sha: Option<String>,
+    file_key: Option<String>,
+    open: bool,
+}
+
 pub struct InspectorView {
     engine: Arc<Workspace>,
     gate: ReadGate,
@@ -382,6 +390,7 @@ pub struct InspectorView {
     active_file: [usize; 3],
     subscriptions: Vec<Subscription>,
     restore_open: Option<bool>,
+    pending_view: Option<InspectorViewState>,
     file_rows: HashMap<String, Arc<Vec<FileChoice>>>,
     #[cfg(feature = "app-benchmark")]
     benchmark_scroll: f32,
@@ -485,6 +494,7 @@ impl InspectorView {
             active_file: [0; 3],
             subscriptions: vec![code_subscription, browser_subscription],
             restore_open: None,
+            pending_view: None,
             file_rows: HashMap::new(),
             #[cfg(feature = "app-benchmark")]
             benchmark_scroll: 0.,
@@ -513,6 +523,7 @@ impl InspectorView {
         self.snapshot = None;
         self.intent.clear();
         self.restore_open = None;
+        self.pending_view = None;
         self.file_rows.clear();
         self.preload_rows = Arc::default();
         self.details_loading = false;
@@ -645,6 +656,20 @@ impl InspectorView {
     }
     pub fn central_active(&self) -> bool {
         !self.compact && self.workspace_open
+    }
+    pub fn view_state(&self) -> InspectorViewState {
+        let Selection::Commit(sha) = &self.selection else {
+            return InspectorViewState::default();
+        };
+        InspectorViewState {
+            sha: Some(sha.clone()).filter(|sha| !sha.is_empty()),
+            file_key: self.intent.choice().map(|file| file.key.clone()),
+            open: self.workspace_open,
+        }
+    }
+    /// The next selection of the same commit reopens its file and view.
+    pub fn restore_view_state(&mut self, state: InspectorViewState) {
+        self.pending_view = state.sha.is_some().then_some(state);
     }
     pub fn compact(&self) -> bool {
         self.compact
@@ -927,14 +952,19 @@ impl InspectorView {
         let Some(id) = self.repository.as_ref().map(|r| r.id.clone()) else {
             return;
         };
+        let restored = self
+            .pending_view
+            .take()
+            .filter(|view| view.sha.as_deref() == Some(sha.as_str()));
         let panel_changed = self.prepare_selection(Selection::Commit(sha.clone()), cx);
+        let preferred_key = restored.and_then(|view| {
+            self.restore_open = Some(view.open);
+            view.file_key
+        });
         let request = ReadRequest {
             revision: self.revision,
             id,
-            kind: ReadKind::Commit {
-                sha,
-                preferred_key: None,
-            },
+            kind: ReadKind::Commit { sha, preferred_key },
         };
         if let Some(delay) = delay {
             self.selection_debounce = Some(cx.spawn(async move |this, cx| {

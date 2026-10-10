@@ -5,19 +5,19 @@ use crate::{
     chrome::{Chrome, ChromeEvent, Notice},
     command_palette::{CommandPalette, PaletteEvent},
     history_view::{HistoryEvent, HistoryView},
-    inspector::{InspectorEvent, InspectorView},
+    inspector::{InspectorEvent, InspectorView, InspectorViewState},
     preferences::{Pane, Preferences},
     repository_open::{OpenIntent, RepositoryOpenLane},
-    sidebar::{SidebarEvent, SidebarView},
+    sidebar::{SidebarEvent, SidebarView, SidebarViewState},
     tabs::Tabs,
     theme::SANS,
     view_cache::render_cached_view,
 };
 use gpui_kit::{component::input::Escape as InputEscape, prelude::*, *};
 use mangrove_core::{Workspace, model::RepositoryInfo};
-use std::sync::Arc;
 #[cfg(feature = "app-benchmark")]
 use std::time::Instant;
+use std::{collections::HashMap, sync::Arc};
 
 mod commands;
 mod fetch;
@@ -125,6 +125,15 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Where a background tab was left; restored when its repository reopens.
+struct TabState {
+    sha: Option<String>,
+    query: String,
+    solo: Vec<String>,
+    sidebar: SidebarViewState,
+    inspector: InspectorViewState,
+}
+
 pub struct Mangrove {
     engine: Arc<Workspace>,
     repository: Option<Arc<RepositoryInfo>>,
@@ -133,6 +142,8 @@ pub struct Mangrove {
     inspector: Entity<InspectorView>,
     chrome: Entity<Chrome>,
     tabs: Tabs,
+    tab_states: HashMap<u64, TabState>,
+    restoring: Option<(u64, TabState)>,
     settings: bool,
     opening: bool,
     fetching: bool,
@@ -229,6 +240,8 @@ impl Mangrove {
             inspector,
             chrome,
             tabs: Tabs::default(),
+            tab_states: HashMap::new(),
+            restoring: None,
             settings: false,
             opening: false,
             fetching: false,
@@ -514,6 +527,13 @@ impl Mangrove {
                             });
                             view.history
                                 .update(cx, |history, cx| history.set_repository(info, window, cx));
+                            let restored = view
+                                .restoring
+                                .take()
+                                .filter(|(id, _)| view.tabs.active == Some(*id));
+                            if let Some((_, state)) = restored {
+                                view.restore_tab_state(state, window, cx);
+                            }
                             if let Some(sha) = navigate_to {
                                 view.history
                                     .update(cx, |history, cx| history.jump_to(sha, window, cx));
@@ -525,6 +545,7 @@ impl Mangrove {
                             }
                         }
                         Err(error) => {
+                            view.restoring = None;
                             view.error = Some(error);
                             if view.repository.is_none() {
                                 view.sidebar
@@ -561,10 +582,11 @@ impl Mangrove {
             .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         self.leave_settings(window, cx);
         if self.tabs.active != Some(id) {
+            self.remember_tab_state(cx);
             let path = self.tabs.activate(id);
             self.clear_workspace(cx);
             if let Some(path) = path {
-                self.open(path, true, None, window, cx);
+                self.reopen_active_tab(path, window, cx);
             } else {
                 self.refresh_recent(cx);
             }
@@ -591,12 +613,13 @@ impl Mangrove {
                 .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         }
         self.tabs.close(id);
+        self.tab_states.remove(&id);
         if active {
             let path = self.tabs.active_tab().and_then(|tab| tab.path.clone());
             self.clear_workspace(cx);
             self.restore_focus(window, cx);
             if let Some(path) = path {
-                self.open(path, true, None, window, cx);
+                self.reopen_active_tab(path, window, cx);
             } else {
                 self.refresh_recent(cx);
             }
@@ -609,11 +632,49 @@ impl Mangrove {
         }
         self.chrome
             .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+        self.remember_tab_state(cx);
         self.tabs.create();
         self.leave_settings(window, cx);
         self.clear_workspace(cx);
         self.restore_focus(window, cx);
         self.refresh_recent(cx);
+    }
+    /// Keeps the active tab's place before another tab replaces the views.
+    fn remember_tab_state(&mut self, cx: &App) {
+        let (Some(id), Some(repository)) = (self.tabs.active, self.repository.as_ref()) else {
+            return;
+        };
+        let history = self.history.read(cx);
+        let state = TabState {
+            sha: Some(history.selected_sha().to_owned()).filter(|sha| !sha.is_empty()),
+            query: history.query().to_owned(),
+            solo: repository.solo_refs.clone(),
+            sidebar: self.sidebar.read(cx).view_state(),
+            inspector: self.inspector.read(cx).view_state(),
+        };
+        self.tab_states.insert(id, state);
+    }
+    /// Reloads the active tab's repository, back where the tab was left.
+    fn reopen_active_tab(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.restoring = self
+            .tabs
+            .active
+            .and_then(|id| Some((id, self.tab_states.remove(&id)?)));
+        let solo = self.restoring.as_ref().map(|(_, state)| state.solo.clone());
+        self.open(path, true, solo, window, cx);
+    }
+    fn restore_tab_state(&mut self, state: TabState, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.restore_view_state(state.sidebar, cx)
+        });
+        self.inspector.update(cx, |inspector, _| {
+            inspector.restore_view_state(state.inspector)
+        });
+        if let Some(sha) = state.sha {
+            self.history.update(cx, |history, cx| {
+                history.restore_view(sha, state.query, window, cx)
+            });
+        }
     }
     /// True when the center shows the history list, which may take the focus.
     fn history_visible(&self, cx: &App) -> bool {
@@ -957,6 +1018,8 @@ impl Mangrove {
             ChromeEvent::ProfileChanged => {
                 self.recent_task = None;
                 self.tabs = Tabs::default();
+                self.tab_states.clear();
+                self.restoring = None;
                 self.clear_workspace(cx);
                 self.refresh_recent(cx);
                 self.apply_preferences(window, cx);

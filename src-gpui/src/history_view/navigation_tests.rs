@@ -408,3 +408,40 @@ fn applying_solo_replaces_a_selection_outside_the_filtered_history(cx: &mut Test
         std::slice::from_ref(&fixture.head)
     );
 }
+
+#[gpui_kit::test]
+fn restoring_a_tab_reselects_its_commit_within_its_search(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    let target = commit_at(&engine, &info, FIRST_OLDER + 7);
+    let restore = |cx: &mut TestAppContext, sha: &str, query: &str| {
+        // Another tab replaced the views; this one's repository reopens.
+        view.update(cx, |view, cx| view.clear(cx));
+        let reopened = engine.open_repository(&info.path).unwrap();
+        set_repository(cx, &view, reopened);
+        cx.update_window(cx.windows()[0], |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.restore_view(sha.into(), query.into(), window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx);
+    };
+    let selections = record_selections(cx, &view);
+
+    restore(cx, &target, "older");
+    assert_eq!(selection(cx, &view), (target.clone(), 7, true));
+    cx.read(|cx| assert_eq!(view.read(cx).query, "older"));
+    assert_eq!(selections.borrow().first(), Some(&target));
+
+    restore(cx, &target, "");
+    assert_eq!(
+        selection(cx, &view),
+        (target.clone(), FIRST_OLDER + 7, true)
+    );
+
+    // A commit absent from the restored search gives way to its first result.
+    restore(cx, &fixture.newest, "older");
+    let first_older = commit_at(&engine, &info, FIRST_OLDER);
+    assert_eq!(selection(cx, &view), (first_older, 0, true));
+}

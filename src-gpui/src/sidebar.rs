@@ -587,10 +587,6 @@ pub struct SidebarView {
 
 impl EventEmitter<SidebarEvent> for SidebarView {}
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the shell will restore this state per tab")
-)]
 impl SidebarView {
     pub fn view_state(&self) -> SidebarViewState {
         SidebarViewState {
