@@ -2,7 +2,7 @@
 //! The bounded read lane keeps the native read alive until completion and retains
 //! only the latest queued foreground intent. Immutable snapshots publish together.
 use crate::{
-    code_view::{CodeView, CodeViewEvent, hunk_shortcut},
+    code_view::{CodeView, CodeViewEvent, ReadingPosition, hunk_shortcut},
     file_browser::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
         ReadGate, action, diff_counts, is_activate, line_counts, notice, path_label, path_title,
@@ -337,6 +337,7 @@ pub struct InspectorViewState {
     sha: Option<String>,
     file_key: Option<String>,
     open: bool,
+    reading: Option<ReadingPosition>,
 }
 impl InspectorViewState {
     pub fn sha(&self) -> Option<&str> {
@@ -687,7 +688,7 @@ impl InspectorView {
         self.browser
             .update(cx, |browser, cx| browser.focus(window, cx));
     }
-    pub fn view_state(&self) -> InspectorViewState {
+    pub fn view_state(&self, cx: &App) -> InspectorViewState {
         if let Some(pending) = &self.pending_view {
             return pending.clone();
         }
@@ -698,6 +699,10 @@ impl InspectorView {
             sha: Some(sha.clone()).filter(|sha| !sha.is_empty()),
             file_key: self.intent.choice().map(|file| file.key.clone()),
             open: self.workspace_open,
+            reading: self
+                .central_active()
+                .then(|| self.browser.read(cx).reading_position(cx))
+                .flatten(),
         }
     }
     /// The next selection of the same commit reopens its file and view.
@@ -992,6 +997,11 @@ impl InspectorView {
         let panel_changed = self.prepare_selection(Selection::Commit(sha.clone()), cx);
         let preferred_key = restored.and_then(|view| {
             self.restore_open = Some(view.open);
+            if let Some(reading) = view.reading {
+                self.browser.update(cx, |browser, cx| {
+                    browser.restore_reading_position(reading, cx)
+                });
+            }
             view.file_key
         });
         let request = ReadRequest {

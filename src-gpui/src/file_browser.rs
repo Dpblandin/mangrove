@@ -1,7 +1,7 @@
 //! File revision browsing. One native read is retained until it actually settles;
 //! replacing a view only replaces the queued intent, never creates an unbounded queue.
 use crate::{
-    code_view::{CodeView, CodeViewEvent, hunk_shortcut},
+    code_view::{CodeView, CodeViewEvent, ReadingPosition, hunk_shortcut},
     format::{commit_date, count_label, format_count, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
@@ -364,6 +364,13 @@ impl FileBrowser {
             self.load_retained_view(cx);
         }
         cx.notify();
+    }
+    pub fn reading_position(&self, cx: &App) -> Option<ReadingPosition> {
+        self.viewer.read(cx).reading_position()
+    }
+    pub fn restore_reading_position(&mut self, position: ReadingPosition, cx: &mut App) {
+        self.viewer
+            .update(cx, |viewer, _| viewer.restore_reading_position(position));
     }
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {

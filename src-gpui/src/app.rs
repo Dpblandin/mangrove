@@ -713,7 +713,7 @@ impl Mangrove {
         };
         let history = self.history.read(cx);
         let inspector_view = self.inspector.read(cx);
-        let inspector = inspector_view.view_state();
+        let inspector = inspector_view.view_state(cx);
         let selection = if let Some(sha) = inspector_view.selected_stash() {
             TabSelection::Stash(sha.to_owned())
         } else if inspector_view.is_working_tree() {

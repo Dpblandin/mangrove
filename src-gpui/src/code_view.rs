@@ -332,12 +332,21 @@ fn selected_rows_text(rows: &[Row], selection: Option<Selection>, final_newline:
     text
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadingPosition {
+    /// Whether the position is in the diff, and the file path.
+    source: (bool, String),
+    top: Pixels,
+}
+
 pub struct CodeView {
     rows: Arc<Vec<Row>>,
     scroll: VirtualScrollHandle,
     geometry_scale: f32,
     diff_source: Option<(Arc<FileDiff>, String)>,
     content_source: Option<Arc<FileContent>>,
+    /// Reading position to apply once the same diff or file is shown again.
+    restored_position: Option<ReadingPosition>,
     tokens: Arc<Vec<Vec<Token>>>,
     generation: u64,
     live_generation: Arc<AtomicU64>,
@@ -388,6 +397,7 @@ impl CodeView {
             geometry_scale: window.scale_factor(),
             diff_source: None,
             content_source: None,
+            restored_position: None,
             tokens: Arc::new(Vec::new()),
             generation: 0,
             live_generation: Arc::new(AtomicU64::new(0)),
@@ -594,6 +604,7 @@ impl CodeView {
             self.reset(rows, window, cx);
             self.hunk_rows = hunk_rows(&self.rows);
             self.diff_source = Some((diff.clone(), path.clone()));
+            self.apply_reading_position();
             if diff.binary {
                 self.state=Some("Fichier binaire\nLe contenu de ce fichier ne peut pas être affiché sous forme de diff texte.".into());
             } else if diff.hunks.is_empty() && !diff.truncated {
@@ -642,6 +653,7 @@ impl CodeView {
             .collect();
         self.reset(rows, window, cx);
         self.content_source = Some(content.clone());
+        self.apply_reading_position();
         self.state = match content.kind.as_str() {
             "binary" => Some(
                 "Fichier binaire ou encodage non UTF-8 : aucun affichage texte ni blame.".into(),
@@ -692,6 +704,39 @@ impl CodeView {
             });
         }));
         cx.notify();
+    }
+    /// The shown diff or file and how far it was scrolled.
+    pub fn reading_position(&self) -> Option<ReadingPosition> {
+        Some(ReadingPosition {
+            source: self.source_key()?,
+            top: self.scroll.vertical_offset(),
+        })
+    }
+    /// Scrolls back to `position` when its diff or file is shown next.
+    pub fn restore_reading_position(&mut self, position: ReadingPosition) {
+        self.restored_position = Some(position);
+    }
+    fn source_key(&self) -> Option<(bool, String)> {
+        match (&self.diff_source, &self.content_source) {
+            (Some((_, path)), _) if self.is_diff => Some((true, path.clone())),
+            (_, Some(content)) => Some((false, content.path.clone())),
+            _ => None,
+        }
+    }
+    /// The diff of a file can precede its content view; only another path
+    /// discards the position.
+    fn apply_reading_position(&mut self) {
+        let Some(source) = self.source_key() else {
+            return;
+        };
+        let Some(position) = self.restored_position.take() else {
+            return;
+        };
+        if source == position.source {
+            self.scroll.scroll_vertical_to(position.top);
+        } else if source.1 == position.source.1 {
+            self.restored_position = Some(position);
+        }
     }
     pub fn set_blame(&mut self, blame: Option<Arc<FileBlame>>, cx: &mut Context<Self>) {
         self.blame_indices = vec![None; self.rows.len()];
@@ -2194,5 +2239,72 @@ mod tests {
         *shaped = Arc::new(layout);
         let visible = visible_shaped_line(&shaped, px(25.), px(30.), px(1.));
         assert_eq!(visible.runs[0].glyphs.len(), shaped.runs[0].glyphs.len());
+    }
+
+    #[gpui_kit::test]
+    fn a_restored_reading_position_applies_only_to_its_own_diff(cx: &mut gpui_kit::TestAppContext) {
+        use super::CodeView;
+        use gpui_kit::{AppContext, WindowOptions, px};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        use std::sync::Arc;
+        let diff = || {
+            Arc::new(FileDiff {
+                binary: false,
+                truncated: false,
+                additions: 400,
+                deletions: 0,
+                hunks: vec![DiffHunk {
+                    header: "@@ -0,0 +1,400 @@".into(),
+                    lines: (1..=400)
+                        .map(|line| DiffLine {
+                            kind: "add".into(),
+                            old_line: None,
+                            new_line: Some(line),
+                            content: format!("line {line}"),
+                        })
+                        .collect(),
+                }],
+            })
+        };
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let show = |cx: &mut gpui_kit::TestAppContext, path: &'static str| {
+            cx.update_window(cx.windows()[0], |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.set_prepared_diff(diff(), path.into(), Arc::default(), window, cx)
+                })
+            })
+            .unwrap();
+        };
+        let top = |cx: &mut gpui_kit::TestAppContext| {
+            cx.read(|cx| view.read(cx).scroll.vertical_offset())
+        };
+        show(cx, "a.rs");
+        let position = view.update(cx, |view, _| {
+            view.scroll.scroll_vertical_to(px(900.));
+            view.reading_position().unwrap()
+        });
+        assert!(top(cx) > px(0.));
+
+        // Another file shown first drops the position instead of moving it.
+        view.update(cx, |view, _| {
+            view.restore_reading_position(position.clone())
+        });
+        show(cx, "b.rs");
+        assert_eq!(top(cx), px(0.));
+        show(cx, "a.rs");
+        assert_eq!(top(cx), px(0.));
+
+        view.update(cx, |view, _| {
+            view.restore_reading_position(position.clone())
+        });
+        show(cx, "a.rs");
+        assert_eq!(top(cx), position.top);
     }
 }
