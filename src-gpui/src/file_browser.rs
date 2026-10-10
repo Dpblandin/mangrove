@@ -1,11 +1,10 @@
 //! File revision browsing. One native read is retained until it actually settles;
 //! replacing a view only replaces the queued intent, never creates an unbounded queue.
 use crate::{
-    code_view::{CodeView, CodeViewEvent, ReadingPosition, hunk_shortcut},
+    code_view::{CodeView, CodeViewEvent, Highlights, ReadingPosition, hunk_shortcut},
     format::{commit_date, count_label, format_count, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
-    syntax::{self, Tokens},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon},
     view_cache::render_cached_view,
 };
@@ -34,19 +33,20 @@ pub struct FileTarget {
     pub status: String,
 }
 
-/// A patch and its syntax always belong to the same file revision.
+/// A patch, its syntax and its changed words always belong to the same
+/// file revision.
 #[derive(Clone)]
 pub struct PreparedDiff {
     pub diff: Arc<FileDiff>,
-    pub tokens: Tokens,
-    pub syntax_ready: bool,
+    pub highlights: Highlights,
+    pub highlights_ready: bool,
 }
 impl PreparedDiff {
     pub fn raw(diff: Arc<FileDiff>) -> Self {
         Self {
             diff,
-            tokens: Arc::new(Vec::new()),
-            syntax_ready: false,
+            highlights: Highlights::default(),
+            highlights_ready: false,
         }
     }
 }
@@ -117,11 +117,11 @@ impl FilePresentation {
         matches!(self.state, PresentationState::Loading)
     }
 
-    fn tokens(&self) -> Option<Tokens> {
+    fn highlights(&self) -> Option<Highlights> {
         self.prepared
             .as_ref()
-            .filter(|prepared| prepared.syntax_ready)
-            .map(|prepared| prepared.tokens.clone())
+            .filter(|prepared| prepared.highlights_ready)
+            .map(|prepared| prepared.highlights.clone())
     }
 
     fn owns_diff(&self, diff: &Arc<FileDiff>) -> bool {
@@ -239,7 +239,7 @@ pub struct FileBrowser {
     color_task: Option<Task<()>>,
     content: Option<Arc<FileContent>>,
     diff: Option<Arc<FileDiff>>,
-    diff_tokens: Option<Tokens>,
+    diff_highlights: Option<Highlights>,
     /// The user asked to read this target up to `PreviewLimit::MAX`.
     show_large: bool,
     blame: Option<Arc<FileBlame>>,
@@ -311,7 +311,7 @@ impl FileBrowser {
             color_task: None,
             content: None,
             diff: None,
-            diff_tokens: None,
+            diff_highlights: None,
             show_large: false,
             blame: None,
             history: None,
@@ -360,7 +360,7 @@ impl FileBrowser {
         }
         if self.target == target {
             self.diff = diff;
-            self.diff_tokens = self.source.tokens();
+            self.diff_highlights = self.source.highlights();
             if self.mode == FileView::Diff {
                 self.error = self.source.error();
             }
@@ -473,7 +473,7 @@ impl FileBrowser {
             .update(cx, |view, cx| view.present(None, self.generation, cx));
         self.target = target;
         self.diff = diff;
-        self.diff_tokens = None;
+        self.diff_highlights = None;
         self.show_large = false;
         self.content = None;
         self.blame = None;
@@ -508,7 +508,7 @@ impl FileBrowser {
             prepared.as_ref().map(|prepared| prepared.diff.clone()),
             cx,
         );
-        self.diff_tokens = self.source.tokens();
+        self.diff_highlights = self.source.highlights();
         self.show(mode, cx);
     }
     pub fn show(&mut self, mode: FileView, cx: &mut Context<Self>) {
@@ -673,7 +673,7 @@ impl FileBrowser {
     fn read_again(&mut self, diff: bool, content: bool, cx: &mut Context<Self>) {
         if diff {
             self.diff = None;
-            self.diff_tokens = None;
+            self.diff_highlights = None;
         }
         if content {
             self.content = None;
@@ -870,7 +870,7 @@ impl FileBrowser {
                         match result {
                             Ok(ReadResult::Diff(diff)) => {
                                 view.diff = Some(diff);
-                                view.diff_tokens = None;
+                                view.diff_highlights = None;
                                 view.resume_diff_color(cx);
                             }
                             Ok(ReadResult::Content(content, blame)) => {
@@ -912,7 +912,7 @@ impl FileBrowser {
         let (Some(target), Some(diff)) = (&self.target, &self.diff) else {
             return;
         };
-        if self.diff_tokens.is_some() || self.source.owns_diff(diff) {
+        if self.diff_highlights.is_some() || self.source.owns_diff(diff) {
             // The inspector owns the raw source patch's separate syntax lane.
             return;
         }
@@ -933,28 +933,23 @@ impl FileBrowser {
         self.color_active = true;
         let live_generation = self.live_generation.clone();
         self.color_task = Some(cx.spawn(async move |this, cx| {
-            let (request, tokens) = cx
+            let (request, highlights) = cx
                 .background_executor()
                 .spawn(async move {
-                    #[cfg(feature = "app-benchmark")]
-                    let syntax_start = std::time::Instant::now();
-                    let tokens = syntax::cached_diff_tokens_cancellable(
-                        &request.target.path,
-                        &request.diff,
-                        || live_generation.load(Ordering::Acquire) != request.generation,
-                    );
-                    #[cfg(feature = "app-benchmark")]
-                    crate::perf::record_operation("syntax", syntax_start.elapsed());
-                    (request, tokens)
+                    let highlights =
+                        Highlights::of_diff(&request.target.path, &request.diff, || {
+                            live_generation.load(Ordering::Acquire) != request.generation
+                        });
+                    (request, highlights)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.color_active = false;
                 if request.generation == view.generation
                     && view.target.as_ref() == Some(&request.target)
-                    && let Some(tokens) = tokens
+                    && let Some(highlights) = highlights
                 {
-                    view.diff_tokens = Some(tokens);
+                    view.diff_highlights = Some(highlights);
                     view.viewer_dirty = true;
                     cx.notify();
                 } else {
@@ -994,7 +989,7 @@ impl FileBrowser {
         self.viewer_dirty = false;
         let mode = self.mode;
         let diff = self.diff.clone();
-        let diff_tokens = self.diff_tokens.clone();
+        let diff_highlights = self.diff_highlights.clone();
         let content = self.content.clone();
         let blame = self.blame.clone();
         let path = self
@@ -1016,7 +1011,7 @@ impl FileBrowser {
                         v.set_prepared_diff(
                             diff,
                             path,
-                            diff_tokens.unwrap_or_default(),
+                            diff_highlights.unwrap_or_default(),
                             window,
                             cx,
                         );
@@ -1702,8 +1697,8 @@ pub fn status_icon(status: &str, p: Palette) -> gpui_kit::component::Icon {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileBrowser, FilePresentation, FileTarget, FileView, PreparedDiff, PresentationChange,
-        line_counts, path_label, reading_label,
+        FileBrowser, FilePresentation, FileTarget, FileView, Highlights, PreparedDiff,
+        PresentationChange, line_counts, path_label, reading_label,
     };
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
     use mangrove_core::{
@@ -1733,8 +1728,8 @@ mod tests {
                 deletions: 0,
                 hunks: Vec::new(),
             }),
-            tokens: Arc::default(),
-            syntax_ready: true,
+            highlights: Highlights::default(),
+            highlights_ready: true,
         }
     }
 
@@ -1756,10 +1751,14 @@ mod tests {
             &source.prepared.as_ref().unwrap().diff,
             &old_patch.diff
         ));
-        assert!(Arc::ptr_eq(
-            &source.prepared.as_ref().unwrap().tokens,
-            &old_patch.tokens
-        ));
+        assert!(
+            source
+                .prepared
+                .as_ref()
+                .unwrap()
+                .highlights
+                .same(&old_patch.highlights)
+        );
         let selected = target("selected");
         let patch = prepared();
         assert!(
@@ -1773,10 +1772,14 @@ mod tests {
             &source.prepared.as_ref().unwrap().diff,
             &patch.diff
         ));
-        assert!(Arc::ptr_eq(
-            &source.prepared.as_ref().unwrap().tokens,
-            &patch.tokens
-        ));
+        assert!(
+            source
+                .prepared
+                .as_ref()
+                .unwrap()
+                .highlights
+                .same(&patch.highlights)
+        );
         assert!(
             source.accept(FilePresentation::loading(3, selected, None))
                 == PresentationChange::Replaced
@@ -1784,11 +1787,11 @@ mod tests {
     }
 
     #[test]
-    fn raw_source_has_no_completed_tokens_and_keeps_its_single_color_owner() {
+    fn raw_source_has_no_completed_highlights_and_keeps_its_single_color_owner() {
         let patch = prepared();
         let raw = PreparedDiff::raw(patch.diff.clone());
         let mut source = FilePresentation::ready(1, target("selected"), raw);
-        assert!(source.tokens().is_none());
+        assert!(source.highlights().is_none());
         assert!(source.owns_diff(&patch.diff));
         // A patch read for another revision must be colored by the browser,
         // including after leaving and returning to the Diff tab.
@@ -1800,8 +1803,7 @@ mod tests {
                 patch.clone()
             )) == PresentationChange::Updated
         );
-        assert!(source.tokens().is_some());
-        assert!(Arc::ptr_eq(&source.tokens().unwrap(), &patch.tokens));
+        assert!(source.highlights().unwrap().same(&patch.highlights));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! The bounded read lane keeps the native read alive until completion and retains
 //! only the latest queued foreground intent. Immutable snapshots publish together.
 use crate::{
-    code_view::{CodeView, CodeViewEvent, ReadingPosition, hunk_shortcut},
+    code_view::{CodeView, CodeViewEvent, Highlights, ReadingPosition, hunk_shortcut},
     file_browser::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
         ReadGate, action, diff_counts, is_activate, line_counts, notice, path_label, path_title,
@@ -216,14 +216,17 @@ impl DiffCache {
         limit: PreviewLimit,
         background: bool,
     ) {
-        let tokens = prepared.tokens.iter().map(|line| line.len()).sum::<usize>();
+        let highlights = &prepared.highlights;
+        let tokens = highlights.tokens.iter().map(Vec::len).sum::<usize>();
+        let words = highlights.words.iter().map(Vec::len).sum::<usize>();
         let bytes = prepared
             .diff
             .hunks
             .iter()
             .map(|h| h.header.len() + h.lines.iter().map(|l| l.content.len()).sum::<usize>())
             .sum::<usize>()
-            + tokens * std::mem::size_of::<syntax::Token>();
+            + tokens * std::mem::size_of::<syntax::Token>()
+            + words * std::mem::size_of::<Range<usize>>();
         if bytes > MAX_CACHE_BYTES || tokens > MAX_CACHE_TOKENS {
             if background {
                 self.background_full = true;
@@ -879,7 +882,7 @@ impl InspectorView {
         self.snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.prepared.as_ref())
-            .is_some_and(|prepared| !prepared.syntax_ready)
+            .is_some_and(|prepared| !prepared.highlights_ready)
     }
     #[cfg(feature = "app-benchmark")]
     pub fn is_loading(&self) -> bool {
@@ -1561,7 +1564,7 @@ impl InspectorView {
         background: bool,
         cx: &mut Context<Self>,
     ) {
-        if prepared.syntax_ready {
+        if prepared.highlights_ready {
             return;
         }
         self.color_pending = Some(ColorRequest {
@@ -1588,21 +1591,14 @@ impl InspectorView {
             let (request, colored) = cx
                 .background_executor()
                 .spawn(async move {
-                    #[cfg(feature = "app-benchmark")]
-                    let syntax_start = Instant::now();
-                    let tokens = syntax::cached_diff_tokens_cancellable(
-                        &request.file.path,
-                        &request.prepared.diff,
-                        || {
+                    let highlights =
+                        Highlights::of_diff(&request.file.path, &request.prepared.diff, || {
                             !request
                                 .current(*live_revision.lock().unwrap_or_else(|p| p.into_inner()))
-                        },
-                    );
-                    #[cfg(feature = "app-benchmark")]
-                    crate::perf::record_operation("syntax", syntax_start.elapsed());
-                    let colored = if let Some(tokens) = tokens {
-                        request.prepared.tokens = tokens;
-                        request.prepared.syntax_ready = true;
+                        });
+                    let colored = if let Some(highlights) = highlights {
+                        request.prepared.highlights = highlights;
+                        request.prepared.highlights_ready = true;
                         true
                     } else {
                         false
@@ -2047,7 +2043,7 @@ impl InspectorView {
         let prepare_start = Instant::now();
         self.viewer.update(cx, |view, cx| {
             if let Some(prepared) = prepared {
-                view.set_prepared_diff(prepared.diff, path, prepared.tokens, window, cx);
+                view.set_prepared_diff(prepared.diff, path, prepared.highlights, window, cx);
             } else {
                 view.clear(cx);
             }
@@ -3397,8 +3393,8 @@ mod tests {
         });
         super::PreparedDiff {
             diff,
-            tokens: Arc::default(),
-            syntax_ready: true,
+            highlights: super::Highlights::default(),
+            highlights_ready: true,
         }
     }
     #[gpui_kit::test]
@@ -3808,8 +3804,8 @@ mod tests {
         assert_eq!(first.path, details.files[0].path);
         assert_eq!(first.path, "a.rs");
         assert_eq!(raw.diff.additions, 1);
-        assert!(!raw.syntax_ready);
-        assert!(raw.tokens.is_empty());
+        assert!(!raw.highlights_ready);
+        assert!(raw.highlights.tokens.is_empty() && raw.highlights.words.is_empty());
         let mut intent = FileIntent::default();
         intent.restore_commit(None, Some(&first));
         assert!(intent.choice().is_none());
@@ -3840,10 +3836,25 @@ mod tests {
     }
 
     #[test]
+    fn cached_patches_count_the_bytes_of_their_changed_words() {
+        let mut cache = DiffCache::default();
+        cache.remember("plain".into(), diff(10), PreviewLimit::MIN, false);
+        let plain = cache.bytes;
+        let mut prepared = diff(10);
+        prepared.highlights.words = Arc::new(vec![Vec::new(), vec![0..2, 4..6, 8..10]]);
+        cache.remember("plain".into(), prepared, PreviewLimit::MIN, false);
+        assert_eq!(
+            cache.bytes,
+            plain + 3 * std::mem::size_of::<std::ops::Range<usize>>()
+        );
+        assert_eq!(cache.tokens, 0);
+    }
+
+    #[test]
     fn token_cache_budget_stops_prefetch_before_retaining_unbounded_color_data() {
         let mut cache = DiffCache::default();
         let mut prepared = diff(1);
-        prepared.tokens = Arc::new(vec![vec![
+        prepared.highlights.tokens = Arc::new(vec![vec![
             crate::syntax::Token {
                 range: 0..1,
                 kind: crate::syntax::Kind::Keyword

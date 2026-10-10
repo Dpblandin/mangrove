@@ -25,7 +25,7 @@ use crate::{
         shortcut_label,
     },
     preferences::{DEFAULT_DIFF_FONT_SIZE, MAX_DIFF_FONT_SIZE, MIN_DIFF_FONT_SIZE, Preferences},
-    syntax::{self, Kind, Token},
+    syntax::{self, Kind},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::{RowGeometry, VirtualScrollHandle},
 };
@@ -397,6 +397,57 @@ fn selected_rows_text(rows: &[Row], selection: Option<Selection>, final_newline:
     text
 }
 
+/// Syntax tokens and changed words of each row, published together.
+#[derive(Clone, Default)]
+pub struct Highlights {
+    pub tokens: syntax::Tokens,
+    pub words: diff::Words,
+}
+
+impl Highlights {
+    /// Changed words, then syntax, of a patch: the inspector and the file
+    /// browser publish both or neither. `None` means cancellation.
+    pub fn of_diff(path: &str, diff: &FileDiff, should_cancel: impl Fn() -> bool) -> Option<Self> {
+        #[cfg(feature = "app-benchmark")]
+        let words_start = std::time::Instant::now();
+        let words = diff::changed_words(diff, &should_cancel)?;
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_operation("inline", words_start.elapsed());
+        #[cfg(feature = "app-benchmark")]
+        let syntax_start = std::time::Instant::now();
+        let tokens = syntax::cached_diff_tokens_cancellable(path, diff, &should_cancel)?;
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_operation("syntax", syntax_start.elapsed());
+        Some(Self { tokens, words })
+    }
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.tokens, &other.tokens) && Arc::ptr_eq(&self.words, &other.words)
+    }
+}
+
+/// A header row per hunk, then a row per line: the indexing of `Highlights`.
+fn diff_rows(diff: &FileDiff) -> Vec<Row> {
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| {
+            std::iter::once(Row::new(
+                LineKind::Hunk,
+                String::new(),
+                String::new(),
+                hunk.header.trim_end(),
+            ))
+            .chain(hunk.lines.iter().map(|line| {
+                Row::new(
+                    LineKind::of(&line.kind),
+                    line.old_line.map(|n| n.to_string()).unwrap_or_default(),
+                    line.new_line.map(|n| n.to_string()).unwrap_or_default(),
+                    diff::strip_line_ending(&line.content),
+                )
+            }))
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadingPosition {
     /// Whether the position is in the diff, and the file path.
@@ -412,7 +463,7 @@ pub struct CodeView {
     content_source: Option<Arc<FileContent>>,
     /// Reading position to apply once the same diff or file is shown again.
     restored_position: Option<ReadingPosition>,
-    tokens: Arc<Vec<Vec<Token>>>,
+    highlights: Highlights,
     generation: u64,
     live_generation: Arc<AtomicU64>,
     syntax_task: Option<Task<()>>,
@@ -465,7 +516,7 @@ impl CodeView {
             diff_source: None,
             content_source: None,
             restored_position: None,
-            tokens: Arc::new(Vec::new()),
+            highlights: Highlights::default(),
             generation: 0,
             live_generation: Arc::new(AtomicU64::new(0)),
             syntax_task: None,
@@ -510,7 +561,7 @@ impl CodeView {
         self.rows = Arc::new(rows);
         self.diff_source = None;
         self.content_source = None;
-        self.tokens = Arc::new(Vec::new());
+        self.highlights = Highlights::default();
         self.selection = None;
         self.dragging = false;
         self.drag_point = None;
@@ -637,7 +688,7 @@ impl CodeView {
         &mut self,
         diff: Arc<FileDiff>,
         path: String,
-        tokens: syntax::Tokens,
+        highlights: Highlights,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -650,27 +701,7 @@ impl CodeView {
         if !unchanged {
             self.is_diff = true;
             self.ends_with_newline = false;
-            let rows = diff
-                .hunks
-                .iter()
-                .flat_map(|hunk| {
-                    std::iter::once(Row::new(
-                        LineKind::Hunk,
-                        String::new(),
-                        String::new(),
-                        hunk.header.trim_end(),
-                    ))
-                    .chain(hunk.lines.iter().map(|line| {
-                        Row::new(
-                            LineKind::of(&line.kind),
-                            line.old_line.map(|n| n.to_string()).unwrap_or_default(),
-                            line.new_line.map(|n| n.to_string()).unwrap_or_default(),
-                            diff::strip_line_ending(&line.content),
-                        )
-                    }))
-                })
-                .collect();
-            self.reset(rows, window, cx);
+            self.reset(diff_rows(&diff), window, cx);
             self.hunk_rows = hunk_rows(&self.rows);
             self.diff_source = Some((diff.clone(), path.clone()));
             self.apply_reading_position();
@@ -690,8 +721,8 @@ impl CodeView {
         self.invalidate_syntax();
         self.syntax_task = None;
         self.syntax_pending = false;
-        if !Arc::ptr_eq(&self.tokens, &tokens) {
-            self.tokens = tokens;
+        if !self.highlights.same(&highlights) {
+            self.highlights = highlights;
             cx.notify();
         }
     }
@@ -779,7 +810,10 @@ impl CodeView {
                 if view.generation == generation
                     && let Some(tokens) = tokens
                 {
-                    view.tokens = tokens;
+                    view.highlights = Highlights {
+                        tokens,
+                        words: Arc::default(),
+                    };
                     view.syntax_pending = false;
                     view.syntax_task = None;
                     cx.notify();
@@ -872,7 +906,7 @@ impl CodeView {
         self.scroll.set_geometry(RowGeometry::default());
         self.diff_source = None;
         self.content_source = None;
-        self.tokens = Arc::new(Vec::new());
+        self.highlights = Highlights::default();
         self.selection = None;
         self.dragging = false;
         self.drag_point = None;
@@ -912,7 +946,8 @@ impl CodeView {
     }
     #[cfg(feature = "app-benchmark")]
     pub fn syntax_colored(&self) -> bool {
-        self.tokens
+        self.highlights
+            .tokens
             .iter()
             .flatten()
             .any(|token| token.kind != Kind::Plain)
@@ -1357,12 +1392,28 @@ impl CodeView {
         let selection = self
             .selection
             .and_then(|selection| selection.range_in_row(index, row.original.len()));
-        let tokens = self.tokens.get(index).map(Vec::as_slice).unwrap_or(&[]);
+        let tokens = self
+            .highlights
+            .tokens
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let words = self
+            .highlights
+            .words
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let word_background = match row.kind {
+            LineKind::Addition => Some(self.palette.addition_word_bg),
+            LineKind::Deletion => Some(self.palette.deletion_word_bg),
+            _ => None,
+        };
         let mut cuts = vec![0, row.display.original_end];
-        for token in tokens {
+        for range in tokens.iter().map(|token| &token.range).chain(words) {
             cuts.extend([
-                token.range.start.min(row.display.original_end),
-                token.range.end.min(row.display.original_end),
+                range.start.min(row.display.original_end),
+                range.end.min(row.display.original_end),
             ]);
         }
         if let Some(selected) = &selection {
@@ -1373,7 +1424,7 @@ impl CodeView {
         }
         cuts.sort_unstable();
         cuts.dedup();
-        let mut token_index = 0;
+        let (mut token_index, mut word_index) = (0, 0);
         let mut result = Vec::with_capacity(cuts.len());
         for boundaries in cuts.windows(2) {
             let range = boundaries[0]..boundaries[1];
@@ -1387,6 +1438,12 @@ impl CodeView {
                 .get(token_index)
                 .filter(|token| token.range.start <= range.start && token.range.end >= range.end)
                 .map_or(Kind::Plain, |token| token.kind);
+            while word_index < words.len() && words[word_index].end <= range.start {
+                word_index += 1;
+            }
+            let changed = words
+                .get(word_index)
+                .is_some_and(|word| word.start <= range.start && word.end >= range.end);
             let selected = selection
                 .as_ref()
                 .is_some_and(|selected| selected.start <= range.start && selected.end >= range.end);
@@ -1404,7 +1461,13 @@ impl CodeView {
                         kind.palette_index()
                             .map(|index| rgb(self.palette.syntax[index]).into())
                     },
-                    background_color: selected.then(|| rgb(self.palette.selection).into()),
+                    background_color: if selected {
+                        Some(rgb(self.palette.selection).into())
+                    } else {
+                        word_background
+                            .filter(|_| changed)
+                            .map(|color| rgb(color).into())
+                    },
                     ..Default::default()
                 },
             ));
@@ -2408,9 +2471,110 @@ mod tests {
         assert_eq!(visible.runs[0].glyphs.len(), shaped.runs[0].glyphs.len());
     }
 
+    fn edited_patch() -> mangrove_core::model::FileDiff {
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, content: &str| DiffLine {
+            kind: kind.into(),
+            old_line: Some(1),
+            new_line: Some(1),
+            content: content.into(),
+        };
+        FileDiff {
+            binary: false,
+            oversized: None,
+            truncated: false,
+            additions: 2,
+            deletions: 2,
+            hunks: vec![
+                DiffHunk {
+                    header: "@@ -1,2 +1,2 @@".into(),
+                    lines: vec![
+                        line("deletion", "\tlet total = 1;\n"),
+                        line("annotation", "\\ No newline at end of file"),
+                        line("addition", "\tlet total = 2;\n"),
+                        line("context", "fn main() {}\n"),
+                    ],
+                },
+                DiffHunk {
+                    header: "@@ -9 +9 @@".into(),
+                    lines: vec![
+                        line("deletion", "let a = old;\n"),
+                        line("addition", "let a = new;\n"),
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn highlights_index_the_rows_of_a_patch_and_leave_other_rows_plain() {
+        let diff = edited_patch();
+        let rows = super::diff_rows(&diff);
+        let words = crate::diff::changed_words(&diff, || false).unwrap();
+        let tokens =
+            crate::syntax::cached_diff_tokens_cancellable("a.rs", &diff, || false).unwrap();
+        assert_eq!((words.len(), tokens.len()), (rows.len(), rows.len()));
+        for (row, ranges) in rows.iter().zip(words.iter()) {
+            let changed = matches!(row.kind, LineKind::Addition | LineKind::Deletion);
+            assert_eq!(!ranges.is_empty(), changed, "{:?}", row.kind);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn changed_words_paint_under_their_tab_columns_and_give_way_to_the_selection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{CodeView, Highlights};
+        use gpui_kit::{AppContext, Hsla, WindowOptions, rgb};
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let diff = Arc::new(edited_patch());
+        let highlights = Highlights {
+            tokens: Arc::default(),
+            words: crate::diff::changed_words(&diff, || false).unwrap(),
+        };
+        cx.update_window(cx.windows()[0], |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_prepared_diff(diff, "a.rs".into(), highlights, window, cx)
+            })
+        })
+        .unwrap();
+        view.update(cx, |view, _| {
+            let background = |view: &CodeView, index: usize, display: std::ops::Range<usize>| {
+                view.highlights(index, &view.rows[index])
+                    .into_iter()
+                    .find(|(range, _)| *range == display)
+                    .and_then(|(_, style)| style.background_color)
+            };
+            let color = |value: u32| -> Option<Hsla> { Some(rgb(value).into()) };
+            // « 1 » is byte 13 of the deletion, column 20 after its tab.
+            assert_eq!(view.rows[1].original.find('1'), Some(13));
+            assert_eq!(
+                background(view, 1, 20..21),
+                color(view.palette.deletion_word_bg)
+            );
+            assert_eq!(
+                background(view, 3, 20..21),
+                color(view.palette.addition_word_bg)
+            );
+            assert_eq!(background(view, 1, 0..20), None);
+            view.selection = Some(Selection {
+                anchor: Position { row: 1, byte: 0 },
+                head: Position { row: 1, byte: 16 },
+            });
+            assert_eq!(background(view, 1, 20..21), color(view.palette.selection));
+        });
+    }
+
     #[gpui_kit::test]
     fn a_restored_reading_position_applies_only_to_its_own_diff(cx: &mut gpui_kit::TestAppContext) {
-        use super::CodeView;
+        use super::{CodeView, Highlights};
         use gpui_kit::{AppContext, WindowOptions, px};
         use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
         use std::sync::Arc;
@@ -2445,7 +2609,7 @@ mod tests {
         let show = |cx: &mut gpui_kit::TestAppContext, path: &'static str| {
             cx.update_window(cx.windows()[0], |_, window, cx| {
                 view.update(cx, |view, cx| {
-                    view.set_prepared_diff(diff(), path.into(), Arc::default(), window, cx)
+                    view.set_prepared_diff(diff(), path.into(), Highlights::default(), window, cx)
                 })
             })
             .unwrap();
