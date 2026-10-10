@@ -422,16 +422,9 @@ impl IntegrationsView {
                         offset,
                     ))
                     .child(
-                        primary_action("profile-create", "Créer", p, offset).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                let name = this.profile_name.read(cx).value().trim().to_string();
-                                if !name.is_empty() {
-                                    this.profile_name
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
-                                    cx.emit(IntegrationsEvent::ProfileCreated(name));
-                                }
-                            },
-                        )),
+                        primary_action("profile-create", "Créer", p, offset).on_click(
+                            cx.listener(|this, _, window, cx| this.create_profile(window, cx)),
+                        ),
                     ),
             ),
         );

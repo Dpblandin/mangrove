@@ -1652,6 +1652,20 @@ impl IntegrationsView {
         cx.notify();
     }
 
+    /// A refused name stays in its field with the reason, like a rename.
+    fn create_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.profile_name.read(cx).value().trim().to_string();
+        if let Some(error) = profile_name_error(&name) {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.error = None;
+        self.profile_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.emit(IntegrationsEvent::ProfileCreated(name));
+    }
+
     fn save_profile_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.renaming_profile.clone() else {
             return;
