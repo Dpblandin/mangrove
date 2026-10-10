@@ -583,3 +583,28 @@ fn publishing_a_solo_traversal_reveals_the_kept_commit_again(cx: &mut TestAppCon
     settle(cx);
     assert_eq!(selection(cx, &view), (target, solo_position, true));
 }
+
+#[gpui_kit::test]
+fn keyboard_navigation_ends_the_lookup_of_a_kept_selection(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    let kept = engine.list_commits(&info.id, 10, 1, "").unwrap().commits[0]
+        .sha
+        .clone();
+    let last = info.index.indexed - 1;
+    let base = engine.list_commits(&info.id, last, 1, "").unwrap().commits[0]
+        .sha
+        .clone();
+    // End is pressed while the restored commit's row is still looked up,
+    // and before the last page has loaded.
+    cx.update_window(cx.windows()[0], |_, window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(!view.pages.current(last / PAGE_SIZE));
+            view.restore_view(kept, String::new(), window, cx);
+            view.select_index_keyboard(last, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx);
+    assert_eq!(selection(cx, &view), (base, last, true));
+}

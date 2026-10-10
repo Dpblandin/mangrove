@@ -633,6 +633,10 @@ impl HistoryView {
         self.pages.set_requested_page(None);
         self.jump_pending = false;
         self.jump_target = None;
+        // Navigation also ends the lookup of a kept selection, whose late
+        // result would bring the view back to that commit.
+        self.selection_needs_position = false;
+        self.reveal_selection = false;
         self.navigation_task = None;
         self.position_requests.clear();
     }
@@ -1028,8 +1032,6 @@ impl HistoryView {
         self.autoselect = false;
         self.selected_sha = sha.clone();
         self.selected_index = position;
-        self.selection_needs_position = false;
-        self.reveal_selection = false;
         self.error = None;
         cx.emit(HistoryEvent::Selected { sha, keyboard });
         cx.notify();
@@ -1348,8 +1350,6 @@ impl HistoryView {
             return;
         }
         self.cancel_navigation();
-        self.selection_needs_position = false;
-        self.reveal_selection = false;
         self.jump_pending = true;
         self.request_jump(sha, self.filter.clone(), cx);
         cx.notify();
