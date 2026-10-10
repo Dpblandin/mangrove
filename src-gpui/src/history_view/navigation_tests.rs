@@ -497,3 +497,43 @@ fn restoring_a_tab_whose_commit_was_rewritten_selects_the_first_row(cx: &mut Tes
     // A restored Solo is kept rather than left for the missing commit.
     assert_eq!(*exits.borrow(), 0);
 }
+
+#[gpui_kit::test]
+fn a_refresh_relaunches_a_jump_still_waiting_for_its_commit(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let engine = fixture.workspace();
+    let view = open_view(cx, engine.clone());
+    let selections = record_selections(cx, &view);
+    let linked = fixture.linked.to_str().unwrap();
+    // The worktree opens on a cold index: its HEAD jump waits for indexing.
+    set_repository(cx, &view, engine.open_repository(linked).unwrap());
+    // An auto-fetch changes the references before the jump lands.
+    let main = Repository::open(&fixture.main).unwrap();
+    let newest = Oid::from_str(&fixture.newest).unwrap();
+    main.reference("refs/remotes/origin/main", newest, true, "fetch")
+        .unwrap();
+    let refreshed = engine.open_repository(linked).unwrap();
+    set_repository(cx, &view, refreshed.clone());
+    finish(&engine, &refreshed);
+    settle(cx);
+    let position = engine
+        .commit_position(&refreshed.id, &fixture.head)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selection(cx, &view), (fixture.head.clone(), position, true));
+    assert_eq!(
+        selections.borrow().as_slice(),
+        std::slice::from_ref(&fixture.head)
+    );
+    cx.read(|cx| assert!(view.read(cx).error.is_none()));
+
+    // Solo replaces the list before the jump lands: its first row is selected.
+    view.update(cx, |view, cx| view.clear(cx));
+    set_repository(cx, &view, engine.open_repository(linked).unwrap());
+    let solo = vec!["refs/heads/main".to_owned()];
+    let soloed = engine.open_repository_with_solo(linked, &solo).unwrap();
+    set_repository(cx, &view, soloed.clone());
+    finish(&engine, &soloed);
+    settle(cx);
+    assert_eq!(selection(cx, &view), (fixture.newest.clone(), 0, true));
+}

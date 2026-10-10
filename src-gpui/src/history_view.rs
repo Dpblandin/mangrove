@@ -64,6 +64,8 @@ pub struct HistoryView {
     requested_index: Option<usize>,
     requested_keyboard: bool,
     jump_pending: bool,
+    /// Commit that a jump has still to select, relaunched by a refresh.
+    jump_target: Option<String>,
     selected_sha: String,
     autoselect: bool,
     selected_index: usize,
@@ -283,6 +285,7 @@ impl HistoryView {
             requested_index: None,
             requested_keyboard: false,
             jump_pending: false,
+            jump_target: None,
             selected_sha: String::new(),
             autoselect: true,
             selected_index: 0,
@@ -526,6 +529,7 @@ impl HistoryView {
         if !same_path {
             self.clear(cx);
         }
+        let pending_jump = self.jump_target.take();
         self.references = group_references(
             &info.references,
             &info.solo_refs,
@@ -566,14 +570,19 @@ impl HistoryView {
         self.error = info.index.error.clone();
         self.max_lanes = 1;
         self.lane_offset = 0;
-        if !same_path
-            && info.solo_refs.is_empty()
-            && let Some(head) = info.head.clone()
-        {
+        let jump = if same_path {
+            // A refresh, such as an auto-fetch, relaunches a jump still waiting
+            // for its commit. A new Solo list selects its first row instead.
+            self.autoselect |= solo_changed && pending_jump.is_some();
+            pending_jump.filter(|_| !solo_changed)
+        } else {
             // Worktrees share the global history. Its first row can belong to
             // another branch, so open at this checkout's HEAD, even while its
             // position is still being indexed or lies beyond page zero.
-            self.jump_to(head, window, cx);
+            info.head.clone().filter(|_| info.solo_refs.is_empty())
+        };
+        if let Some(sha) = jump {
+            self.jump_to(sha, window, cx);
         } else {
             self.request_page(0, cx);
             // Completed indexes do not poll; rebase preserved keyboard selection now.
@@ -619,6 +628,7 @@ impl HistoryView {
         self.requested_keyboard = false;
         self.pages.set_requested_page(None);
         self.jump_pending = false;
+        self.jump_target = None;
         self.navigation_task = None;
         self.position_requests.clear();
     }
@@ -1280,12 +1290,12 @@ impl HistoryView {
                         .as_ref()
                         .is_some_and(|info| !info.solo_refs.is_empty())
                 {
-                    self.jump_pending = false;
+                    self.abandon_jump();
                     cx.emit(HistoryEvent::ExitSoloAndNavigate(sha.clone()));
                     return;
                 }
                 if progress.complete || progress.error.is_some() || Instant::now() >= deadline {
-                    self.jump_pending = false;
+                    self.abandon_jump();
                     self.error = Some(
                         progress
                             .error
@@ -1308,11 +1318,16 @@ impl HistoryView {
                 }
             }
             Err(error) => {
-                self.jump_pending = false;
+                self.abandon_jump();
                 self.error = Some(error);
                 self.changed(cx);
             }
         }
+    }
+
+    fn abandon_jump(&mut self) {
+        self.jump_pending = false;
+        self.jump_target = None;
     }
 
     /// Navigate to a commit. A search containing it stays applied; otherwise
@@ -1349,6 +1364,7 @@ impl HistoryView {
     }
 
     fn request_jump(&mut self, sha: String, filter: String, cx: &mut Context<Self>) {
+        self.jump_target = Some(sha.clone());
         self.position_requests.request(PositionRead::Jump {
             generation: self.navigation_generation,
             repository_generation: self.repository_generation,
