@@ -6,7 +6,7 @@ Client Git desktop natif pour explorer l’historique, les branches et les diffs
 
 - **Dépôts** : dépôts locaux, bare et worktrees ; récents et favoris par profil ; onglets qui retrouvent leur sélection, leur recherche et leur position de lecture.
 - **Historique** : graphe des branches et des merges, colonne des références, recherche par message, auteur, SHA ou référence.
-- **Branches** : branches locales et distantes, tags, dossiers repliables, filtre et mode **Solo** ; worktrees et stashes ([détails](docs/repository-context.md)).
+- **Branches** : branches locales et distantes, tags, dossiers repliables, filtre et mode **Solo** ; avance et retard sur l’upstream ; worktrees et stashes ([détails](docs/repository-context.md)).
 - **Commits** : détails, fichiers modifiés, diffs avec coloration syntaxique, aperçus d’images avant/après.
 - **Fichiers** : contenu à une révision, historique qui suit les renommages, blame ([détails](docs/file-browser.md)).
 - **Modifications locales** : fichiers indexés, non indexés et non suivis, en lecture seule.
