@@ -178,6 +178,30 @@ impl RecentMetadata {
     }
 }
 
+/// Profile favorites hold a local path or a clone URL (`https://…`, `git@host:…`).
+pub fn is_remote_favorite(favorite: &str) -> bool {
+    favorite.contains("://")
+        || favorite
+            .split_once(':')
+            .is_some_and(|(host, _)| host.contains('@') && !host.contains(['/', '\\']))
+}
+
+/// Last path segment, without a `.git` suffix for URLs.
+pub fn favorite_name(favorite: &str) -> String {
+    let remote = is_remote_favorite(favorite);
+    let trimmed = favorite.trim_end_matches(['/', '\\']);
+    let name = trimmed
+        .rsplit(|c| matches!(c, '/' | '\\') || (remote && c == ':'))
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(trimmed);
+    if remote {
+        name.strip_suffix(".git").unwrap_or(name).to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
 fn matches_query(entry: &RecentRepository, query: &str) -> bool {
     query.is_empty()
         || format!("{} {}", entry.name, entry.path)
@@ -432,5 +456,20 @@ mod tests {
             metadata.apply(request, &mut recent, &names),
             RecentMetadataUpdate::default()
         );
+    }
+
+    #[test]
+    fn favorites_distinguish_clone_urls_from_local_paths() {
+        for (favorite, remote, name) in [
+            ("/Users/me/projects/mangrove/", false, "mangrove"),
+            ("C:\\code\\mangrove", false, "mangrove"),
+            ("https://example.com/team/project.git", true, "project"),
+            ("ssh://git@example.com:22/team/tool", true, "tool"),
+            ("git@example.com:team/service.git", true, "service"),
+            ("/srv/repos/name.git", false, "name.git"),
+        ] {
+            assert_eq!(is_remote_favorite(favorite), remote, "{favorite}");
+            assert_eq!(favorite_name(favorite), name, "{favorite}");
+        }
     }
 }

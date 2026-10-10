@@ -3,6 +3,9 @@
 //! after that target has been closed, replaced, or left by a newer navigation.
 use crate::chrome::ChromeTab;
 
+/// Name of the screen shown by a tab without repository.
+pub const HOME: &str = "Accueil";
+
 pub struct TabOpenAttempt {
     id: u64,
     revision: u64,
@@ -27,7 +30,7 @@ impl Tabs {
         let id = self.next_id;
         self.entries.push(ChromeTab {
             id,
-            name: "Nouvel onglet".into(),
+            name: HOME.into(),
             path: None,
         });
         self.active = Some(id);
@@ -69,7 +72,7 @@ impl Tabs {
         if let Some(tab) = self.entries.iter_mut().find(|tab| tab.id == attempt.id) {
             *tab = attempt.previous.unwrap_or(ChromeTab {
                 id: attempt.id,
-                name: "Nouvel onglet".into(),
+                name: HOME.into(),
                 path: None,
             });
         }
@@ -216,7 +219,7 @@ mod tests {
         assert_eq!(tabs.entries[0], original_tab);
         assert_eq!(tabs.active, Some(target));
         assert_eq!(tabs.active_tab().unwrap().path, None);
-        assert_eq!(tabs.active_tab().unwrap().name, "Nouvel onglet");
+        assert_eq!(tabs.active_tab().unwrap().name, HOME);
         assert_valid_identity(&tabs);
     }
 

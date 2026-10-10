@@ -8,7 +8,7 @@ La saisie filtre immédiatement les libellés, catégories, mots-clés et chemin
 
 ## Commandes disponibles
 
-- **Dépôts et onglets** : ouvrir un dépôt local, nouvel onglet / accueil des récents, ouvrir ou retirer chaque dépôt récent, cloner ou consulter un dépôt distant, choisir un onglet, fermer l’onglet actif, quitter l’application. Le chemin distingue les dépôts ou worktrees portant le même nom.
+- **Dépôts et onglets** : ouvrir un dépôt local, nouvel onglet sur l’accueil, ouvrir ou retirer chaque dépôt récent, cloner ou consulter un dépôt distant, choisir un onglet, fermer l’onglet actif, quitter l’application. Le chemin distingue les dépôts ou worktrees portant le même nom.
 - **Git** : historique du dépôt, recherche de commits, modifications locales, actualisation, fetch manuel, filtre des branches et tags, ouverture des sections worktrees et stashes. Les worktrees et stashes déjà chargés sont également proposés individuellement ; ouvrir leur section déclenche leur lecture habituelle à la demande.
 - **Commit sélectionné** : copie du SHA, navigation vers chacun des parents, ajout/retrait du mode Solo pour chacune des branches locales ou distantes pointant sur ce commit. La sortie du mode Solo est proposée lorsqu’il est actif.
 - **Fichier explicitement sélectionné** : diff, contenu, historique et blame pour une révision de commit ; diff pour les modifications locales et stashes, conformément aux vues existantes. Choix entre le diff central et compact ; fermeture de la vue centrale. Le chargement ou un aperçu automatique du premier fichier ne suffit pas à rendre les commandes de fichier disponibles.

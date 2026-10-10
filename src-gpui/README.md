@@ -28,7 +28,7 @@ cargo build --release --locked --manifest-path src-gpui/Cargo.toml
 
 La configuration actuelle de GPUI Kit active `runtime_shaders` : les shaders Metal sont compilés à l’exécution. La CI vérifie Xcode complet avec `xcode-select -p` et `xcodebuild -version` ; le composant optionnel Metal Toolchain n’est pas un prérequis de ce build.
 
-Le chemin du dépôt est le seul argument. Le bouton d’ouverture et Cmd/Ctrl + O ouvrent directement le sélecteur natif de dossier. L’accueil permet aussi de rouvrir un dépôt récent. Fermer la dernière fenêtre ou utiliser Cmd/Ctrl + Q quitte l’application.
+Le chemin du dépôt est le seul argument. Le bouton d’ouverture et Cmd/Ctrl + O ouvrent directement le sélecteur natif de dossier. L’accueil permet aussi de rouvrir un dépôt récent ou un favori local du profil. Fermer la dernière fenêtre ou utiliser Cmd/Ctrl + Q quitte l’application.
 
 Le cache est placé dans le répertoire de cache utilisateur de l’OS sous `dev.mangrove.gpui`. Les préférences sont enregistrées dans le répertoire de configuration utilisateur sous `mangrove-gpui/preferences.json` : thème, polices, largeurs des panneaux, intervalle d’auto-fetch et dépôts récents. `MANGROVE_GPUI_PREFERENCES=/chemin/absolu/preferences.json` permet de choisir un autre fichier, notamment pour une session de QA isolée.
 

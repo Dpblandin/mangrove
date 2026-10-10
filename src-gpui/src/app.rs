@@ -1170,17 +1170,34 @@ impl Render for Mangrove {
         let topbar = self
             .chrome
             .update(cx, |chrome, cx| chrome.render_topbar(window, cx));
-        let sidebar = if self.sidebar.read(cx).repository.is_some() {
-            render_cached_view(self.sidebar.clone(), window)
-        } else {
-            self.chrome
-                .read(cx)
-                .render_empty_sidebar()
-                .into_any_element()
-        };
-        let footer = self.chrome.read(cx).render_sidebar_footer();
-        let left_divider = self.chrome.update(cx, |chrome, cx| {
-            chrome.render_divider(Pane::Left, width, window, cx)
+        let sidebar_ready = self.sidebar.read(cx).repository.is_some();
+        // The home screen has no references to show; it uses the full width.
+        let left_pane = (sidebar_ready || self.repository.is_some() || self.opening).then(|| {
+            let sidebar = if sidebar_ready {
+                render_cached_view(self.sidebar.clone(), window)
+            } else {
+                self.chrome
+                    .read(cx)
+                    .render_empty_sidebar()
+                    .into_any_element()
+            };
+            let footer = self.chrome.read(cx).render_sidebar_footer();
+            let divider = self.chrome.update(cx, |chrome, cx| {
+                chrome.render_divider(Pane::Left, width, window, cx)
+            });
+            [
+                div()
+                    .w(px(layout.left))
+                    .flex_shrink_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(p.panel))
+                    .child(div().flex_1().min_h_0().child(sidebar))
+                    .child(footer)
+                    .into_any_element(),
+                divider,
+            ]
         });
         let center = if self.repository.is_some() && self.inspector.read(cx).central_active() {
             self.inspector
@@ -1202,18 +1219,7 @@ impl Render for Mangrove {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
-                .child(
-                    div()
-                        .w(px(layout.left))
-                        .flex_shrink_0()
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .bg(rgb(p.panel))
-                        .child(div().flex_1().min_h_0().child(sidebar))
-                        .child(footer),
-                )
-                .child(left_divider)
+                .children(left_pane.into_iter().flatten())
                 .child(
                     div()
                         .flex()

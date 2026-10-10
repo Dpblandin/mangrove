@@ -4,8 +4,9 @@ use super::*;
 use crate::{
     command_palette::{Command, CommandEntry},
     file_browser::FileView,
-    format::short_sha,
+    format::{display_path, short_sha},
     settings::SettingsSection,
+    tabs::HOME,
     theme::ThemeId,
 };
 
@@ -36,10 +37,11 @@ impl Mangrove {
             .unavailable(blocked.or(self.opening.then_some("Ouverture en cours"))),
             CommandEntry::new(
                 Command::NewTab,
-                "Nouvel onglet / dépôts récents",
-                "Dépôts",
-                "new tab recent accueil",
+                "Nouvel onglet",
+                "Onglets",
+                "new tab accueil home récents favoris",
             )
+            .detail("Ouvre l’accueil dans un nouvel onglet")
             .shortcut("T")
             .unavailable(blocked),
             CommandEntry::new(
@@ -200,11 +202,10 @@ impl Mangrove {
                     "Onglets",
                     "switch tab changer",
                 )
-                .detail(
-                    tab.path
-                        .clone()
-                        .unwrap_or_else(|| "Accueil / dépôts récents".into()),
-                )
+                .detail(tab.path.as_deref().map_or_else(
+                    || format!("{HOME} : dépôts récents et favoris"),
+                    display_path,
+                ))
                 .active(self.tabs.active == Some(tab.id))
                 .unavailable(blocked),
             );
@@ -217,7 +218,7 @@ impl Mangrove {
                     "Dépôts",
                     "recent open repository",
                 )
-                .detail(recent.path.clone())
+                .detail(display_path(&recent.path))
                 .unavailable(blocked),
             );
             entries.push(
@@ -227,7 +228,7 @@ impl Mangrove {
                     "Dépôts",
                     "recent supprimer liste",
                 )
-                .detail(recent.path.clone()),
+                .detail(display_path(&recent.path)),
             );
         }
         let inspector = self.inspector.read(cx);

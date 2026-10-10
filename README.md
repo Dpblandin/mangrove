@@ -8,7 +8,7 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 
 - Ouverture de dépôts locaux, bare et worktrees ; dépôts récemment ouverts.
 - Onglets de dépôts avec sélection, fermeture et bouton d’ouverture. Chaque changement recharge le dépôt actif ; les onglets conservent uniquement son nom et son chemin.
-- Accueil simple : logo Mangrove, ouverture d’un dépôt et accès aux dépôts récents.
+- Accueil centré : logo Mangrove, ouverture ou clonage d’un dépôt, favoris du profil et dépôts récents. Le panneau des branches n’apparaît qu’avec un dépôt.
 - Historique topologique paginé, liste virtualisée et graphe Canvas.
 - Branches locales, références distantes et tags ; dossiers imbriqués repliables et navigation vers leur commit. Le filtre révèle les dossiers des références correspondantes sans perdre les replis de la navigation normale.
 - Mode **Solo** sur une ou plusieurs branches locales/distantes, accessible par clic droit ou bouton clavier : parcours et graphe recalculés, recherche limitée à ce parcours et retour explicite à la vue complète. La branche réellement active reste indiquée.
@@ -20,7 +20,7 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Consultation des modifications non commitées : fichiers indexés, non indexés et non suivis, avec leurs diffs en lecture seule. Le statut est actualisé à l’ouverture du dépôt, au retour du focus dans l’application et par une actualisation manuelle. Aucun bouton ne permet de préparer un fichier pour un commit, de désindexer un fichier ou de créer un commit.
 - Fichiers ajoutés en vert, supprimés en rouge, modifiés en jaune et renommés en bleu, dans tous les thèmes.
 - Icônes de statut distinctes et chemins compacts dans les listes de fichiers. Les diffs gardent des fonds vert et rouge marqués, des numéros de ligne teintés sur les ajouts et suppressions et des en-têtes de bloc à la couleur d’accent, avec une coloration syntaxique préchargée progressivement pour le commit ou les modifications non commitées sélectionnés ; le texte ordinaire reste clair. Les fichiers indexés et non indexés sont préparés séparément et chaque actualisation invalide les anciens patches et couleurs.
-- Le bouton « + » ouvre les dépôts récents dans un nouvel onglet. Les onglets rechargent le dépôt à l’activation ; le loader apparaît seulement si l’ouverture dépasse 500 ms.
+- Le bouton « + » ouvre l’accueil dans un nouvel onglet. Les onglets rechargent le dépôt à l’activation ; le loader apparaît seulement si l’ouverture dépasse 500 ms.
 - Un clic sur un fichier ouvre son diff dans la zone centrale, avec les détails et fichiers du commit à droite. La vue compacte reste disponible ; fermer le diff ramène à l’historique à la même position.
 - Le message du commit dispose d’une zone de lecture de hauteur stable et défilable : les titres longs, descriptions et notes de fusion ne déplacent pas les métadonnées ni la liste des fichiers.
 - Aucun loader animé pendant les lectures de commits ou de diffs : le contenu précédent reste affiché jusqu’à ce que la nouvelle sélection soit prête.
