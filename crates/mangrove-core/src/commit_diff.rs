@@ -20,6 +20,35 @@ pub(crate) fn render_bounded(
 ) -> Result<crate::model::FileDiff> {
     let delta = diff.get_delta(index).ok_or("Fichier introuvable.")?;
     let odb = repository.odb().map_err(|error| error.to_string())?;
+    if oversized(&odb, &delta)? {
+        return Ok(crate::model::FileDiff {
+            binary: false,
+            truncated: true,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![],
+        });
+    }
+    render_file_diff(diff, index)
+}
+
+/// Line totals of every file, or `None` when one patch would be skipped by
+/// the size guard and its per-file counts are therefore unknown.
+pub(crate) fn line_totals(
+    repository: &Repository,
+    diff: &Diff<'_>,
+) -> Result<Option<(usize, usize)>> {
+    let odb = repository.odb().map_err(|error| error.to_string())?;
+    for delta in diff.deltas() {
+        if oversized(&odb, &delta)? {
+            return Ok(None);
+        }
+    }
+    let stats = diff.stats().map_err(|error| error.to_string())?;
+    Ok(Some((stats.insertions(), stats.deletions())))
+}
+
+fn oversized(odb: &git2::Odb<'_>, delta: &DiffDelta<'_>) -> Result<bool> {
     for file in [delta.old_file(), delta.new_file()] {
         if file.id().is_zero()
             || !matches!(
@@ -33,16 +62,10 @@ pub(crate) fn render_bounded(
             .read_header(file.id())
             .map_err(|error| error.to_string())?;
         if size > MAX_FILE_SIZE as usize {
-            return Ok(crate::model::FileDiff {
-                binary: false,
-                truncated: true,
-                additions: 0,
-                deletions: 0,
-                hunks: vec![],
-            });
+            return Ok(true);
         }
     }
-    render_file_diff(diff, index)
+    Ok(false)
 }
 
 struct FileIdentity {

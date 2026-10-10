@@ -507,3 +507,48 @@ fn diff_performance_probe() {
         );
     }
 }
+
+#[test]
+fn commit_line_totals_match_file_patches_and_stay_unknown_past_the_size_guard() {
+    let fixture = Fixture::new();
+    let parent = fixture.commit(
+        None,
+        &[("a.txt", b"one\ntwo\nthree\n"), ("b.txt", b"keep\n")],
+    );
+    let oid = fixture.commit(
+        Some(parent),
+        &[
+            ("a.txt", b"one\n2\nthree\nfour\n"),
+            ("c.txt", b"new\nfile\n"),
+        ],
+    );
+    let info = fixture.open();
+    let sha = oid.to_string();
+    let details = fixture
+        .workspace
+        .commit_details_shared(&info.id, &sha)
+        .unwrap();
+    let expected = (0..details.file_count).fold((0, 0), |(added, deleted), index| {
+        let diff = fixture.workspace.file_diff(&info.id, &sha, index).unwrap();
+        (added + diff.additions, deleted + diff.deletions)
+    });
+    assert_eq!(expected, (4, 2));
+    assert_eq!(
+        fixture
+            .workspace
+            .commit_line_totals(&info.id, &sha)
+            .unwrap(),
+        Some(expected)
+    );
+
+    let large = b"large text line\n".repeat(200_000);
+    let oversized = fixture.commit(Some(oid), &[("a.txt", &large), ("c.txt", b"new\n")]);
+    let info = fixture.open();
+    assert_eq!(
+        fixture
+            .workspace
+            .commit_line_totals(&info.id, &oversized.to_string())
+            .unwrap(),
+        None
+    );
+}

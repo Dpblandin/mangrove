@@ -24,7 +24,7 @@ use gpui_kit::{
 };
 use mangrove_core::{Workspace, model::*};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ops::Range,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -171,33 +171,6 @@ struct CachedDiff {
     bytes: usize,
     tokens: usize,
 }
-/// Line totals of the files read for the current selection, independent of
-/// the patch budget. They are complete only once every file was read.
-#[derive(Default)]
-struct LineTotals {
-    files: HashSet<String>,
-    additions: usize,
-    deletions: usize,
-    unknown: bool,
-}
-impl LineTotals {
-    fn record(&mut self, key: &str, diff: &FileDiff) {
-        if self.files.contains(key) {
-            return;
-        }
-        self.files.insert(key.to_owned());
-        match line_counts(diff) {
-            Some((additions, deletions)) => {
-                self.additions += additions;
-                self.deletions += deletions;
-            }
-            None => self.unknown = true,
-        }
-    }
-    fn complete(&self, files: usize) -> Option<(usize, usize)> {
-        (!self.unknown && self.files.len() == files).then_some((self.additions, self.deletions))
-    }
-}
 #[derive(Default)]
 struct DiffCache {
     entries: HashMap<String, CachedDiff>,
@@ -205,7 +178,6 @@ struct DiffCache {
     bytes: usize,
     tokens: usize,
     background_full: bool,
-    totals: LineTotals,
 }
 impl DiffCache {
     fn clear(&mut self) {
@@ -308,6 +280,7 @@ enum ReadKind {
         file: FileChoice,
         background: bool,
     },
+    Totals(String),
 }
 struct ReadRequest {
     revision: Revision,
@@ -319,6 +292,7 @@ enum ReadResult {
     Stash(Arc<StashDetails>),
     Status(Arc<WorkingTreeStatus>),
     Diff(PreparedDiff),
+    Totals(Option<(usize, usize)>),
 }
 
 struct ColorRequest {
@@ -336,7 +310,7 @@ impl ReadRequest {
                 self.revision.repository == revision.repository
                     && self.revision.status == revision.status
             }
-            ReadKind::Commit { .. } | ReadKind::Stash(_) => {
+            ReadKind::Commit { .. } | ReadKind::Stash(_) | ReadKind::Totals(_) => {
                 self.revision.selection_matches(revision)
             }
             ReadKind::Diff { selection, .. } => {
@@ -388,6 +362,9 @@ pub struct InspectorView {
     viewer_dirty: bool,
     pending: Option<ReadRequest>,
     pending_status: bool,
+    /// Commit whose line totals are read once its first diff is shown.
+    pending_totals: Option<String>,
+    line_totals: Option<(String, Option<(usize, usize)>)>,
     active: bool,
     read_task: Option<Task<()>>,
     preload_task: Option<Task<()>>,
@@ -489,6 +466,8 @@ impl InspectorView {
             viewer_dirty: true,
             pending: None,
             pending_status: false,
+            pending_totals: None,
+            line_totals: None,
             active: false,
             read_task: None,
             preload_task: None,
@@ -690,10 +669,13 @@ impl InspectorView {
             .map(|details| details.parents.clone())
             .unwrap_or_default()
     }
-    /// Line totals of the selected commit, once every file was read exactly.
+    /// Line totals of the selected commit, once read exactly.
     fn commit_totals(&self) -> Option<(usize, usize)> {
         let details = self.details.as_ref().filter(|_| !self.details_loading)?;
-        self.cache.totals.complete(details.file_count)
+        self.line_totals
+            .as_ref()
+            .filter(|(sha, _)| *sha == details.sha)
+            .and_then(|(_, totals)| *totals)
     }
     /// Hunk navigation in the visible diff, central or compact.
     fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -893,6 +875,7 @@ impl InspectorView {
         self.preload_cursor = 0;
         self.selection_debounce = None;
         self.pending = None;
+        self.pending_totals = None;
         if !unchanged_panel {
             self.scroll = std::array::from_fn(|_| UniformListScrollHandle::new());
             self.active_file = [0; 3];
@@ -1274,6 +1257,12 @@ impl InspectorView {
                 id: r.id.clone(),
                 kind: ReadKind::Status,
             })
+        } else if let Some(sha) = self.pending_totals.take() {
+            self.repository.as_ref().map(|r| ReadRequest {
+                revision: self.revision,
+                id: r.id.clone(),
+                kind: ReadKind::Totals(sha),
+            })
         } else {
             None
         };
@@ -1316,6 +1305,9 @@ impl InspectorView {
                             ReadKind::Status => engine
                                 .working_tree_status(&request.id)
                                 .map(|v| ReadResult::Status(Arc::new(v))),
+                            ReadKind::Totals(sha) => engine
+                                .commit_line_totals(&request.id, sha)
+                                .map(ReadResult::Totals),
                             ReadKind::Diff {
                                 selection, file, ..
                             } => match selection {
@@ -1337,6 +1329,7 @@ impl InspectorView {
                             let stage = match &request.kind {
                                 ReadKind::Commit { .. } => "details_git",
                                 ReadKind::Diff { .. } => "patch_git",
+                                ReadKind::Totals(_) => "totals_git",
                                 _ => "status_git",
                             };
                             crate::perf::record_operation(stage, read_start.elapsed());
@@ -1554,6 +1547,7 @@ impl InspectorView {
                         ));
                         self.message_scroll.set_offset(point(px(0.), px(0.)));
                         self.reset_sha_feedback();
+                        self.pending_totals = (details.file_count > 0).then(|| details.sha.clone());
                         self.details = Some(details);
                         self.snapshot = None;
                         self.viewer_dirty = true;
@@ -1666,18 +1660,13 @@ impl InspectorView {
             {
                 match result {
                     Ok(ReadResult::Diff(diff)) => {
-                        let key = file.cache_key();
-                        self.cache.totals.record(&key, &diff.diff);
-                        if !background
-                            || !self.cache.full() && syntax::language(&file.path).is_some()
-                        {
-                            self.cache.remember(key, diff.clone(), background);
-                            self.color(file.clone(), diff.clone(), background, cx);
-                        }
+                        self.cache
+                            .remember(file.cache_key(), diff.clone(), background);
+                        self.color(file.clone(), diff.clone(), background, cx);
                         if !background {
                             self.publish_diff(file, Some(diff), None, cx);
                         } else {
-                            changed = self.commit_totals().is_some();
+                            changed = false;
                         }
                     }
                     Err(error) if !background && request.revision.file_matches(self.revision) => {
@@ -1686,6 +1675,14 @@ impl InspectorView {
                     _ => {
                         changed = false;
                     }
+                }
+            }
+            ReadKind::Totals(sha) if request.revision.selection_matches(self.revision) => {
+                match result {
+                    Ok(ReadResult::Totals(totals)) => {
+                        self.line_totals = Some((sha.clone(), totals));
+                    }
+                    _ => changed = false,
                 }
             }
             _ => {
@@ -1697,8 +1694,6 @@ impl InspectorView {
         }
     }
     fn schedule_preload(&mut self, cx: &mut Context<Self>) {
-        // Commit files are also read for their line totals, even with a full patch cache.
-        let totals = matches!(self.selection, Selection::Commit(_)) && !self.cache.totals.unknown;
         if self.preload_task.is_some()
             || self.color_active
             || self.color_pending.is_some()
@@ -1708,7 +1703,7 @@ impl InspectorView {
             || self.diff_loading
             || matches!(self.selection, Selection::Working)
                 && (self.status_loading || self.status_error.is_some())
-            || self.cache.full() && !totals
+            || self.cache.full()
         {
             return;
         }
@@ -1717,14 +1712,13 @@ impl InspectorView {
         while self.preload_cursor < files.len() {
             let file = files[self.preload_cursor].clone();
             self.preload_cursor += 1;
-            let key = file.cache_key();
-            let color = !self.cache.full()
-                && !self.cache.entries.contains_key(&key)
-                && syntax::language(&file.path).is_some();
-            if color || totals && !self.cache.totals.files.contains(&key) {
-                wanted = Some(file);
-                break;
+            if self.cache.entries.contains_key(&file.cache_key())
+                || syntax::language(&file.path).is_none()
+            {
+                continue;
             }
+            wanted = Some(file);
+            break;
         }
         let (Some(file), Some(id)) = (wanted, self.repository.as_ref().map(|r| r.id.clone()))
         else {
@@ -1745,7 +1739,7 @@ impl InspectorView {
                     && !view.active
                     && view.pending.is_none()
                     && !view.diff_loading
-                    && (totals || !view.cache.full())
+                    && !view.cache.full()
                 {
                     view.pending = Some(ReadRequest {
                         revision,
@@ -3343,30 +3337,6 @@ mod tests {
             intent.resolve_status(current, current, &rows),
             RefreshedIntent::Empty
         ));
-    }
-    #[test]
-    fn commit_totals_sum_every_file_once_and_stay_hidden_until_exact() {
-        let mut totals = super::LineTotals::default();
-        let mut patch = FileDiff {
-            binary: false,
-            truncated: false,
-            additions: 3,
-            deletions: 1,
-            hunks: Vec::new(),
-        };
-        totals.record("a", &patch);
-        assert_eq!(totals.complete(2), None);
-        // A file read again, e.g. by the preload, is not counted twice.
-        totals.record("a", &patch);
-        patch.additions = 0;
-        patch.deletions = 4;
-        totals.record("b", &patch);
-        assert_eq!(totals.complete(2), Some((3, 5)));
-        // A patch skipped by size makes the commit total unknown.
-        patch.truncated = true;
-        patch.hunks.clear();
-        totals.record("c", &patch);
-        assert_eq!(totals.complete(3), None);
     }
     #[test]
     fn file_list_keys_select_the_active_row_before_moving() {

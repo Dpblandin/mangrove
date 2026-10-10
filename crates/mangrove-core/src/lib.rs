@@ -783,6 +783,18 @@ impl Workspace {
         commit_diff::render_bounded(&repository, &diff, file_index)
     }
 
+    /// Added and deleted lines of the whole commit, compared to its first
+    /// parent like the file list. `None` when a file exceeds the patch limit.
+    pub fn commit_line_totals(&self, id: &str, sha: &str) -> Result<Option<(usize, usize)>> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        let (_, diff, _) = commit_diff(&repository, sha)?;
+        if diff.deltas().len() > MAX_CHANGED_FILES {
+            return Ok(None);
+        }
+        commit_diff::line_totals(&repository, &diff)
+    }
+
     pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
