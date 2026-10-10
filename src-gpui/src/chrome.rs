@@ -436,7 +436,8 @@ impl Chrome {
                 if profiles.rename(profile_id, name).is_err() {
                     self.profile_save_failed(
                         event,
-                        "Choisissez un nom de profil de 128 caractères au plus.".into(),
+                        crate::integrations::profile_name_error(name)
+                            .unwrap_or_else(|| "Ce profil n’existe plus.".into()),
                         window,
                         cx,
                     );

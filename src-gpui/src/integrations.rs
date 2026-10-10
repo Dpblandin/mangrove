@@ -1649,8 +1649,8 @@ impl IntegrationsView {
             return;
         };
         let name = self.profile_rename.read(cx).value().trim().to_string();
-        if name.is_empty() {
-            self.error = Some("Saisissez un nom de profil.".into());
+        if let Some(error) = profile_name_error(&name) {
+            self.error = Some(error);
             cx.notify();
             return;
         }
@@ -1964,6 +1964,21 @@ fn profile_hue(id: &str, hues: usize) -> usize {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });
     hash as usize % hues
+}
+
+/// Explains why the profile store would refuse `name`.
+pub(crate) fn profile_name_error(name: &str) -> Option<String> {
+    Profile::validate_name(name).err()?;
+    Some(if name.trim().is_empty() {
+        "Saisissez un nom de profil.".into()
+    } else if name.chars().count() > Profile::MAX_NAME_CHARS {
+        format!(
+            "Choisissez un nom de profil de {} caractères au plus.",
+            Profile::MAX_NAME_CHARS
+        )
+    } else {
+        "Retirez les tabulations et autres caractères de contrôle du nom du profil.".into()
+    })
 }
 
 fn profile_deletion_detail(profile: &Profile) -> String {
@@ -2394,6 +2409,68 @@ mod tests {
             &events.borrow()[..],
             [IntegrationsEvent::ProfileSelected(id)] if id == "work"
         ));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_profile_name_keeps_the_editor_open_with_its_reason(cx: &mut TestAppContext) {
+        let (window, view, events) = open_integrations(cx);
+        let rename = |cx: &mut TestAppContext, name: String| {
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.profile_rename
+                        .update(cx, |input, cx| input.set_value(name, window, cx));
+                    view.save_profile_name(window, cx);
+                })
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.start_profile_rename("work".into(), window, cx)
+            })
+        })
+        .unwrap();
+        rename(cx, "é".repeat(129));
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.renaming_profile.as_deref(), Some("work"));
+            assert_eq!(
+                view.error.as_deref(),
+                Some("Choisissez un nom de profil de 128 caractères au plus.")
+            );
+        });
+        assert!(events.borrow().is_empty());
+
+        rename(cx, "é".repeat(128));
+        view.read_with(cx, |view, _| {
+            assert!(view.renaming_profile.is_none());
+            assert!(view.error.is_none());
+        });
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::ProfileRenamed { profile_id, name }]
+                if profile_id == "work" && name.chars().count() == 128
+        ));
+    }
+
+    #[test]
+    fn profile_name_errors_match_the_store_rules() {
+        assert_eq!(super::profile_name_error("Client Acme"), None);
+        assert_eq!(super::profile_name_error(&"é".repeat(128)), None);
+        assert_eq!(
+            super::profile_name_error("  ").as_deref(),
+            Some("Saisissez un nom de profil.")
+        );
+        assert!(
+            super::profile_name_error(&"x".repeat(129))
+                .unwrap()
+                .contains("128 caractères")
+        );
+        assert!(
+            super::profile_name_error("tab\tname")
+                .unwrap()
+                .contains("caractères de contrôle")
+        );
     }
 
     #[test]
