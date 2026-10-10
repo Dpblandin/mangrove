@@ -23,11 +23,9 @@ use mangrove_core::{
     model::{Reference, RepositoryInfo, WorktreeInfo, WorktreeList},
 };
 use std::{
-    cell::RefCell,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     ops::Range,
-    rc::Rc,
     sync::{Arc, OnceLock},
 };
 
@@ -582,7 +580,7 @@ pub struct SidebarView {
     width: f32,
     menu: Option<(Entity<PopupMenu>, Point<Pixels>)>,
     menu_subscription: Option<Subscription>,
-    row_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    window: AnyWindowHandle,
     /// The tree is one tab stop; its active row is announced as the focused
     /// descendant, so virtualised rows never own the keyboard focus.
     tree_focus: FocusHandle,
@@ -703,7 +701,7 @@ impl SidebarView {
             width: 226.,
             menu: None,
             menu_subscription: None,
-            row_bounds: Rc::default(),
+            window: window.window_handle(),
             tree_focus,
             active_row: None,
             scroll_epoch: 0,
@@ -765,18 +763,23 @@ impl SidebarView {
                 }
             }
             "contextmenu" | "f10" if keystroke.key == "contextmenu" || modifiers.shift => {
-                if let Some(SidebarRow::Reference {
-                    kind, reference, ..
-                }) = self.active_row.and_then(|index| self.rows.get(index))
+                if let Some(index) = self.active_row
+                    && let Some(SidebarRow::Reference {
+                        kind, reference, ..
+                    }) = self.rows.get(index)
                     && kind.can_solo()
                 {
                     let name = reference.name.clone();
-                    let position = self
-                        .row_bounds
-                        .borrow()
-                        .get(&name)
-                        .map(|bounds| point(bounds.left(), bounds.bottom()))
-                        .unwrap_or_else(|| window.mouse_position());
+                    // The row may have scrolled away since it was painted.
+                    self.set_active_row(index, cx);
+                    let bottom: Pixels = (0..=index)
+                        .filter_map(|row| self.scroll_handle.row_height(row))
+                        .sum();
+                    let viewport = self.list_state.viewport_bounds();
+                    let position = point(
+                        viewport.left(),
+                        viewport.top() + bottom - self.scroll_handle.vertical_offset(),
+                    );
                     self.open_branch_menu(name, position, window, cx);
                 }
             }
@@ -997,7 +1000,6 @@ impl SidebarView {
 
     pub(crate) fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         self.close_menu(cx);
-        self.row_bounds.borrow_mut().clear();
         let previous_rows = std::mem::take(&mut self.rows);
         if self.repository.is_none() {
             self.active_row = None;
@@ -1161,10 +1163,23 @@ impl SidebarView {
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
-            cx.notify();
-        }
         self.menu_subscription = None;
+        let Some((menu, _)) = self.menu.take() else {
+            return;
+        };
+        // Most callers have no window or run inside its update. Before the
+        // next frame drops a focused menu, give the keyboard back to the tree.
+        let menu_focus = menu.focus_handle(cx);
+        let tree_focus = self.tree_focus.clone();
+        let window = self.window;
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if menu_focus.contains_focused(window, cx) {
+                    tree_focus.focus(window, cx);
+                }
+            });
+        });
+        cx.notify();
     }
 
     fn open_branch_menu(
@@ -1441,8 +1456,6 @@ impl SidebarView {
                 let name = reference.name.clone();
                 let click_name = name.clone();
                 let menu_name = name.clone();
-                let row_bounds = self.row_bounds.clone();
-                let bounds_key = name.clone();
                 let tooltip_label = reference.label.clone();
                 let show_solo =
                     self.active_row == Some(index) && self.tree_focus.is_focused(window);
@@ -1479,16 +1492,6 @@ impl SidebarView {
                             })
                             .text_color(rgb(if current { p.accent } else { p.text }))
                     })
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                row_bounds.borrow_mut().insert(bounds_key.clone(), bounds);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
                     .child(Icon::new(kind.icon()).with_size(px(13.)).opacity(0.8))
                     .child(div().min_w_0().flex_1().truncate().child(label))
                     .when(current, |this| {
@@ -2671,6 +2674,65 @@ mod tests {
             );
             assert_eq!(view.scroll_handle.vertical_offset(), px(0.));
         });
+    }
+
+    /// Leaves the keyboard on branch b02, scrolled out of view, then opens its
+    /// menu with Shift+F10.
+    fn open_menu_of_scrolled_away_row(
+        cx: &mut TestAppContext,
+    ) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+        let references = (0..40)
+            .map(|index| (*reference(&format!("b{index:02}"))).clone())
+            .collect();
+        let (cache, window, view) = open_sidebar_with(cx, references);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.focus_tree(window, cx));
+        })
+        .unwrap();
+        for _ in 0..3 {
+            press(cx, window, "down");
+        }
+        assert_eq!(active_label(cx, &view), "b02");
+        view.update(cx, |view, _| {
+            view.scroll_handle.scroll_vertical_to(px(800.))
+        });
+        render(cx, window);
+        press(cx, window, "shift-f10");
+        let menu_focused = cx
+            .update_window(window, |_, window, cx| {
+                let (menu, _) = view.read(cx).menu.clone().unwrap();
+                menu.focus_handle(cx).is_focused(window)
+            })
+            .unwrap();
+        assert!(menu_focused);
+        (cache, window, view)
+    }
+
+    #[gpui_kit::test]
+    fn keyboard_branch_menu_opens_below_the_active_row_where_it_is_now(cx: &mut TestAppContext) {
+        let (_cache, window, view) = open_menu_of_scrolled_away_row(cx);
+        render(cx, window);
+        view.read_with(cx, |view, _| {
+            let index = view.active_row.unwrap();
+            let bounds = view.list_state.bounds_for_item(index).unwrap();
+            assert!(view.list_state.viewport_bounds().contains(&bounds.origin));
+            assert_eq!(view.menu.as_ref().unwrap().1, bounds.bottom_left());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn closing_the_branch_menu_from_outside_returns_focus_to_the_tree(cx: &mut TestAppContext) {
+        let (_cache, window, view) = open_menu_of_scrolled_away_row(cx);
+        view.update(cx, |view, cx| view.set_width(300., cx));
+        render(cx, window);
+        let tree_focused = cx
+            .update_window(window, |_, window, cx| {
+                let view = view.read(cx);
+                view.menu.is_none() && view.tree_focus.is_focused(window)
+            })
+            .unwrap();
+        assert!(tree_focused);
+        assert_eq!(active_label(cx, &view), "b02");
     }
 
     #[test]
