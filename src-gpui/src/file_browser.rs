@@ -1075,19 +1075,25 @@ impl Render for FileBrowser {
             }))
             .child(
                 div()
-                    .h(px(40.))
+                    .min_h(px(40.))
                     .flex_shrink_0()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(9.))
+                    .gap_x(px(9.))
+                    .gap_y(px(4.))
                     .px(px(16.))
+                    .py(px(6.))
                     .bg(rgb(p.panel))
                     .border_b_1()
                     .border_color(rgb(p.border))
                     .child(icon(IconName::FileText, 15., p.muted))
+                    // In a narrow view the controls wrap below rather than
+                    // squeezing the path down to its ellipsis.
                     .child(
                         path_title("file-path", path, o)
                             .flex_1()
+                            .min_w(px(160.))
                             .when(busy, |s| s.opacity(0.6)),
                     )
                     .children(counts)

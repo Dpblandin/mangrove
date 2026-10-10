@@ -45,6 +45,10 @@ actions!(
     ]
 );
 
+const ROOT_CONTEXT: &str = "Mangrove";
+/// Unshifted characters of the French AZERTY digit row, from 1 to 9.
+const AZERTY_DIGITS: [&str; 9] = ["&", "é", "\"", "'", "(", "§", "è", "!", "ç"];
+
 /// Cmd/Ctrl+1 to 8 select a tab position, 9 the last tab.
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = mangrove, no_json)]
@@ -76,11 +80,22 @@ pub fn bind_keys(cx: &mut App) {
                 None,
             )
         }));
+        // AZERTY keeps digits behind Shift: the same physical keys report
+        // their unshifted characters. Digit bindings come first for menus.
+        cx.bind_keys(AZERTY_DIGITS.iter().zip(1..).map(|(key, position)| {
+            KeyBinding::new(&format!("{modifier}-{key}"), SelectTab { position }, None)
+        }));
+        cx.bind_keys([KeyBinding::new(&format!("{modifier}-à"), ZoomReset, None)]);
     }
     cx.bind_keys([
+        // Menus show the first binding; macOS cannot display a Tab key equivalent.
+        KeyBinding::new("cmd-alt-right", NextTab, None),
+        KeyBinding::new("cmd-alt-left", PreviousTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-        KeyBinding::new("escape", Escape, None),
+        // A binding without context outranks every focused element. Scoped to
+        // the root, Escape first reaches fields, menus and lists that use it.
+        KeyBinding::new("escape", Escape, Some(ROOT_CONTEXT)),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
     ]);
     cx.set_menus([
@@ -127,11 +142,18 @@ pub fn bind_keys(cx: &mut App) {
 
 /// Where a background tab was left; restored when its repository reopens.
 struct TabState {
-    sha: Option<String>,
+    selection: TabSelection,
     query: String,
     solo: Vec<String>,
     sidebar: SidebarViewState,
     inspector: InspectorViewState,
+}
+
+enum TabSelection {
+    Commit(String),
+    Stash(String),
+    WorkingTree,
+    None,
 }
 
 pub struct Mangrove {
@@ -280,6 +302,8 @@ impl Mangrove {
         if let Some(path) = path {
             this.open(path, false, None, window, cx);
         } else {
+            this.tabs.create();
+            this.sync_chrome(cx);
             this.refresh_recent(cx);
         }
         this
@@ -643,6 +667,10 @@ impl Mangrove {
         }
         self.tabs.close(id);
         self.tab_states.remove(&id);
+        // The home screen always has its own tab, like a new window.
+        if self.tabs.entries.is_empty() {
+            self.tabs.create();
+        }
         if active {
             let path = self.tabs.active_tab().and_then(|tab| tab.path.clone());
             self.clear_workspace(cx);
@@ -684,12 +712,21 @@ impl Mangrove {
             return;
         };
         let history = self.history.read(cx);
-        let inspector = self.inspector.read(cx).view_state();
-        let state = TabState {
+        let inspector_view = self.inspector.read(cx);
+        let inspector = inspector_view.view_state();
+        let selection = if let Some(sha) = inspector_view.selected_stash() {
+            TabSelection::Stash(sha.to_owned())
+        } else if inspector_view.is_working_tree() {
+            TabSelection::WorkingTree
+        } else {
             // The history forgets its commit while a restored one is looked up.
-            sha: Some(history.selected_sha().to_owned())
+            Some(history.selected_sha().to_owned())
                 .filter(|sha| !sha.is_empty())
-                .or_else(|| inspector.sha().map(str::to_owned)),
+                .or_else(|| inspector.sha().map(str::to_owned))
+                .map_or(TabSelection::None, TabSelection::Commit)
+        };
+        let state = TabState {
+            selection,
             query: history.query().to_owned(),
             solo: repository.solo_refs.clone(),
             sidebar: self.sidebar.read(cx).view_state(),
@@ -713,9 +750,26 @@ impl Mangrove {
         self.inspector.update(cx, |inspector, _| {
             inspector.restore_view_state(state.inspector)
         });
-        self.history.update(cx, |history, cx| match state.sha {
-            Some(sha) => history.restore_view(sha, state.query, window, cx),
-            None => history.set_query(state.query, cx),
+        let TabSelection::Commit(sha) = state.selection else {
+            self.history
+                .update(cx, |history, cx| history.set_query(state.query, cx));
+            match state.selection {
+                TabSelection::Stash(sha) => {
+                    self.sidebar_event(&SidebarEvent::SelectStash(sha), window, cx)
+                }
+                // Without local changes, the status read returns to a commit.
+                TabSelection::WorkingTree => {
+                    self.history.update(cx, |view, cx| view.clear_selection(cx));
+                    self.inspector
+                        .update(cx, |view, cx| view.select_working_tree(cx));
+                    self.sync_selection(cx);
+                }
+                TabSelection::Commit(_) | TabSelection::None => {}
+            }
+            return;
+        };
+        self.history.update(cx, |history, cx| {
+            history.restore_view(sha, state.query, window, cx)
         });
     }
     /// True when the center shows the history list, which may take the focus.
@@ -1064,6 +1118,7 @@ impl Mangrove {
             ChromeEvent::ProfileChanged => {
                 self.recent_task = None;
                 self.tabs = Tabs::default();
+                self.tabs.create();
                 self.tab_states.clear();
                 self.restoring = None;
                 self.clear_workspace(cx);
@@ -1305,6 +1360,7 @@ impl Render for Mangrove {
         let p = prefs.palette();
         let root = div()
             .id("mangrove-app")
+            .key_context(ROOT_CONTEXT)
             .track_focus(&self.focus)
             .relative()
             .size_full()
