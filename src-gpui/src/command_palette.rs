@@ -51,6 +51,7 @@ pub enum Command {
     DiffZoom(i32),
     ResetPane(Pane),
     ToggleImagePreviews,
+    ToggleLargePreviews,
     ToggleAutoFetch,
     DismissError,
     Quit,

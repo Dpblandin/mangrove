@@ -4,36 +4,18 @@ use std::{collections::VecDeque, sync::Arc};
 
 use git2::{Delta, Diff, DiffDelta, DiffOptions, Oid, Repository};
 
-use crate::{render_file_diff, Result, MAX_CHANGED_FILES, MAX_FILE_SIZE};
+use crate::{
+    model::{FileDiff, PreviewLimit},
+    patch::{largest_blob, render_bounded},
+    Result, MAX_CHANGED_FILES, MAX_FILE_SIZE, MAX_PATCH_SIZE,
+};
 
 const MAX_COMMITS: usize = 8;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
-/// libgit2's `max_size` can be overridden by a text diff attribute. Tree deltas
-/// also commonly have an unknown size until a patch is built, so inspect the
-/// selected object headers before asking libgit2 to materialize any contents.
-pub(crate) fn render_bounded(
-    repository: &Repository,
-    diff: &Diff<'_>,
-    index: usize,
-) -> Result<crate::model::FileDiff> {
-    let delta = diff.get_delta(index).ok_or("Fichier introuvable.")?;
-    let odb = repository.odb().map_err(|error| error.to_string())?;
-    if oversized(&odb, &delta)? {
-        return Ok(crate::model::FileDiff {
-            binary: false,
-            truncated: true,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        });
-    }
-    render_file_diff(diff, index)
-}
-
-/// Line totals of every file, counted like their patches, or `None` when one
-/// patch would be skipped by the size guard. `cancelled` is checked per file.
+/// Line totals of every file, counted like their patches, or `None` when a
+/// blob is above 2 MiB. `cancelled` is checked per file.
 pub(crate) fn line_totals(
     repository: &Repository,
     diff: &Diff<'_>,
@@ -45,7 +27,7 @@ pub(crate) fn line_totals(
         if cancelled() {
             return Err("Lecture annulée.".into());
         }
-        if oversized(&odb, &delta)? {
+        if largest_blob(&odb, &delta)? > MAX_FILE_SIZE {
             return Ok(None);
         }
         let Some(patch) = git2::Patch::from_diff(diff, index).map_err(|e| e.to_string())? else {
@@ -59,26 +41,6 @@ pub(crate) fn line_totals(
         deletions += deleted;
     }
     Ok(Some((additions, deletions)))
-}
-
-fn oversized(odb: &git2::Odb<'_>, delta: &DiffDelta<'_>) -> Result<bool> {
-    for file in [delta.old_file(), delta.new_file()] {
-        if file.id().is_zero()
-            || !matches!(
-                file.mode(),
-                git2::FileMode::Blob | git2::FileMode::BlobExecutable | git2::FileMode::Link
-            )
-        {
-            continue;
-        }
-        let (size, _) = odb
-            .read_header(file.id())
-            .map_err(|error| error.to_string())?;
-        if size > MAX_FILE_SIZE as usize {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 struct FileIdentity {
@@ -109,12 +71,13 @@ impl CommitFiles {
         repository: &Repository,
         oid: Oid,
         index: usize,
-    ) -> Result<crate::model::FileDiff> {
+        limit: PreviewLimit,
+    ) -> Result<FileDiff> {
         let Some(file) = self.0.get(index) else {
             // Long path names can exhaust the identity budget before the
             // public file-list limit. Such entries still use the normal path.
             let (_, diff, _) = crate::commit_diff(repository, &oid.to_string())?;
-            return render_bounded(repository, &diff, index);
+            return render_bounded(repository, &diff, index, limit);
         };
         let commit = repository.find_commit(oid).map_err(|e| e.to_string())?;
         let tree = commit.tree().map_err(|e| e.to_string())?;
@@ -131,7 +94,7 @@ impl CommitFiles {
         let mut options = DiffOptions::new();
         options
             .include_typechange(true)
-            .max_size(MAX_FILE_SIZE)
+            .max_size(MAX_PATCH_SIZE)
             .disable_pathspec_match(true);
         for path in [&file.old_path, &file.new_path].into_iter().flatten() {
             options.pathspec(path.as_slice());
@@ -143,10 +106,10 @@ impl CommitFiles {
             crate::similarity::find_renames(repository, &mut diff, false)?;
         }
         if let Some(selected) = diff.deltas().position(|delta| file.matches(&delta)) {
-            return render_bounded(repository, &diff, selected);
+            return render_bounded(repository, &diff, selected, limit);
         }
         let (_, diff, _) = crate::commit_diff(repository, &oid.to_string())?;
-        render_bounded(repository, &diff, index)
+        render_bounded(repository, &diff, index, limit)
     }
 }
 
@@ -284,31 +247,7 @@ impl CommitDiffCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn commit(repository: &Repository, parents: &[Oid], files: &[(&[u8], &[u8], i32)]) -> Oid {
-        let mut builder = repository.treebuilder(None).unwrap();
-        for (path, content, mode) in files {
-            builder
-                .insert(*path, repository.blob(content).unwrap(), *mode)
-                .unwrap();
-        }
-        let tree = repository.find_tree(builder.write().unwrap()).unwrap();
-        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
-        let parents: Vec<_> = parents
-            .iter()
-            .map(|id| repository.find_commit(*id).unwrap())
-            .collect();
-        repository
-            .commit(
-                None,
-                &signature,
-                &signature,
-                "test",
-                &tree,
-                &parents.iter().collect::<Vec<_>>(),
-            )
-            .unwrap()
-    }
+    use crate::test_support::commit;
 
     #[test]
     fn filtered_patches_match_full_comparison_for_roots_merges_and_reused_literal_paths() {
@@ -348,15 +287,20 @@ mod tests {
             cache.remember(id, &full);
             let cached = cache.get(id).unwrap();
             for index in 0..full.deltas().len() {
-                let expected = render_file_diff(&full, index).unwrap();
-                let actual = cached.file_diff(&repository, id, index).unwrap();
+                let expected =
+                    render_bounded(&repository, &full, index, PreviewLimit::MIN).unwrap();
+                let actual = cached
+                    .file_diff(&repository, id, index, PreviewLimit::MIN)
+                    .unwrap();
                 assert_eq!(
                     serde_json::to_value(actual).unwrap(),
                     serde_json::to_value(expected).unwrap(),
                     "commit {id}, index {index}"
                 );
             }
-            assert!(cached.file_diff(&repository, id, usize::MAX).is_err());
+            assert!(cached
+                .file_diff(&repository, id, usize::MAX, PreviewLimit::MIN)
+                .is_err());
         }
     }
 
@@ -382,7 +326,7 @@ mod tests {
         let (_, diff, limit) = crate::commit_diff(&repository, &oid.to_string()).unwrap();
         assert!(limit.is_none());
         assert_eq!(diff.deltas().len(), MAX_CHANGED_FILES + 1);
-        let expected = render_file_diff(&diff, 0).unwrap();
+        let expected = render_bounded(&repository, &diff, 0, PreviewLimit::MIN).unwrap();
         let mut cache = CommitDiffCache::default();
         cache.remember(oid, &diff);
         let cached = cache.get(oid).unwrap();
@@ -404,7 +348,7 @@ mod tests {
         .unwrap();
         let fresh = Repository::open_bare(directory.path()).unwrap();
         assert!(crate::commit_diff(&fresh, &oid.to_string()).is_err());
-        let actual = cached.file_diff(&fresh, oid, 0).unwrap();
+        let actual = cached.file_diff(&fresh, oid, 0, PreviewLimit::MIN).unwrap();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()

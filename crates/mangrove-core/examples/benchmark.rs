@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mangrove_core::Workspace;
+use mangrove_core::{model::PreviewLimit, Workspace};
 use serde_json::json;
 
 fn milliseconds(duration: Duration) -> f64 {
@@ -79,7 +79,8 @@ fn main() -> Result<(), String> {
         let started = Instant::now();
         let details = workspace.commit_details(&repository.id, &commit.sha)?;
         if let Some(file) = details.files.first() {
-            let diff = workspace.file_diff(&repository.id, &commit.sha, file.index)?;
+            let diff =
+                workspace.file_diff(&repository.id, &commit.sha, file.index, PreviewLimit::MIN)?;
             diff_lines = diff
                 .hunks
                 .iter()

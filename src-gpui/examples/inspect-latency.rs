@@ -10,7 +10,7 @@ mod diff;
 #[path = "../src/syntax.rs"]
 mod syntax;
 
-use mangrove_core::Workspace;
+use mangrove_core::{Workspace, model::PreviewLimit};
 use serde_json::json;
 use std::{env, time::Instant};
 
@@ -40,7 +40,9 @@ fn main() -> Result<(), String> {
             continue;
         }
         let started = Instant::now();
-        let diff = engine.file_diff(&repository.id, &sha, file.index)?;
+        // The limit of a file opened with the default preferences.
+        let limit = PreviewLimit::from_mib(8);
+        let diff = engine.file_diff(&repository.id, &sha, file.index, limit)?;
         let read_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = Instant::now();
         let tokens =
@@ -61,6 +63,7 @@ fn main() -> Result<(), String> {
             "tokens": tokens.iter().map(Vec::len).sum::<usize>(),
             "token_rows": tokens.len(),
             "truncated": diff.truncated,
+            "oversized_bytes": diff.oversized.map(|oversized| oversized.size),
         }));
     }
     println!(

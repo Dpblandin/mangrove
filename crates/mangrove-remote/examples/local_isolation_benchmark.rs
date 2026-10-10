@@ -1,6 +1,6 @@
 //! Compare local Git reads with and without a pending synthetic API request.
 //! Run against the generated fixture, never a confidential repository.
-use mangrove_core::Workspace;
+use mangrove_core::{model::PreviewLimit, Workspace};
 use mangrove_remote::{
     providers::ProviderClient, Account, CancellationToken, HttpRequest, HttpResponse, Provider,
     RemoteError, SecretToken, Transport,
@@ -65,7 +65,7 @@ fn workload(path: &str, pending: Option<&AtomicBool>) -> Result<Value, String> {
         workspace.list_commits(&repository.id, 0, 50, "fixture")?;
         search.push(milliseconds(started.elapsed()));
         let started = Instant::now();
-        workspace.file_diff(&repository.id, sha, file.index)?;
+        workspace.file_diff(&repository.id, sha, file.index, PreviewLimit::MIN)?;
         diff.push(milliseconds(started.elapsed()));
         if pending.is_some_and(|pending| !pending.load(Ordering::SeqCst)) {
             return Err("Remote request was no longer pending".into());

@@ -5,8 +5,11 @@ mod file_browser;
 mod graph;
 mod images;
 pub mod model;
+mod patch;
 mod repository_context;
 mod similarity;
+#[cfg(test)]
+mod test_support;
 mod working_tree;
 mod worktree_filter;
 
@@ -29,8 +32,11 @@ use sha2::{Digest, Sha256};
 
 pub type Result<T> = std::result::Result<T, String>;
 const BATCH_SIZE: usize = 256;
-const MAX_FILE_SIZE: i64 = 2 * 1024 * 1024;
-const MAX_DIFF_LINES: usize = 2_000;
+/// Bounds images, rename candidates, blame and commit line totals.
+const MAX_FILE_SIZE: u64 = PreviewLimit::MIN.bytes();
+/// A backstop for libgit2's own size guard: each read first checks object
+/// headers against its `PreviewLimit`, which is at most this size.
+const MAX_PATCH_SIZE: i64 = PreviewLimit::MAX.bytes() as i64;
 const MAX_CHANGED_FILES: usize = 5_000;
 const MAX_OPEN_REPOSITORIES: usize = 8;
 const MAX_REPOSITORY_NAMES: usize = 6;
@@ -750,13 +756,19 @@ impl Workspace {
         Ok(details)
     }
 
-    pub fn file_diff(&self, id: &str, sha: &str, file_index: usize) -> Result<FileDiff> {
+    pub fn file_diff(
+        &self,
+        id: &str,
+        sha: &str,
+        file_index: usize,
+        limit: PreviewLimit,
+    ) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
         let oid = Oid::from_str(sha).map_err(|_| "Identifiant de commit invalide.")?;
         let files = session.commit_diffs.lock().unwrap().get(oid);
         if let Some(files) = files {
-            return files.file_diff(&repository, oid, file_index);
+            return files.file_diff(&repository, oid, file_index, limit);
         }
         let (commit, diff, _) = commit_diff(&repository, sha)?;
         session
@@ -767,12 +779,12 @@ impl Workspace {
         if file_index >= diff.deltas().len() {
             return Err("Fichier introuvable dans ce commit.".into());
         }
-        commit_diff::render_bounded(&repository, &diff, file_index)
+        patch::render_bounded(&repository, &diff, file_index, limit)
     }
 
     /// Added and deleted lines of the whole commit, compared to its first
-    /// parent like the file list. `None` when a file exceeds the patch limit
-    /// or the commit has more than `max_files`; `cancelled` stops the read.
+    /// parent like the file list. `None` when a blob is above 2 MiB or the
+    /// commit has more than `max_files`; `cancelled` stops the read.
     pub fn commit_line_totals(
         &self,
         id: &str,
@@ -807,10 +819,17 @@ impl Workspace {
         repository_context::stash_details(&repository, sha)
     }
 
-    pub fn stash_diff(&self, id: &str, sha: &str, area: &str, file_key: &str) -> Result<FileDiff> {
+    pub fn stash_diff(
+        &self,
+        id: &str,
+        sha: &str,
+        area: &str,
+        file_key: &str,
+        limit: PreviewLimit,
+    ) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        repository_context::stash_diff(&repository, sha, area, file_key)
+        repository_context::stash_diff(&repository, sha, area, file_key, limit)
     }
 
     pub fn working_tree_status(&self, id: &str) -> Result<WorkingTreeStatus> {
@@ -820,10 +839,16 @@ impl Workspace {
         working_tree::status(&repository, &mut cache)
     }
 
-    pub fn file_content(&self, id: &str, sha: &str, file_key: &str) -> Result<FileContent> {
+    pub fn file_content(
+        &self,
+        id: &str,
+        sha: &str,
+        file_key: &str,
+        limit: PreviewLimit,
+    ) -> Result<FileContent> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        file_browser::content(&repository, sha, file_key)
+        file_browser::content(&repository, sha, file_key, limit)
     }
 
     pub fn file_images(&self, id: &str, source: &FileImageSource) -> Result<FileImages> {
@@ -867,17 +892,29 @@ impl Workspace {
         file_browser::blame(&repository, sha, file_key)
     }
 
-    pub fn file_revision_diff(&self, id: &str, sha: &str, file_key: &str) -> Result<FileDiff> {
+    pub fn file_revision_diff(
+        &self,
+        id: &str,
+        sha: &str,
+        file_key: &str,
+        limit: PreviewLimit,
+    ) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        file_browser::revision_diff(&repository, sha, file_key)
+        file_browser::revision_diff(&repository, sha, file_key, limit)
     }
 
-    pub fn working_tree_diff(&self, id: &str, area: &str, file_key: &str) -> Result<FileDiff> {
+    pub fn working_tree_diff(
+        &self,
+        id: &str,
+        area: &str,
+        file_key: &str,
+        limit: PreviewLimit,
+    ) -> Result<FileDiff> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
         let mut cache = session.working_tree.lock().unwrap();
-        working_tree::diff(&repository, area, file_key, &mut cache)
+        working_tree::diff(&repository, area, file_key, limit, &mut cache)
     }
 }
 
@@ -1153,7 +1190,7 @@ fn tree_diff_with_limit<'repo>(
     let mut options = DiffOptions::new();
     options
         .include_typechange(true)
-        .max_size(MAX_FILE_SIZE)
+        .max_size(MAX_PATCH_SIZE)
         .skip_binary_check(true);
     let mut diff = repository
         .diff_tree_to_tree(old, Some(new), Some(&mut options))
@@ -1323,108 +1360,6 @@ fn index_repository(session: &Session) -> Result<()> {
         }
         thread::yield_now();
     }
-}
-
-fn render_file_diff(diff: &git2::Diff<'_>, file_index: usize) -> Result<FileDiff> {
-    let delta = diff.get_delta(file_index).ok_or("Fichier introuvable.")?;
-    if delta.old_file().size().max(delta.new_file().size()) > MAX_FILE_SIZE as u64 {
-        return Ok(FileDiff {
-            binary: false,
-            truncated: true,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        });
-    }
-    let Some(patch) = git2::Patch::from_diff(diff, file_index).map_err(|e| e.to_string())? else {
-        return Ok(FileDiff {
-            binary: true,
-            truncated: false,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        });
-    };
-    render_patch(patch)
-}
-
-fn render_patch(patch: git2::Patch<'_>) -> Result<FileDiff> {
-    // libgit2 marks files above max_size as binary to skip processing. Expose
-    // that size guard as a truncated diff instead of mislabelling text files.
-    if patch
-        .delta()
-        .old_file()
-        .size()
-        .max(patch.delta().new_file().size())
-        > MAX_FILE_SIZE as u64
-    {
-        return Ok(FileDiff {
-            binary: false,
-            truncated: true,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        });
-    }
-    if patch.delta().flags().contains(git2::DiffFlags::BINARY) {
-        return Ok(FileDiff {
-            binary: true,
-            truncated: false,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        });
-    }
-    let (_, additions, deletions) = patch.line_stats().map_err(|e| e.to_string())?;
-    let mut result = FileDiff {
-        binary: false,
-        truncated: false,
-        additions,
-        deletions,
-        hunks: vec![],
-    };
-    let mut count = 0;
-    let mut bytes = 0;
-    'hunks: for index in 0..patch.num_hunks() {
-        let (hunk, lines) = patch.hunk(index).map_err(|e| e.to_string())?;
-        let mut output = DiffHunk {
-            header: String::from_utf8_lossy(hunk.header()).trim_end().into(),
-            lines: Vec::new(),
-        };
-        for line_index in 0..lines {
-            let line = patch
-                .line_in_hunk(index, line_index)
-                .map_err(|e| e.to_string())?;
-            if count >= MAX_DIFF_LINES || bytes + line.content().len() > 512 * 1024 {
-                result.truncated = true;
-                result.hunks.push(output);
-                break 'hunks;
-            }
-            count += 1;
-            bytes += line.content().len();
-            let annotation = matches!(line.origin(), '=' | '>' | '<');
-            let content = String::from_utf8_lossy(line.content());
-            output.lines.push(DiffLine {
-                kind: match line.origin() {
-                    '+' => "addition",
-                    '-' => "deletion",
-                    '=' | '>' | '<' => "annotation",
-                    _ => "context",
-                }
-                .into(),
-                old_line: (!annotation).then(|| line.old_lineno()).flatten(),
-                new_line: (!annotation).then(|| line.new_lineno()).flatten(),
-                content: if annotation {
-                    content.trim_matches(['\r', '\n'])
-                } else {
-                    content.trim_end_matches(['\r', '\n'])
-                }
-                .into(),
-            });
-        }
-        result.hunks.push(output);
-    }
-    Ok(result)
 }
 
 fn changed_file(index: usize, delta: &git2::DiffDelta<'_>) -> ChangedFile {

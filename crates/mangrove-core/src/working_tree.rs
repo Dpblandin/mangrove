@@ -13,8 +13,12 @@ use git2::{Delta, Diff, DiffDelta, DiffOptions, ErrorCode, Repository};
 
 use crate::{
     changed_file,
-    model::{FileDiff, FileImageData, FileImages, WorkingTreeFile, WorkingTreeStatus},
-    render_patch, Result, MAX_CHANGED_FILES, MAX_FILE_SIZE,
+    model::{
+        FileDiff, FileImageData, FileImages, Oversized, PreviewLimit, WorkingTreeFile,
+        WorkingTreeStatus,
+    },
+    patch::render_patch,
+    Result, MAX_CHANGED_FILES, MAX_PATCH_SIZE,
 };
 
 const MAX_IDENTITY_BYTES: usize = 2 * 1024 * 1024;
@@ -183,6 +187,7 @@ pub(crate) fn diff(
     repository: &Repository,
     area: &str,
     key: &str,
+    limit: PreviewLimit,
     cache: &mut WorkingTreeCache,
 ) -> Result<FileDiff> {
     let bytes = key_bytes(key)?;
@@ -205,9 +210,9 @@ pub(crate) fn diff(
         return Err("Le patch de ce fichier en conflit ou illisible n'est pas disponible.".into());
     }
     if area == "unstaged" {
-        return worktree_patch(repository, &delta, &path);
+        return worktree_patch(repository, &delta, &path, limit);
     }
-    crate::commit_diff::render_bounded(repository, &diff, index)
+    crate::patch::render_bounded(repository, &diff, index, limit)
 }
 
 pub(crate) fn images(
@@ -241,12 +246,12 @@ pub(crate) fn images(
         )
     } else {
         let path = relative_path(&bytes)?;
-        match worktree_content(repository, &path)? {
+        match worktree_content(repository, &path, PreviewLimit::MIN)? {
             WorktreeContent::Bytes(bytes) => FileImageData::Bytes(bytes),
             WorktreeContent::Missing => {
                 return Err("Ce fichier a changé ou n’est plus présent dans cette liste.".into())
             }
-            WorktreeContent::Oversized => crate::images::oversized(),
+            WorktreeContent::Oversized(_) => crate::images::oversized(),
         }
     };
     Ok(FileImages {
@@ -308,7 +313,7 @@ fn area_diff<'a>(
         .include_typechange(true)
         .include_unreadable(true)
         .skip_binary_check(true)
-        .max_size(MAX_FILE_SIZE);
+        .max_size(MAX_PATCH_SIZE);
     if let Some(identity) = selected {
         options.disable_pathspec_match(true);
         for path in [&identity.old_path, &identity.new_path]
@@ -414,7 +419,7 @@ fn validate_relative_path(path: &Path) -> Result<()> {
 enum WorktreeContent {
     Bytes(Vec<u8>),
     Missing,
-    Oversized,
+    Oversized(Oversized),
 }
 
 pub(crate) fn open_worktree(repository: &Repository) -> Result<Dir> {
@@ -429,7 +434,11 @@ pub(crate) fn open_worktree(repository: &Repository) -> Result<Dir> {
         .map_err(|error| error.to_string())
 }
 
-fn worktree_content(repository: &Repository, path: &Path) -> Result<WorktreeContent> {
+fn worktree_content(
+    repository: &Repository,
+    path: &Path,
+    limit: PreviewLimit,
+) -> Result<WorktreeContent> {
     validate_relative_path(path)?;
     let mut directory = open_worktree(repository)?;
     let mut components = path.components().peekable();
@@ -481,33 +490,28 @@ fn worktree_content(repository: &Repository, path: &Path) -> Result<WorktreeCont
         if !metadata.is_file() {
             return Err("Les fichiers spéciaux ne sont pas lus comme des patches.".into());
         }
-        if metadata.len() > MAX_FILE_SIZE as u64 {
-            return Ok(WorktreeContent::Oversized);
+        if let Some(oversized) = limit.exceeded_by(metadata.len()) {
+            return Ok(WorktreeContent::Oversized(oversized));
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_FILE_SIZE as u64 + 1)
+        file.take(limit.bytes() + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| error.to_string())?;
-        return Ok(if bytes.len() > MAX_FILE_SIZE as usize {
-            WorktreeContent::Oversized
-        } else {
-            WorktreeContent::Bytes(bytes)
+        // The file can grow after its metadata was read.
+        return Ok(match limit.exceeded_by(bytes.len() as u64) {
+            Some(oversized) => WorktreeContent::Oversized(oversized),
+            None => WorktreeContent::Bytes(bytes),
         });
     }
     Err("Chemin de fichier introuvable.".into())
 }
 
-fn truncated_diff() -> FileDiff {
-    FileDiff {
-        binary: false,
-        truncated: true,
-        additions: 0,
-        deletions: 0,
-        hunks: vec![],
-    }
-}
-
-fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -> Result<FileDiff> {
+fn worktree_patch(
+    repository: &Repository,
+    delta: &DiffDelta<'_>,
+    path: &Path,
+    limit: PreviewLimit,
+) -> Result<FileDiff> {
     let diff_attribute = repository
         .get_attr_bytes(path, "diff", git2::AttrCheckFlags::empty())
         .map_err(|error| error.to_string())?;
@@ -516,13 +520,7 @@ fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -
         git2::AttrValue::False
     );
     if force_binary {
-        return Ok(FileDiff {
-            binary: true,
-            truncated: false,
-            additions: 0,
-            deletions: 0,
-            hunks: vec![],
-        });
+        return Ok(FileDiff::binary());
     }
     let force_text = matches!(
         git2::AttrValue::from_bytes(diff_attribute),
@@ -536,8 +534,8 @@ fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -
             .odb()
             .and_then(|odb| odb.read_header(old_id))
             .map_err(|error| error.to_string())?;
-        if size > MAX_FILE_SIZE as usize {
-            return Ok(truncated_diff());
+        if let Some(oversized) = limit.exceeded_by(size as u64) {
+            return Ok(FileDiff::oversized(oversized));
         }
         Some(
             repository
@@ -551,7 +549,7 @@ fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -
         // be an index-only path the host filesystem cannot represent).
         WorktreeContent::Missing
     } else {
-        worktree_content(repository, path)?
+        worktree_content(repository, path, limit)?
     };
     let new = match content {
         WorktreeContent::Bytes(bytes) => bytes,
@@ -559,10 +557,10 @@ fn worktree_patch(repository: &Repository, delta: &DiffDelta<'_>, path: &Path) -
         WorktreeContent::Missing => {
             return Err("Ce fichier a changé ou n'est plus présent dans cette liste.".into())
         }
-        WorktreeContent::Oversized => return Ok(truncated_diff()),
+        WorktreeContent::Oversized(oversized) => return Ok(FileDiff::oversized(oversized)),
     };
     let mut options = DiffOptions::new();
-    options.max_size(MAX_FILE_SIZE).force_text(force_text);
+    options.max_size(MAX_PATCH_SIZE).force_text(force_text);
     let new = if delta.new_file().mode() == git2::FileMode::Link {
         new
     } else {

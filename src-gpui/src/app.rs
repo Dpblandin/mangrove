@@ -1122,11 +1122,11 @@ impl Mangrove {
                 if self.settings || !self.chrome.read(cx).can_show_settings(cx) {
                     return;
                 }
-                let interval = self.chrome.read(cx).preferences.auto_fetch_interval;
+                let preferences = self.chrome.read(cx).preferences.clone();
                 // The settings give the keyboard to their navigation.
                 self.enter_settings(
-                    |settings, window, cx| {
-                        settings.set_interval(interval, window, cx);
+                    move |settings, window, cx| {
+                        settings.set_numbers(&preferences, window, cx);
                         settings.show(window, cx);
                     },
                     window,

@@ -16,11 +16,14 @@ use gpui_kit::component::input::{Copy, SelectAll};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{assets::IconName, prelude::*, *};
-use mangrove_core::model::{FileBlame, FileContent, FileDiff};
+use mangrove_core::model::{FileBlame, FileContent, FileDiff, Oversized, PreviewLimit};
 
 use crate::{
     diff,
-    format::{alt_shortcut_label, commit_date, compact_date, short_sha, shortcut_label},
+    format::{
+        alt_shortcut_label, byte_size, byte_size_above, commit_date, compact_date, short_sha,
+        shortcut_label,
+    },
     preferences::{DEFAULT_DIFF_FONT_SIZE, MAX_DIFF_FONT_SIZE, MIN_DIFF_FONT_SIZE, Preferences},
     syntax::{self, Kind, Token},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
@@ -32,6 +35,68 @@ pub enum CodeViewEvent {
     NavigateCommit(String),
     FontSizeChanged(f32),
     Parent,
+    /// Read the shown file again up to `PreviewLimit::MAX`.
+    ShowLarge,
+}
+
+/// The button under the explanation of an empty view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateAction {
+    Parent,
+    ShowLarge,
+}
+
+impl StateAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Parent => "Voir la version du premier parent",
+            Self::ShowLarge => "Afficher quand même",
+        }
+    }
+
+    fn event(self) -> CodeViewEvent {
+        match self {
+            Self::Parent => CodeViewEvent::Parent,
+            Self::ShowLarge => CodeViewEvent::ShowLarge,
+        }
+    }
+}
+
+/// Why a file above its read's preview limit shows no contents, and whether
+/// the highest limit can still show it.
+fn oversized_state(oversized: Oversized, unread: &str) -> (String, Option<StateAction>) {
+    let highest = PreviewLimit::MAX.bytes();
+    if oversized.size > highest {
+        return (
+            format!(
+                "Fichier de {} : {unread}. L’aperçu est limité à {}.",
+                byte_size_above(oversized.size, highest),
+                byte_size(highest)
+            ),
+            None,
+        );
+    }
+    (
+        format!(
+            "Fichier de {}, au-delà de la limite d’aperçu de {} : {unread}.\nCette limite se règle dans Paramètres › Général.",
+            byte_size_above(oversized.size, oversized.limit),
+            byte_size(oversized.limit)
+        ),
+        Some(StateAction::ShowLarge),
+    )
+}
+
+/// Why the blame of `content` is not read: blame keeps the background bound
+/// whatever limit the preview was read with.
+pub(crate) fn blame_unavailable(content: &FileContent) -> Option<String> {
+    let (size, bound) = (content.size as u64, PreviewLimit::MIN.bytes());
+    (matches!(content.kind.as_str(), "text" | "large") && size > bound).then(|| {
+        format!(
+            "Fichier de {} : le blame est disponible jusqu’à {}.",
+            byte_size_above(size, bound),
+            byte_size(bound)
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -368,11 +433,13 @@ pub struct CodeView {
     drag_point: Option<Point<Pixels>>,
     active_line: usize,
     show_blame: bool,
+    /// Replaces the file while blame is shown, when blame cannot run.
+    blame_unavailable: Option<String>,
     blame: Option<Arc<FileBlame>>,
     blame_indices: Vec<Option<usize>>,
     notice: Option<String>,
     state: Option<String>,
-    parent_available: bool,
+    action: Option<StateAction>,
     /// While set, an empty view names what is being read.
     loading: Option<String>,
     error: Option<String>,
@@ -419,11 +486,12 @@ impl CodeView {
             drag_point: None,
             active_line: 0,
             show_blame: false,
+            blame_unavailable: None,
             blame: None,
             blame_indices: Vec::new(),
             notice: None,
             state: Some("Sélectionnez un fichier pour voir ses modifications.".into()),
-            parent_available: false,
+            action: None,
             loading: None,
             error: None,
             ends_with_newline: false,
@@ -448,7 +516,8 @@ impl CodeView {
         self.drag_point = None;
         self.active_line = 0;
         self.state = None;
-        self.parent_available = false;
+        self.action = None;
+        self.blame_unavailable = None;
         self.notice = None;
         self.error = None;
         self.loading = None;
@@ -605,13 +674,16 @@ impl CodeView {
             self.hunk_rows = hunk_rows(&self.rows);
             self.diff_source = Some((diff.clone(), path.clone()));
             self.apply_reading_position();
-            if diff.binary {
+            if let Some(oversized) = diff.oversized {
+                let (state, action) = oversized_state(oversized, "son diff n’est pas calculé");
+                self.state = Some(state);
+                self.action = action;
+            } else if diff.binary {
                 self.state=Some("Fichier binaire\nLe contenu de ce fichier ne peut pas être affiché sous forme de diff texte.".into());
             } else if diff.hunks.is_empty() && !diff.truncated {
                 self.state=Some("Aucune différence de contenu texte. Le changement peut concerner le nom ou les permissions du fichier.".into());
-            }
-            if diff.truncated {
-                self.notice=Some("Aperçu limité pour préserver la réactivité. Le fichier est volumineux ou le diff dépasse la limite d’affichage.".into());
+            } else if diff.truncated {
+                self.notice = Some("Aperçu limité à 2 000 lignes et 512 Kio de diff.".into());
             }
             self.append_line_notice();
         }
@@ -654,28 +726,39 @@ impl CodeView {
         self.reset(rows, window, cx);
         self.content_source = Some(content.clone());
         self.apply_reading_position();
-        self.state = match content.kind.as_str() {
-            "binary" => Some(
-                "Fichier binaire ou encodage non UTF-8 : aucun affichage texte ni blame.".into(),
-            ),
-            "deleted" => {
-                self.parent_available = content.parent_sha.is_some();
-                Some("Ce fichier est absent à la révision sélectionnée.".into())
+        self.blame_unavailable = blame_unavailable(&content);
+        self.state = if let Some(oversized) = content.oversized {
+            let (state, action) = oversized_state(oversized, "son contenu n’est pas chargé");
+            self.action = action;
+            Some(state)
+        } else {
+            match content.kind.as_str() {
+                "binary" => Some(
+                    "Fichier binaire ou encodage non UTF-8 : aucun affichage texte ni blame."
+                        .into(),
+                ),
+                "deleted" => {
+                    self.action = content.parent_sha.is_some().then_some(StateAction::Parent);
+                    Some("Ce fichier est absent à la révision sélectionnée.".into())
+                }
+                "submodule" => {
+                    Some("Sous-module : son contenu appartient à un autre dépôt.".into())
+                }
+                "unsupported" => {
+                    Some("Ce type d’objet Git ne peut pas être affiché comme un fichier.".into())
+                }
+                _ if content.lines.is_empty() && !content.truncated => {
+                    Some("Fichier vide à cette révision.".into())
+                }
+                _ => None,
             }
-            "submodule" => Some("Sous-module : son contenu appartient à un autre dépôt.".into()),
-            "large" => Some(
-                "Fichier supérieur à 2 Mio : son contenu et son blame ne sont pas chargés.".into(),
-            ),
-            "unsupported" => {
-                Some("Ce type d’objet Git ne peut pas être affiché comme un fichier.".into())
-            }
-            _ if content.lines.is_empty() && !content.truncated => {
-                Some("Fichier vide à cette révision.".into())
-            }
-            _ => None,
         };
-        if content.truncated {
-            self.notice=Some("Aperçu limité à 2 000 lignes et 256 Kio de texte. Le blame concerne uniquement les lignes affichées.".into());
+        if content.truncated && content.oversized.is_none() {
+            self.notice = Some(if self.blame_unavailable.is_some() {
+                "Aperçu limité à 2 000 lignes et 256 Kio de texte.".into()
+            } else {
+                "Aperçu limité à 2 000 lignes et 256 Kio de texte. Le blame concerne uniquement les lignes affichées.".into()
+            });
         } else if content.size > 0 && !content.ends_with_newline {
             self.notice = Some("Pas de saut de ligne à la fin du fichier.".into());
         }
@@ -797,7 +880,8 @@ impl CodeView {
         self.error = None;
         self.loading = None;
         self.notice = None;
-        self.parent_available = false;
+        self.action = None;
+        self.blame_unavailable = None;
         self.blame = None;
         self.blame_indices.clear();
         self.hunk_rows.clear();
@@ -1718,7 +1802,17 @@ impl Render for CodeView {
                 .h(px(0.)),
             );
         let reading = self.loading.as_ref().filter(|_| self.rows.is_empty());
-        if let Some(state) = self.error.as_ref().or(reading).or(self.state.as_ref()) {
+        let blame_unavailable = self
+            .blame_unavailable
+            .as_ref()
+            .filter(|_| self.show_blame && !self.is_diff);
+        // The action belongs to the state: an error, a read in progress or an
+        // unavailable blame shows no button.
+        let (message, action) = match self.error.as_ref().or(reading).or(blame_unavailable) {
+            Some(message) => (Some(message), None),
+            None => (self.state.as_ref(), self.action),
+        };
+        if let Some(state) = message {
             root = root.child(
                 div()
                     .flex()
@@ -1750,14 +1844,14 @@ impl Render for CodeView {
                         },
                     ))
                     .child(div().max_w(px(300.)).child(state.clone()))
-                    .when(self.parent_available, |view| {
+                    .when_some(action, |view, action| {
                         view.child(
                             div()
-                                .id("code-parent")
+                                .id("code-state-action")
                                 .role(Role::Button)
                                 .focusable()
                                 .tab_index(0)
-                                .aria_label("Voir la version du premier parent")
+                                .aria_label(action.label())
                                 .px(px(12.))
                                 .py(px(7.))
                                 .border_1()
@@ -1767,11 +1861,11 @@ impl Render for CodeView {
                                 .text_color(rgb(p.text))
                                 .cursor_pointer()
                                 .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                                .child("Voir la version du premier parent")
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(CodeViewEvent::Parent)))
-                                .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+                                .child(action.label())
+                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(action.event())))
+                                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
                                     if is_activation(event) {
-                                        cx.emit(CodeViewEvent::Parent);
+                                        cx.emit(action.event());
                                         cx.stop_propagation();
                                     }
                                 })),
@@ -1936,7 +2030,8 @@ fn icon_button(
 mod tests {
     use super::{
         CodeLineLayout, DisplayLine, MAX_DISPLAY_BYTES, OMITTED_LINE, Position, Row, Selection,
-        hunk_rows, hunk_target, row_geometry, selected_rows_text, visible_shaped_line,
+        StateAction, blame_unavailable, hunk_rows, hunk_target, oversized_state, row_geometry,
+        selected_rows_text, visible_shaped_line,
     };
     use crate::virtual_scroll::VirtualScrollHandle;
     use gpui_kit::component::scroll::ScrollbarHandle;
@@ -1944,7 +2039,68 @@ mod tests {
         Bounds, FontId, GlyphId, LineLayout, ListAlignment, ListState, ScrollHandle, ShapedGlyph,
         ShapedLine, ShapedRun, point, px, size,
     };
+    use mangrove_core::model::{FileContent, Oversized, PreviewLimit};
     use std::sync::Arc;
+
+    #[test]
+    fn oversized_files_name_their_size_and_limit_and_offer_the_highest_one() {
+        let (state, action) = oversized_state(
+            Oversized {
+                size: 5_666_173,
+                limit: PreviewLimit::MIN.bytes(),
+            },
+            "son diff n’est pas calculé",
+        );
+        assert_eq!(
+            state,
+            "Fichier de 5,4\u{a0}Mio, au-delà de la limite d’aperçu de 2\u{a0}Mio : son diff n’est pas calculé.\nCette limite se règle dans Paramètres › Général."
+        );
+        assert_eq!(action, Some(StateAction::ShowLarge));
+        // The highest limit still admits a file of exactly its size.
+        let at_highest = Oversized {
+            size: PreviewLimit::MAX.bytes(),
+            limit: PreviewLimit::MIN.bytes(),
+        };
+        assert_eq!(
+            oversized_state(at_highest, "").1,
+            Some(StateAction::ShowLarge)
+        );
+        let (state, action) = oversized_state(
+            Oversized {
+                size: PreviewLimit::MAX.bytes() + 1,
+                limit: PreviewLimit::MAX.bytes(),
+            },
+            "son contenu n’est pas chargé",
+        );
+        assert_eq!(
+            state,
+            "Fichier de 65\u{a0}Mio : son contenu n’est pas chargé. L’aperçu est limité à 64\u{a0}Mio."
+        );
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn blame_is_unavailable_above_the_background_bound_whatever_the_preview_read() {
+        let content = |kind: &str, size: usize| FileContent {
+            sha: String::new(),
+            path: String::new(),
+            file_key: String::new(),
+            kind: kind.into(),
+            size,
+            lines: Vec::new(),
+            truncated: false,
+            ends_with_newline: true,
+            parent_sha: None,
+            oversized: None,
+        };
+        assert_eq!(blame_unavailable(&content("text", 2 << 20)), None);
+        assert_eq!(
+            blame_unavailable(&content("text", 3 << 20)).as_deref(),
+            Some("Fichier de 3\u{a0}Mio : le blame est disponible jusqu’à 2\u{a0}Mio.")
+        );
+        assert!(blame_unavailable(&content("large", 20 << 20)).is_some());
+        assert_eq!(blame_unavailable(&content("binary", 20 << 20)), None);
+    }
 
     fn row(kind: &str) -> Row {
         Row::new(kind.into(), String::new(), String::new(), "line")
@@ -2250,6 +2406,7 @@ mod tests {
         let diff = || {
             Arc::new(FileDiff {
                 binary: false,
+                oversized: None,
                 truncated: false,
                 additions: 400,
                 deletions: 0,

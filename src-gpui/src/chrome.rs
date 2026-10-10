@@ -182,6 +182,12 @@ impl Chrome {
                     SettingsEvent::ImagePreviewsChanged(value) => {
                         this.preferences.show_image_previews = *value
                     }
+                    SettingsEvent::LargePreviewsChanged(value) => {
+                        this.preferences.show_large_previews = *value
+                    }
+                    SettingsEvent::PreviewLimitChanged(value) => {
+                        this.preferences.large_preview_limit = *value
+                    }
                     SettingsEvent::FontSizeChanged(value) => {
                         this.preferences.set_font_size_offset(*value)
                     }
@@ -379,7 +385,7 @@ impl Chrome {
         };
         self.preferences.auto_fetch_interval = interval;
         self.settings.update(cx, |settings, cx| {
-            settings.set_interval(interval, window, cx)
+            settings.set_numbers(&self.preferences, window, cx)
         });
         self.preferences_changed(cx);
     }
@@ -611,7 +617,7 @@ impl Chrome {
             self.preferences.apply_palette(cx);
             self.applied_theme = self.preferences.theme;
             self.settings.update(cx, |view, cx| {
-                view.set_interval(self.preferences.auto_fetch_interval, window, cx);
+                view.set_numbers(&self.preferences, window, cx);
                 view.set_selected_theme(self.preferences.theme, window, cx);
             });
         }

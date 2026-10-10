@@ -160,6 +160,16 @@ impl Mangrove {
                 "image aperçu preview settings",
             ),
             CommandEntry::new(
+                Command::ToggleLargePreviews,
+                if prefs.show_large_previews {
+                    "Désactiver l’aperçu des fichiers volumineux"
+                } else {
+                    "Activer l’aperçu des fichiers volumineux"
+                },
+                "Paramètres",
+                "fichier volumineux gros taille limite aperçu diff settings",
+            ),
+            CommandEntry::new(
                 Command::ToggleAutoFetch,
                 if prefs.auto_fetch_interval == 0 {
                     "Activer l’auto-fetch"
@@ -617,6 +627,10 @@ impl Mangrove {
             }),
             Command::ToggleImagePreviews => self.chrome.update(cx, |chrome, cx| {
                 chrome.preferences.show_image_previews = !chrome.preferences.show_image_previews;
+                chrome.prefs_changed(window, cx);
+            }),
+            Command::ToggleLargePreviews => self.chrome.update(cx, |chrome, cx| {
+                chrome.preferences.show_large_previews = !chrome.preferences.show_large_previews;
                 chrome.prefs_changed(window, cx);
             }),
             Command::ToggleAutoFetch => self

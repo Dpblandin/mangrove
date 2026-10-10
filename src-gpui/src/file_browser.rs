@@ -188,6 +188,8 @@ pub enum FileBrowserEvent {
     Close,
     NavigateCommit(String),
     FontSizeChanged(f32),
+    /// The inspector's patch was skipped: read it up to `PreviewLimit::MAX`.
+    ShowLarge,
 }
 
 struct HistoryRequest {
@@ -195,10 +197,11 @@ struct HistoryRequest {
     direction: i8,
 }
 enum ReadKind {
-    Diff,
+    Diff(PreviewLimit),
     Content {
         blame: bool,
         existing: Option<Arc<FileContent>>,
+        limit: PreviewLimit,
     },
     History(Option<HistoryRequest>),
     Inspect(String),
@@ -237,6 +240,8 @@ pub struct FileBrowser {
     content: Option<Arc<FileContent>>,
     diff: Option<Arc<FileDiff>>,
     diff_tokens: Option<Tokens>,
+    /// The user asked to read this target up to `PreviewLimit::MAX`.
+    show_large: bool,
     blame: Option<Arc<FileBlame>>,
     history: Option<Arc<FileHistoryPage>>,
     cursor: Option<String>,
@@ -290,6 +295,7 @@ impl FileBrowser {
                 cx.emit(FileBrowserEvent::FontSizeChanged(*size))
             }
             CodeViewEvent::Parent => view.parent_version(cx),
+            CodeViewEvent::ShowLarge => view.show_large(cx),
         });
         Self {
             engine,
@@ -306,6 +312,7 @@ impl FileBrowser {
             content: None,
             diff: None,
             diff_tokens: None,
+            show_large: false,
             blame: None,
             history: None,
             cursor: None,
@@ -398,11 +405,14 @@ impl FileBrowser {
         cx.notify();
     }
     pub fn set_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
-        if self.preferences.font_size_offset == preferences.font_size_offset
-            && self.preferences.diff_font_size == preferences.diff_font_size
-            && self.preferences.show_image_previews == preferences.show_image_previews
-            && self.preferences.theme == preferences.theme
-        {
+        let old = self.preferences.preview_limit();
+        self.apply_preferences(preferences, cx);
+        if old != self.preferences.preview_limit() {
+            self.limit_changed(old, cx);
+        }
+    }
+    fn apply_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
+        if self.preferences.same_appearance(&preferences) {
             self.preferences = preferences;
             return;
         }
@@ -464,6 +474,7 @@ impl FileBrowser {
         self.target = target;
         self.diff = diff;
         self.diff_tokens = None;
+        self.show_large = false;
         self.content = None;
         self.blame = None;
         self.history = None;
@@ -531,8 +542,13 @@ impl FileBrowser {
         let Some(target) = self.target.clone() else {
             return;
         };
+        let limit = if self.show_large {
+            PreviewLimit::MAX
+        } else {
+            self.preferences.preview_limit()
+        };
         let kind = match self.mode {
-            FileView::Diff if self.diff.is_none() => ReadKind::Diff,
+            FileView::Diff if self.diff.is_none() => ReadKind::Diff(limit),
             FileView::Diff => {
                 // Switching tabs cancels the old generation. Resume coloring a
                 // retained revision patch when returning before syntax finished.
@@ -543,10 +559,12 @@ impl FileBrowser {
             FileView::File if self.content.is_none() => ReadKind::Content {
                 blame: false,
                 existing: self.content.clone(),
+                limit,
             },
             FileView::Blame if self.blame.is_none() => ReadKind::Content {
                 blame: true,
                 existing: self.content.clone(),
+                limit,
             },
             FileView::History if self.history.is_none() || page.is_some() => {
                 ReadKind::History(Some(page.unwrap_or_else(|| HistoryRequest {
@@ -609,6 +627,67 @@ impl FileBrowser {
         };
         self.select_target(Some(next), None, cx);
         self.show(mode, cx);
+    }
+    /// Reads the shown file again up to the highest preview limit.
+    fn show_large(&mut self, cx: &mut Context<Self>) {
+        if self.mode == FileView::Diff
+            && self
+                .diff
+                .as_ref()
+                .is_some_and(|diff| self.source.owns_diff(diff))
+        {
+            // The inspector reads the selected commit's own patch.
+            cx.emit(FileBrowserEvent::ShowLarge);
+            return;
+        }
+        self.show_large = true;
+        let diff = self
+            .diff
+            .as_ref()
+            .is_some_and(|diff| diff.oversized.is_some() && !self.source.owns_diff(diff));
+        let content = self
+            .content
+            .as_ref()
+            .is_some_and(|content| content.oversized.is_some());
+        self.read_again(diff, content, cx);
+    }
+    /// Reads again what the old limit could have answered differently. Blame
+    /// keeps its own bound and is read again only with new contents.
+    fn limit_changed(&mut self, old: PreviewLimit, cx: &mut Context<Self>) {
+        if self.show_large {
+            return;
+        }
+        let new = self.preferences.preview_limit();
+        // A read left whole under one limit stays whole under a higher one.
+        let diff = self.diff.as_ref().is_some_and(|diff| {
+            !self.source.owns_diff(diff) && (diff.oversized.is_some() || new < old)
+        });
+        let content = self.content.as_ref().is_some_and(|content| {
+            content.oversized.is_some() || content.size as u64 > new.bytes()
+        });
+        self.read_again(diff, content, cx);
+    }
+    /// Drops the stale diff and contents, then restarts the view's read if
+    /// it showed them or was still reading under the previous limit. Other
+    /// views read again once shown.
+    fn read_again(&mut self, diff: bool, content: bool, cx: &mut Context<Self>) {
+        if diff {
+            self.diff = None;
+            self.diff_tokens = None;
+        }
+        if content {
+            self.content = None;
+            self.blame = None;
+        }
+        let (stale, reading) = match self.mode {
+            FileView::Diff => (diff, self.diff.is_none()),
+            FileView::File | FileView::Blame => (content, self.content.is_none()),
+            FileView::History => (false, false),
+        };
+        if stale || self.loading && reading {
+            self.loading = false;
+            self.show(self.mode, cx);
+        }
     }
     fn parent_version(&mut self, cx: &mut Context<Self>) {
         let (Some(target), Some(parent)) = (
@@ -694,21 +773,27 @@ impl FileBrowser {
                     let t = &request.target;
                     let result: Result<ReadResult, String> = (|| {
                         Ok(match &request.kind {
-                            ReadKind::Diff => {
+                            ReadKind::Diff(limit) => {
                                 let diff = Arc::new(engine.file_revision_diff(
                                     &t.session_id,
                                     &t.sha,
                                     &t.file_key,
+                                    *limit,
                                 )?);
                                 ReadResult::Diff(diff)
                             }
-                            ReadKind::Content { blame, existing } => {
+                            ReadKind::Content {
+                                blame,
+                                existing,
+                                limit,
+                            } => {
                                 let content = match existing {
                                     Some(content) => content.clone(),
                                     None => Arc::new(engine.file_content(
                                         &t.session_id,
                                         &t.sha,
                                         &t.file_key,
+                                        *limit,
                                     )?),
                                 };
                                 if live_generation.load(Ordering::Acquire) != request.generation {
@@ -719,6 +804,7 @@ impl FileBrowser {
                                 let attribution = if *blame
                                     && content.kind == "text"
                                     && !content.lines.is_empty()
+                                    && crate::code_view::blame_unavailable(&content).is_none()
                                 {
                                     Some(Arc::new(engine.file_blame(
                                         &t.session_id,
@@ -746,7 +832,7 @@ impl FileBrowser {
                     #[cfg(feature = "app-benchmark")]
                     {
                         let stage = match &request.kind {
-                            ReadKind::Diff => "patch_git",
+                            ReadKind::Diff(_) => "patch_git",
                             ReadKind::Inspect(_) => "details_git",
                             _ => "file_git",
                         };
@@ -1576,9 +1662,11 @@ pub fn reading_label(view: FileView, path: &str) -> String {
         FileView::File | FileView::History => format!("Lecture de {name}…"),
     }
 }
-/// Exact line totals, unknown for files skipped before reading their patch.
+/// Exact line totals, unknown when the preview limit skipped the patch.
 pub fn line_counts(diff: &FileDiff) -> Option<(usize, usize)> {
-    (!diff.truncated || !diff.hunks.is_empty()).then_some((diff.additions, diff.deletions))
+    diff.oversized
+        .is_none()
+        .then_some((diff.additions, diff.deletions))
 }
 pub fn diff_counts(additions: usize, deletions: usize, p: Palette, o: f32) -> Div {
     div()
@@ -1620,7 +1708,7 @@ mod tests {
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
     use mangrove_core::{
         Workspace,
-        model::{DiffHunk, FileDiff},
+        model::{DiffHunk, FileDiff, Oversized},
     };
     use std::sync::Arc;
 
@@ -1639,6 +1727,7 @@ mod tests {
         PreparedDiff {
             diff: Arc::new(FileDiff {
                 binary: false,
+                oversized: None,
                 truncated: false,
                 additions: 0,
                 deletions: 0,
@@ -1778,6 +1867,7 @@ mod tests {
     fn line_counts_are_unknown_only_for_patches_skipped_by_size() {
         let mut diff = FileDiff {
             binary: false,
+            oversized: None,
             truncated: false,
             additions: 8,
             deletions: 2,
@@ -1785,7 +1875,14 @@ mod tests {
         };
         assert_eq!(line_counts(&diff), Some((8, 2)));
         diff.truncated = true;
+        // A first line above the display budget leaves no hunk to show.
+        assert_eq!(line_counts(&diff), Some((8, 2)));
+        diff.oversized = Some(Oversized {
+            size: 3 << 20,
+            limit: 2 << 20,
+        });
         assert_eq!(line_counts(&diff), None);
+        diff.oversized = None;
         diff.hunks.push(DiffHunk {
             header: "@@ -1 +1 @@".into(),
             lines: Vec::new(),

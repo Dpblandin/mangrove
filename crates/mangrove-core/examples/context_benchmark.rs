@@ -1,5 +1,5 @@
 //! Aggregate-only measurements. Never print source paths, refs, authors or contents.
-use mangrove_core::{Result, Workspace};
+use mangrove_core::{model::PreviewLimit, Result, Workspace};
 use serde_json::{json, Value};
 use std::{
     env, thread,
@@ -67,7 +67,13 @@ fn main() -> Result<()> {
         {
             stash_diff = samples(|_| {
                 Ok(workspace
-                    .stash_diff(&info.id, &stash.sha, &group.area, &file.file_key)?
+                    .stash_diff(
+                        &info.id,
+                        &stash.sha,
+                        &group.area,
+                        &file.file_key,
+                        PreviewLimit::MIN,
+                    )?
                     .hunks
                     .iter()
                     .map(|hunk| hunk.lines.len())

@@ -154,7 +154,54 @@ pub struct DiffHunk {
     pub lines: Vec<DiffLine>,
 }
 
-#[derive(Debug, Serialize)]
+/// The largest file, in bytes, whose contents a diff or file preview reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PreviewLimit(u64);
+
+impl PreviewLimit {
+    /// Background reads keep this bound; it is also the lowest limit.
+    pub const MIN: Self = Self(2 * 1024 * 1024);
+    /// A full rewrite of a text file this size already needs about 1 GiB of
+    /// transient memory, and about 0.7 s on an Apple M4 Pro.
+    pub const MAX: Self = Self(64 * 1024 * 1024);
+
+    /// A limit of `mib` mebibytes, kept between `MIN` and `MAX`.
+    pub const fn from_mib(mib: u64) -> Self {
+        let bytes = mib.saturating_mul(1024 * 1024);
+        if bytes < Self::MIN.0 {
+            Self::MIN
+        } else if bytes > Self::MAX.0 {
+            Self::MAX
+        } else {
+            Self(bytes)
+        }
+    }
+
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
+
+    /// A file of `size` bytes, or its patch, when it is above this limit.
+    pub(crate) fn exceeded_by(self, size: u64) -> Option<Oversized> {
+        (size > self.0).then_some(Oversized {
+            size,
+            limit: self.0,
+        })
+    }
+}
+
+/// Contents left unread because the file is above the read's preview limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Oversized {
+    /// Size in bytes of a side above the limit: the larger side when both
+    /// sizes come from object headers.
+    pub size: u64,
+    /// The preview limit of the read, in bytes.
+    pub limit: u64,
+}
+
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
     pub binary: bool,
@@ -162,6 +209,25 @@ pub struct FileDiff {
     pub additions: usize,
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
+    /// Set, with `truncated` and no hunks, when the patch was not computed.
+    pub oversized: Option<Oversized>,
+}
+
+impl FileDiff {
+    pub(crate) fn oversized(oversized: Oversized) -> Self {
+        Self {
+            truncated: true,
+            oversized: Some(oversized),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn binary() -> Self {
+        Self {
+            binary: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +242,8 @@ pub struct FileContent {
     pub truncated: bool,
     pub ends_with_newline: bool,
     pub parent_sha: Option<String>,
+    /// Set for the `large` kind.
+    pub oversized: Option<Oversized>,
 }
 
 /// The exact comparison whose image bytes should be read. Paths use the same

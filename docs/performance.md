@@ -41,7 +41,33 @@ Le benchmark place son cache dans un dossier temporaire de l’OS et le supprime
 
 ## Prochaines mesures
 
-Avant de fixer des objectifs chiffrés, mesurer plusieurs tailles et vrais dépôts : graphes denses, refs nombreuses, messages longs, fichiers volumineux et changements de références. Pour les campagnes GPUI, mesurer le temps jusqu’au premier affichage natif, la fluidité du scroll et les mémoires RSS du processus. Répéter les ouvertures à cache filesystem froid et chaud. Conserver les percentiles et le contexte matériel pour comparer les futures optimisations. Les benchmarks du moteur seul n'incluent pas ces coûts de rendu.
+Avant de fixer des objectifs chiffrés, mesurer plusieurs tailles et vrais dépôts : graphes denses, refs nombreuses, messages longs et changements de références. Les diffs de fichiers volumineux sont mesurés [plus bas](#diffs-de-fichiers-volumineux). Pour les campagnes GPUI, mesurer le temps jusqu’au premier affichage natif, la fluidité du scroll et les mémoires RSS du processus. Répéter les ouvertures à cache filesystem froid et chaud. Conserver les percentiles et le contexte matériel pour comparer les futures optimisations. Les benchmarks du moteur seul n'incluent pas ces coûts de rendu.
+
+## Diffs de fichiers volumineux
+
+Mesure du 10 octobre 2026, Apple M4 Pro, 48 Gio de RAM, macOS ARM, Rust release avec ThinLTO. Pour chaque cas, `large_diff_benchmark` crée un dépôt de deux commits, puis lit dix fois le diff du fichier avec `Workspace::file_diff` dans un processus distinct, après indexation. Le temps est la médiane des dix lectures ; la mémoire est le pic RSS du processus moins son RSS avant la première lecture. Les objets sont loose et le cache de l’OS est chaud. Ces chiffres concernent le moteur seul : l’interface reçoit au plus 2 000 lignes et 512 Kio de patch, déjà mesurés dans [performance-gpui.md](performance-gpui.md).
+
+La borne historique de 2 Mio n’avait pas été mesurée avant d’être posée. Le coût d’un diff croît linéairement, de 4 à 12 ms par Mio selon le fichier et le changement ; à 2 Mio, il reste sous 20 ms. Le fichier `docs/performance-gpui.html` de 5,4 Mio, dont seize lignes changent à `ad0604e`, se lit en 38 ms avec 31 à 39 Mio de mémoire supplémentaire. La limite d’aperçu vaut donc 8 Mio par défaut : au plus 75 ms et 64 Mio dans les cas mesurés. Elle se règle jusqu’à 64 Mio.
+
+| Fichier et changement                   | Taille | Temps p50 | Mémoire, `git2::Patch` | Mémoire, en flux |
+| --------------------------------------- | -----: | --------: | ---------------------: | ---------------: |
+| Texte, 32 lignes modifiées              |  8 Mio |     63 ms |                 53 Mio |           58 Mio |
+| Texte entièrement réécrit               |  8 Mio |     69 ms |                131 Mio |           64 Mio |
+| Texte, 32 lignes modifiées              | 64 Mio |    584 ms |                352 Mio |          349 Mio |
+| Texte ajouté                            | 64 Mio |    303 ms |                538 Mio |          216 Mio |
+| Texte entièrement réécrit               | 64 Mio |    657 ms |                994 Mio |          354 Mio |
+| Lignes répétitives, une sur dix changée | 64 Mio |    792 ms |                509 Mio |          280 Mio |
+| Lignes de 64 Kio, 32 modifiées          | 64 Mio |    531 ms |                180 Mio |          180 Mio |
+
+Les temps sont ceux de la version en flux ; ils restent à 8 % près ceux de `git2::Patch`. Un `git2::Patch` conserve un enregistrement par ligne du patch, alors que l’interface n’en affiche que 2 000. Sur macOS, ces tableaux qui grandissent par réallocations fragmentent la mémoire : chaque lecture d’une réécriture de 64 Mio laissait environ 64 Mio de plus dans le RSS, d’où les 994 Mio après dix lectures. Les diffs entre deux blobs (commits, index, stashes et révisions de l’historique) passent maintenant par `Repository::diff_blobs` : les lignes sont comptées au passage et seules les lignes affichées sont gardées. Le RSS reste alors stable d’une lecture à l’autre. Le reste du coût vient des deux blobs lus et des structures de xdiff, proportionnelles à la taille. Les modifications non indexées comparent un blob à un fichier local, que git2 ne sait pas lire en flux : elles conservent `git2::Patch`.
+
+Les 93 cas mesurés avec `git2::Patch` et les 84 cas en flux sont dans [performance-large-files.json](performance-large-files.json) : textes, lignes de 64 Kio, fichiers d’une ligne et lignes répétitives, modifiés, ajoutés, réécrits ou changés une ligne sur dix, de 1 à 64 Mio. Le premier passage a été mesuré avec la garde de 2 Mio relevée à 1 Gio, jusqu’à 128 Mio.
+
+```sh
+cargo build --release --locked -p mangrove-core --example large_diff_benchmark
+target/release/examples/large_diff_benchmark fixture /tmp/large-rewrite 64 text rewrite
+/usr/bin/time -l target/release/examples/large_diff_benchmark case /tmp/large-rewrite
+```
 
 ## Contenu, historique de fichier et blame
 
