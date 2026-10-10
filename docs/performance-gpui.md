@@ -202,3 +202,25 @@ MANGROVE_BENCH_HEAVY=00-large.rs \
 Le contrôle natif avec accessibilité active vérifie le défilement de cette liste, le changement de fichier avec les flèches, le passage central/compact, Home pour revenir au premier fichier et le scroll du grand diff compact. L’historique et le diff restent présents dans l’arbre accessible. Le cache est désactivé pendant ce contrôle, comme prévu par le garde. Un contrôle fonctionnel distinct du scénario historique vérifie le cache de la consultation de commit et son propre scroll ; ses timings ne sont pas ajoutés à la comparaison.
 
 Validation du complément : 77 tests release de production, 82 avec `app-benchmark`, Clippy toutes cibles avec `-D warnings`, formatage et packaging macOS release. Les bundles de test isolés sont signés ad hoc et leur signature est vérifiée.
+
+## Surlignage des mots modifiés
+
+Le 10 octobre 2026, sur le même Apple M4 Pro, la sonde ignorée `changed_words_timing_probe` mesure le seul calcul des mots modifiés en release : 41 exécutions par cas, sur des lignes dont un nombre, un mot et un booléen changent. Elle exclut la lecture Git, la coloration, la publication et le rendu.
+
+En ms, **p50 / p95**.
+
+| Cas                                     | Mots modifiés |
+| --------------------------------------- | ------------: |
+| 1 000 paires (2 000 lignes), un bloc    |   1,69 / 2,01 |
+| 1 000 paires, blocs de 10 paires        |   3,39 / 3,56 |
+| 2 000 paires (4 000 lignes), un bloc    |   3,32 / 3,39 |
+| 2 000 paires, blocs de 10 paires        |   6,93 / 7,16 |
+
+L’objectif était de rester sous 20 ms au p95 pour 2 000 lignes appariées ; un patch affiché compte au plus 2 000 lignes. Sur trois exécutions, les p50 varient de moins de 0,3 ms et, avec la charge de fond, les p95 restent sous 5,4 ms. Les blocs de 10 paires passent par l’appariement par ressemblance, tandis qu’un bloc de plus de 1 024 combinaisons apparie ses lignes dans l’ordre. Le calcul précède la coloration dans la même tâche de fond : il retarde d’autant la publication des couleurs, pas l’affichage du patch brut.
+
+La fixture `--large-change` modifie aussi 960 paires de lignes de `packages/core/src/search.ts`, en 48 blocs de 20 séparés par une ligne inchangée. Son patch de 1 973 lignes reste sous la borne d’affichage et le commit garde ses 46 fichiers. Sur ce fichier, `inspect-latency` relève 3,7 ms pour les mots modifiés (5 759 plages) et 57 ms pour la coloration, en un seul lancement : ce relevé n’est pas un percentile.
+
+```sh
+cargo test --release --locked --manifest-path src-gpui/Cargo.toml \
+  changed_words_timing_probe -- --ignored --nocapture
+```
