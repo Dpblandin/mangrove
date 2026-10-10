@@ -378,11 +378,8 @@ impl Chrome {
                 return;
             }
             IntegrationsEvent::ProfileSelected(id) => {
-                if profiles.active_profile_id == *id {
-                    return;
-                }
-                self.save_preferences(cx);
-                profiles.active_profile_id = id.clone();
+                self.request_profile_switch(id, window, cx);
+                return;
             }
             IntegrationsEvent::ProfileCreated(name) => {
                 let mut index = 1;
@@ -395,6 +392,29 @@ impl Chrome {
                 }
                 let profile = Profile::new(format!("profile-{index}"), name.clone());
                 profiles.profiles.push(profile);
+            }
+            IntegrationsEvent::ProfileRenamed { profile_id, name } => {
+                if profiles.rename(profile_id, name).is_err() {
+                    self.profile_save_failed(
+                        event,
+                        "Choisissez un nom de profil de 128 caractères au plus.".into(),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+            }
+            IntegrationsEvent::ProfileDeleted(id) => {
+                if profiles.remove(id).is_err() {
+                    self.profile_save_failed(
+                        event,
+                        "Le profil actif et le dernier profil ne peuvent pas être supprimés."
+                            .into(),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
             }
             IntegrationsEvent::AccountAdded {
                 profile_id,
@@ -442,6 +462,68 @@ impl Chrome {
                 }
             }
         }
+        self.commit_profiles(event, profiles, window, cx);
+    }
+    /// Switching profiles closes the repository tabs, so ask first.
+    fn request_profile_switch(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.tabs.iter().filter(|tab| tab.path.is_some()).count();
+        let Some(profile) = self
+            .profiles
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+        else {
+            return;
+        };
+        if open == 0 || self.profiles.active_profile_id == id {
+            return self.select_profile(id, window, cx);
+        }
+        let detail = if open == 1 {
+            "L’onglet de dépôt ouvert sera fermé.".to_string()
+        } else {
+            format!("Les {open} onglets de dépôts ouverts seront fermés.")
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Passer au profil « {} » ?", profile.name),
+            Some(&detail),
+            &[
+                PromptButton::ok("Changer de profil"),
+                PromptButton::cancel("Annuler"),
+            ],
+            cx,
+        );
+        let id = id.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |chrome, cx| chrome.select_profile(&id, window, cx))
+                });
+            }
+        })
+        .detach();
+    }
+    fn select_profile(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.profiles.active_profile_id == id {
+            return;
+        }
+        self.save_preferences(cx);
+        let mut profiles = self.profiles.clone();
+        profiles.active_profile_id = id.to_string();
+        self.commit_profiles(
+            &IntegrationsEvent::ProfileSelected(id.to_string()),
+            profiles,
+            window,
+            cx,
+        );
+    }
+    fn commit_profiles(
+        &mut self,
+        event: &IntegrationsEvent,
+        profiles: Profiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(store) = &self.profile_store else {
             self.profile_save_failed(event, "Les profils ne peuvent pas être enregistrés. Vérifiez leur fichier de configuration.".into(), window, cx);
             cx.notify();
@@ -451,6 +533,10 @@ impl Chrome {
             self.profile_save_failed(event, error.to_string(), window, cx);
             cx.notify();
             return;
+        }
+        if let IntegrationsEvent::ProfileDeleted(id) = event {
+            // A later profile may reuse this identifier.
+            let _ = Preferences::remove_for_profile(id);
         }
         let changed_profile = profiles.active_profile_id != self.profiles.active_profile_id;
         self.profiles = profiles;
@@ -483,6 +569,13 @@ impl Chrome {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let message = if matches!(event, IntegrationsEvent::ProfileDeleted(_)) {
+            format!(
+                "Les identifiants du profil ont été retirés du coffre, mais le profil n’a pas été supprimé : {message}"
+            )
+        } else {
+            message
+        };
         self.integrations.update(cx, |view, cx| {
             if let IntegrationsEvent::AccountAdded {
                 profile_id,
@@ -821,6 +914,20 @@ impl Chrome {
         cx.notify();
     }
 
+    /// Asks before leaving the clone screen while a clone runs. Returns true
+    /// when `leave` waits for that answer; it runs once the user confirms.
+    pub fn confirm_leave_repository_browser(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        leave: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) -> bool {
+        self.repository_browser
+            && self
+                .integrations
+                .update(cx, |view, cx| view.confirm_cancel_clone(window, cx, leave))
+    }
+
     pub fn close_repository_browser(&mut self, cx: &mut Context<Self>) {
         if !self.repository_browser {
             return;
@@ -867,7 +974,7 @@ impl Chrome {
                                 div()
                                     .text_size(px(16. + offset))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Dépôts distants"),
+                                    .child("Cloner un dépôt"),
                             ),
                     )
                     .child(
@@ -902,7 +1009,7 @@ impl Chrome {
                                     .focus_visible(move |style| {
                                         style.border_1().border_color(rgb(p.accent))
                                     })
-                                    .accessibility_label("Fermer les dépôts distants")
+                                    .accessibility_label("Fermer l’écran de clonage")
                                     .tooltip(|window, cx| {
                                         Tooltip::new("Fermer (Échap)").build(window, cx)
                                     })

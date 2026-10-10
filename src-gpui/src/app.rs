@@ -328,6 +328,21 @@ impl Mangrove {
         }
     }
 
+    /// Defers `retry` behind a confirmation when it would cancel a running clone.
+    fn confirm_leave_clone(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        retry: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> bool {
+        let this = cx.entity().downgrade();
+        self.chrome.update(cx, |chrome, cx| {
+            chrome.confirm_leave_repository_browser(window, cx, move |window, cx| {
+                let _ = this.update(cx, |view, cx| retry(view, window, cx));
+            })
+        })
+    }
+
     fn open(
         &mut self,
         path: String,
@@ -491,6 +506,13 @@ impl Mangrove {
     }
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let active = self.tabs.active == Some(id);
+        if active
+            && self.confirm_leave_clone(window, cx, move |view, window, cx| {
+                view.close_tab(id, window, cx)
+            })
+        {
+            return;
+        }
         if active {
             self.chrome
                 .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
@@ -509,6 +531,9 @@ impl Mangrove {
         self.sync_chrome(cx);
     }
     fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_leave_clone(window, cx, |view, window, cx| view.new_tab(window, cx)) {
+            return;
+        }
         self.chrome
             .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         self.tabs.create();
@@ -518,6 +543,11 @@ impl Mangrove {
         self.refresh_recent(cx);
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_leave_clone(window, cx, |view, window, cx| {
+            view.pick_repository(window, cx)
+        }) {
+            return;
+        }
         if !self
             .chrome
             .update(cx, |chrome, cx| chrome.begin_repository_picker(cx))
@@ -752,6 +782,22 @@ impl Mangrove {
         }
     }
     fn chrome_event(&mut self, event: &ChromeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            event,
+            ChromeEvent::OpenRepository(_)
+                | ChromeEvent::ActivateTab(_)
+                | ChromeEvent::NewTab
+                | ChromeEvent::CloseRepositoryBrowser
+                | ChromeEvent::ManageIntegrations
+                | ChromeEvent::ShowSettings
+        ) {
+            let retry = event.clone();
+            if self.confirm_leave_clone(window, cx, move |view, window, cx| {
+                view.chrome_event(&retry, window, cx)
+            }) {
+                return;
+            }
+        }
         if matches!(
             event,
             ChromeEvent::OpenRepository(_)

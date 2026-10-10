@@ -1,8 +1,7 @@
 //! Native settings and remote-repository views. Credentials and background
 //! work remain owned by the parent view.
 use super::*;
-use crate::format::initials;
-use crate::theme::{RADIUS_LG, RADIUS_MD, RADIUS_SM};
+use crate::theme::{RADIUS_LG, RADIUS_MD, RADIUS_SM, mix};
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::spinner::Spinner;
 
@@ -14,16 +13,17 @@ impl IntegrationsView {
         let ssh = remote
             .as_ref()
             .is_some_and(|url| url.starts_with("ssh://") || !url.starts_with("https://"));
-        let destination_valid = PathBuf::from(self.clone_parent.read(cx).value().trim())
-            .is_absolute()
-            && valid_clone_directory_name(self.clone_name.read(cx).value().trim());
+        let parent = expand_home(&self.clone_parent.read(cx).value());
+        let name = self.clone_name.read(cx).value().trim().to_string();
+        let destination = (parent.is_absolute() && valid_clone_directory_name(&name))
+            .then(|| display_path(&parent.join(&name).to_string_lossy()));
         let mut form = card(p)
             .gap(px(18.))
             .child(subtitle(
                 if self.direct_clone {
-                    "Cloner avec une URL"
+                    "Depuis une URL"
                 } else {
-                    "Cloner un dépôt"
+                    "Depuis un compte connecté"
                 },
                 offset,
             ))
@@ -121,6 +121,7 @@ impl IntegrationsView {
                                         trigger: load_trigger.clone(),
                                         state: load_state,
                                         palette: p,
+                                        offset,
                                     }),
                             )
                             .when(loading, |view| {
@@ -141,13 +142,26 @@ impl IntegrationsView {
             "Nouveau dossier",
             p,
             offset,
-            input_control(
-                &self.clone_name,
-                "clone-directory-name",
-                "Nouveau dossier",
-                p,
-                offset,
-            ),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(input_control(
+                    &self.clone_name,
+                    "clone-directory-name",
+                    "Nouveau dossier",
+                    p,
+                    offset,
+                ))
+                .when_some(
+                    destination.as_ref().filter(|_| remote.is_some()),
+                    |view, destination| {
+                        view.child(
+                            note(&format!("Destination : {destination}"), p)
+                                .text_size(px(11. + offset)),
+                        )
+                    },
+                ),
         ));
         if let Some(repository) = repository {
             let mut protocols = div().flex().items_center().gap(px(8.));
@@ -201,7 +215,7 @@ impl IntegrationsView {
                 primary_action("clone-repository", "Cloner le dépôt", p, offset)
                     .disabled(
                         remote.is_none()
-                            || !destination_valid
+                            || destination.is_none()
                             || self.pending.is_some()
                             || self.picking_path,
                     )
@@ -234,13 +248,7 @@ impl IntegrationsView {
                     cx.listener(|this, _, _, cx| this.read(ReadRequest::Repositories(None), cx)),
                 )
         };
-        let count = self.repositories.len();
-        let description = format!(
-            "{} dépôt{} chargé{}",
-            count,
-            if count > 1 { "s" } else { "" },
-            if count > 1 { "s" } else { "" }
-        );
+        let description = count_label(self.repositories.len(), "dépôt chargé", "dépôts chargés");
         div()
             .flex()
             .items_center()
@@ -249,7 +257,7 @@ impl IntegrationsView {
                 note(&description, p)
                     .flex_1()
                     .truncate()
-                    .text_size(px(10. + offset)),
+                    .text_size(px(11. + offset)),
             )
             .child(control)
     }
@@ -267,53 +275,134 @@ impl IntegrationsView {
         for profile in &self.profiles {
             let id = profile.id.clone();
             let active = profile.id == self.profile.id;
+            let row = div()
+                .id(SharedString::from(format!("profile-row-{id}")))
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .pr(px(12.))
+                .rounded(RADIUS_LG)
+                .border_1()
+                .border_color(rgb(if active { p.accent_border } else { p.border }))
+                .bg(rgb(if active { p.accent_soft } else { p.panel }));
+            if self.renaming_profile.as_ref() == Some(&profile.id) {
+                profiles = profiles.child(
+                    row.p(px(12.))
+                        .gap(px(12.))
+                        .child(profile_avatar(profile, p, 36.))
+                        .child(
+                            input_control(
+                                &self.profile_rename,
+                                "profile-rename",
+                                "Nom du profil",
+                                p,
+                                offset,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            primary_action("profile-rename-save", "Enregistrer", p, offset)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save_profile_name(window, cx)
+                                })),
+                        )
+                        .child(
+                            link_action("profile-rename-cancel", "Annuler", p, offset).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.cancel_profile_rename(window, cx)
+                                }),
+                            ),
+                        ),
+                );
+                continue;
+            }
+            let rename_id = id.clone();
+            let delete_id = id.clone();
+            let deleting = self.deleting_profile.as_ref() == Some(&profile.id);
             profiles = profiles.child(
-                Button::new(SharedString::from(format!("profile-{id}")))
-                    .w_full()
-                    .min_w_0()
-                    .p(px(16.))
-                    .rounded(RADIUS_LG)
-                    .border_1()
-                    .border_color(rgb(if active { p.accent_border } else { p.border }))
-                    .bg(rgb(if active { p.accent_soft } else { p.panel }))
-                    .justify_start()
-                    .gap(px(14.))
-                    .cursor_pointer()
-                    .accessibility_label(format!("Sélectionner le profil {}", profile.name))
-                    .hover(move |style| style.bg(rgb(p.hover)))
-                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                    .child(avatar(&profile.name, p, 36.))
+                row.hover(move |style| style.bg(rgb(p.hover)))
                     .child(
-                        div()
+                        Button::new(SharedString::from(format!("profile-{id}")))
                             .flex_1()
                             .min_w_0()
-                            .text_left()
+                            .p(px(16.))
+                            .rounded(RADIUS_LG)
+                            .border_1()
+                            .border_color(transparent_black())
+                            .justify_start()
+                            .gap(px(14.))
+                            .cursor_pointer()
+                            .accessibility_label(format!("Sélectionner le profil {}", profile.name))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .child(profile_avatar(profile, p, 36.))
                             .child(
                                 div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(profile.name.clone()),
-                            )
-                            .child(
-                                note(
-                                    &format!(
-                                        "{} compte{} connecté{}",
-                                        profile.accounts.len(),
-                                        if profile.accounts.len() > 1 { "s" } else { "" },
-                                        if profile.accounts.len() > 1 { "s" } else { "" }
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_left()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(profile.name.clone()),
+                                    )
+                                    .child(
+                                        note(
+                                            &count_label(
+                                                profile.accounts.len(),
+                                                "compte connecté",
+                                                "comptes connectés",
+                                            ),
+                                            p,
+                                        )
+                                        .text_size(px(11. + offset)),
                                     ),
-                                    p,
-                                )
-                                .text_size(px(11. + offset)),
-                            ),
+                            )
+                            .when(active, |view| {
+                                view.child(badge("Actif", p.accent, p.accent_soft, offset))
+                            })
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
+                            })),
                     )
-                    .when(active, |view| {
-                        view.child(badge("Actif", p.accent, p.accent_soft))
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(IntegrationsEvent::ProfileSelected(id.clone()))
-                    })),
+                    .child(
+                        link_action(format!("profile-rename-{rename_id}"), "Renommer", p, offset)
+                            .accessibility_label(format!("Renommer le profil {}", profile.name))
+                            .disabled(deleting)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_profile_rename(rename_id.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        link_action(
+                            format!("profile-delete-{delete_id}"),
+                            if deleting {
+                                "Suppression…"
+                            } else {
+                                "Supprimer"
+                            },
+                            p,
+                            offset,
+                        )
+                        .text_color(rgb(p.danger))
+                        .accessibility_label(format!("Supprimer le profil {}", profile.name))
+                        .disabled(!self.can_delete_profile(&profile.id))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.confirm_profile_deletion(&delete_id, window, cx)
+                            },
+                        )),
+                    ),
             );
         }
+        profiles = profiles.child(
+            note(
+                "Le profil actif ne peut pas être supprimé. Supprimer un profil retire ses comptes du coffre du système.",
+                p,
+            )
+            .text_size(px(11. + offset)),
+        );
         content = content.child(profiles).child(
             card(p).child(subtitle("Nouveau profil", offset)).child(
                 div()
@@ -364,7 +453,7 @@ impl IntegrationsView {
                             .flex_1()
                             .min_w_0()
                             .whitespace_normal()
-                            .child(value.clone()),
+                            .child(display_path(&value)),
                     )
                     .when(PathBuf::from(favorite).is_absolute(), |view| {
                         let path = favorite.clone();
@@ -445,7 +534,7 @@ impl IntegrationsView {
                     .child(action("ssh-key-browse", "Parcourir…", p, offset).disabled(self.pending.is_some() || self.picking_path)
                         .on_click(cx.listener(|this, _, window, cx| this.pick_path(PathPickerTarget::SshKey, window, cx))))
                     .child(action("ssh-key-save", "Utiliser cette clé", p, offset).on_click(cx.listener(|this, _, _, cx| {
-                        let value = this.key_path.read(cx).value().trim().to_string(); let path = PathBuf::from(&value);
+                        let value = this.key_path.read(cx).value().trim().to_string(); let path = expand_home(&value);
                         if path.is_absolute() && !value.chars().any(char::is_control) { this.error = None; this.ssh_choice(SshChoice::KeyFile { path }, cx); }
                         else { this.error = Some("Indiquez un chemin absolu de clé SSH.".into()); cx.notify(); }
                     })))))
@@ -475,7 +564,7 @@ impl IntegrationsView {
                 div()
                     .px(px(12.))
                     .mb(px(12.))
-                    .text_size(px(10. + self.offset))
+                    .text_size(px(11. + self.offset))
                     .text_color(rgb(p.muted))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("HÉBERGEMENT GIT"),
@@ -530,7 +619,7 @@ impl IntegrationsView {
                 .border_t_1()
                 .border_color(rgb(p.border))
                 .pt(px(16.))
-                .child(note("Comptes du profil", p).text_size(px(10. + self.offset)))
+                .child(note("Comptes du profil", p).text_size(px(11. + self.offset)))
                 .child(
                     div()
                         .mt(px(4.))
@@ -927,43 +1016,65 @@ impl IntegrationsView {
                 ),
             )
             .child(
+                div().flex().child(
+                    link_action(
+                        "oauth-personal-token",
+                        "Utiliser un token personnel",
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_browser_connection(false, window, cx)
+                    })),
+                ),
+            )
+            .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap(px(8.))
+                    .pt(px(12.))
+                    .border_t_1()
+                    .border_color(rgb(p.border))
                     .child(
-                        link_action(
-                            "oauth-application-config",
-                            if self.oauth_config_open {
-                                "Masquer la configuration OAuth"
+                        Button::new("oauth-advanced-configuration")
+                            .gap(px(6.))
+                            .px(px(4.))
+                            .py(px(6.))
+                            .border_1()
+                            .border_color(transparent_black())
+                            .rounded(RADIUS_MD)
+                            .text_size(px(12. + offset))
+                            .text_color(rgb(p.muted))
+                            .cursor_pointer()
+                            .accessibility_label(if self.oauth_config_open {
+                                "Masquer la configuration avancée"
                             } else {
-                                "Configuration OAuth"
-                            },
-                            p,
-                            offset,
-                        )
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.oauth_config_open = !this.oauth_config_open;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        link_action(
-                            "oauth-personal-token",
-                            "Utiliser un token personnel",
-                            p,
-                            offset,
-                        )
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_browser_connection(false, window, cx)
-                        })),
+                                "Afficher la configuration avancée"
+                            })
+                            .hover(move |style| style.text_color(rgb(p.text)))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .styles(|styles| {
+                                styles.disabled(|style| style.opacity(0.5).cursor_default())
+                            })
+                            .disabled(self.pending.is_some())
+                            .child(icon(
+                                if self.oauth_config_open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                14.,
+                                p.muted,
+                            ))
+                            .child("Configuration avancée")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.oauth_config_open = !this.oauth_config_open;
+                                cx.notify();
+                            })),
                     ),
             );
         if self.oauth_config_open {
-            let mut configuration = div().flex().flex_col().gap(px(12.)).pt(px(16.))
-                .border_t_1().border_color(rgb(p.border))
+            let mut configuration = div().flex().flex_col().gap(px(12.))
                 .child(field(&self.client_id, "oauth-client-id", if github { "Client ID public" } else if bitbucket { "Consumer Key publique" } else { "Application ID public" }, p, offset))
                 .child(note(
                     if github {
@@ -1071,7 +1182,7 @@ impl IntegrationsView {
             div()
                 .px(px(8.))
                 .py(px(12.))
-                .text_size(px(10. + self.offset))
+                .text_size(px(11. + self.offset))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(p.muted))
                 .child("COMPTES CONNECTÉS"),
@@ -1093,7 +1204,7 @@ impl IntegrationsView {
                 .text_color(rgb(p.text))
                 .cursor_pointer()
                 .accessibility_label("Cloner avec une URL")
-                .disabled(self.direct_clone)
+                .disabled(self.direct_clone || self.cloning())
                 .hover(move |style| style.bg(rgb(p.hover)))
                 .focus_visible(move |style| style.bg(rgb(p.selection)))
                 .child(icon(IconName::Link, 18., p.muted))
@@ -1122,7 +1233,7 @@ impl IntegrationsView {
                     }))
                     .cursor_pointer()
                     .accessibility_label(format!("Parcourir les dépôts de {}", account.label))
-                    .disabled(self.selected_account.as_ref() == Some(&id))
+                    .disabled(self.selected_account.as_ref() == Some(&id) || self.cloning())
                     .hover(move |style| style.bg(rgb(p.hover)))
                     .focus_visible(move |style| style.bg(rgb(p.selection)))
                     .child(provider_mark(edition, p, 28.))
@@ -1137,7 +1248,7 @@ impl IntegrationsView {
                                     .whitespace_normal()
                                     .child(account.label.clone()),
                             )
-                            .child(note(edition.label(), p).text_size(px(10. + self.offset))),
+                            .child(note(edition.label(), p).text_size(px(11. + self.offset))),
                     )
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.select_account(id.clone(), cx)),
@@ -1409,6 +1520,17 @@ impl Render for IntegrationsView {
         };
         div()
             .id("integrations-view")
+            .track_focus(&self.focus_handle)
+            // The first Escape leaves the field; the next one reaches the app.
+            .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                if this.profile_rename.read(cx).focus_handle(cx).is_focused(window) {
+                    this.cancel_profile_rename(window, cx);
+                } else if this.input_focused(window, cx) {
+                    this.focus_handle.focus(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1544,19 +1666,34 @@ fn card(p: Palette) -> Div {
         .bg(rgb(p.panel))
 }
 
-fn badge(label: &str, color: u32, background: u32) -> Div {
+fn badge(label: &str, color: u32, background: u32, offset: f32) -> Div {
     div()
         .flex_none()
         .px(px(8.))
         .py(px(3.))
         .rounded(RADIUS_SM)
-        .text_size(px(10.))
+        .text_size(px(11. + offset))
         .text_color(rgb(color))
         .bg(rgb(background))
         .child(label.to_string())
 }
 
 fn avatar(label: &str, p: Palette, size: f32) -> Div {
+    avatar_shape(size)
+        .bg(rgb(p.accent_soft))
+        .text_color(rgb(p.accent))
+        .child(initials(label))
+}
+
+fn profile_avatar(profile: &Profile, p: Palette, size: f32) -> Div {
+    let hue = p.graph[profile_hue(&profile.id, p.graph.len())];
+    avatar_shape(size)
+        .bg(rgb(mix(hue, p.panel, 0.18)))
+        .text_color(rgb(hue))
+        .child(profile_monogram(&profile.name))
+}
+
+fn avatar_shape(size: f32) -> Div {
     div()
         .size(px(size))
         .flex_none()
@@ -1564,11 +1701,8 @@ fn avatar(label: &str, p: Palette, size: f32) -> Div {
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(rgb(p.accent_soft))
-        .text_color(rgb(p.accent))
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(size * 0.34))
-        .child(initials(label))
 }
 
 fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
@@ -1581,9 +1715,6 @@ fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
         .rounded(RADIUS_SM)
         .border_1()
         .border_color(rgb(p.border))
-        .text_color(rgb(p.muted))
-        .text_size(px(9.))
-        .font_weight(FontWeight::SEMIBOLD)
         .child(match edition.provider() {
             Provider::GitHub => icon(IconName::Github, size * 0.65, p.muted).into_any_element(),
             Provider::GitLab => {

@@ -1,8 +1,8 @@
 # Profils, connexions et clonage
 
-Les paramètres contiennent les rubriques **Profils**, **SSH** et **Intégrations**. Les profils Personnel et Professionnel existent dès le premier lancement ; d’autres profils peuvent être créés. Chacun conserve ses comptes, ses URLs de serveur, ses favoris, son choix SSH, son thème, ses tailles de texte, ses panneaux, ses récents et son intervalle d’auto-fetch.
+Les paramètres contiennent les rubriques **Profils**, **SSH** et **Intégrations**. Les profils Personnel et Professionnel existent dès le premier lancement ; d’autres profils peuvent être créés, renommés ou supprimés. Le profil actif et le dernier profil ne peuvent pas être supprimés ; après confirmation, la suppression retire du coffre de l’OS les identifiants de ses comptes, puis ses comptes, favoris et préférences. Chaque profil a un monogramme de deux lettres et une couleur propres. Chacun conserve ses comptes, ses URLs de serveur, ses favoris, son choix SSH, son thème, ses tailles de texte, ses panneaux, ses récents et son intervalle d’auto-fetch.
 
-Changer de profil annule les lectures distantes, retire leurs pages affichées et revient à un espace local vide. Ouvrir un dépôt local, rechercher des commits ou consulter un diff ne nécessite aucun compte ni réseau. Les lectures d’API et SSH sont explicites ; elles s’exécutent en arrière-plan.
+Changer de profil demande une confirmation quand des onglets de dépôts sont ouverts, puis annule les lectures distantes, retire leurs pages affichées et revient à un espace local vide. Ouvrir un dépôt local, rechercher des commits ou consulter un diff ne nécessite aucun compte ni réseau. Les lectures d’API et SSH sont explicites ; elles s’exécutent en arrière-plan.
 
 ## Parcours
 
@@ -18,7 +18,7 @@ Chaque option affiche le nom court du dépôt sous son namespace. Les titres de 
 
 ## Cloner un dépôt
 
-Depuis **Nouvel onglet → Cloner**, choisir un dépôt du compte ou **URL d’un dépôt** pour saisir une URL HTTPS/SSH. Choisir le dossier parent, le nom du nouveau dossier et le protocole proposé par la forge, puis **Cloner le dépôt**. Le clone s’exécute en arrière-plan et ouvre le dépôt local après réussite ; Échap ou Fermer annule le travail en cours.
+Depuis **Nouvel onglet → Cloner**, choisir un dépôt du compte ou **URL d’un dépôt** pour saisir une URL HTTPS/SSH. Choisir le dossier parent, le nom du nouveau dossier et le protocole proposé par la forge, puis **Cloner le dépôt**. Le dossier parent accepte `~` pour le dossier personnel et la destination complète est affichée. Le clone s’exécute en arrière-plan et ouvre le dépôt local après réussite ; quitter l’écran pendant le clonage, par Échap, Fermer ou un changement d’onglet, demande de confirmer son annulation.
 
 Le clonage écrit uniquement dans un dossier neuf réservé atomiquement. Un dossier existant, même vide, est refusé. En cas d’échec ou d’annulation, le dossier partiel est conservé ; sélectionner un autre nom pour réessayer ou gérer ce dossier avec les outils habituels. Mangrove ne supprime aucun dossier de clone.
 
@@ -39,7 +39,7 @@ Une application OAuth doit d’abord être enregistrée sur le serveur utilisé.
 
 Après **Save application**, copier **Application ID** dans le champ de Mangrove, puis choisir **Se connecter avec GitLab**. Le champ **Secret** n’est pas utilisé. L’ID désigne l’application OAuth, et non un token personnel ; les utilisateurs d’une même application enregistrée peuvent utiliser son ID. Sur une instance auto-hébergée, enregistrer l’application sur cette instance.
 
-`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. Quand l’ID est configuré, le bouton de connexion reste visible et les instructions sont repliées sous **Configuration OAuth**.
+`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. L’ID et les instructions sont repliés sous **Configuration avancée** ; cette section s’ouvre d’elle-même si la connexion est lancée sans ID.
 
 Le renouvellement des tokens OAuth s’effectue avant les lectures quand leur expiration approche ; l’accès et le refresh token restent dans une seule entrée du coffre du compte. Déconnecter supprime cette entrée locale. Pour retirer aussi l’autorisation côté GitLab, révoquer Mangrove dans **Authorized applications** sur GitLab. Mangrove ne génère ni n’ajoute de clés SSH ; il utilise les clés ou agents déjà disponibles.
 
@@ -51,7 +51,7 @@ Sources : [création d’application et droits](https://docs.gitlab.com/integrat
 
 Mangrove utilise le **Device Flow** : GitHub s’ouvre dans le navigateur système, puis vous saisissez le code temporaire affiché dans Mangrove et autorisez l’application. Aucun mot de passe ni secret d’application n’est demandé dans Mangrove. Le code peut être copié ou la page GitHub rouverte depuis la carte d’autorisation ; le bouton confirme la copie avec **Code copié !**. Annuler ou changer de contexte termine l’attente et retire ce code de l’écran.
 
-Dans **Intégrations → GitHub.com**, ouvrir la configuration puis **Créer l’application dans GitHub**, ou [New OAuth App](https://github.com/settings/applications/new) :
+Dans **Intégrations → GitHub.com**, ouvrir **Configuration avancée** puis **Créer l’application dans GitHub**, ou [New OAuth App](https://github.com/settings/applications/new) :
 
 - **Application name** : `Mangrove`.
 - **Homepage URL** : `https://github.com/Dpblandin/mangrove`.
@@ -73,7 +73,7 @@ Sources : [création de l’application](https://docs.github.com/en/apps/oauth-a
 
 ## Connexion Bitbucket Cloud dans le navigateur
 
-Dans **Intégrations → Bitbucket Cloud**, renseigner l’URL du workspace, par exemple `https://bitbucket.org/votre-workspace`. Ouvrir **Configuration OAuth**, puis **Créer l’application dans Bitbucket Cloud** pour rejoindre **Workspace settings → OAuth consumers**. Créer un consumer :
+Dans **Intégrations → Bitbucket Cloud**, renseigner l’URL du workspace, par exemple `https://bitbucket.org/votre-workspace`. La **Configuration avancée**, ouverte par défaut pour Bitbucket Cloud, propose **Créer l’application dans Bitbucket Cloud** pour rejoindre **Workspace settings → OAuth consumers**. Créer un consumer :
 
 - **Name** : `Mangrove`.
 - **Callback URL** : exactement `http://127.0.0.1:47321/oauth/callback`, sélectionnable et copiable depuis Mangrove.
