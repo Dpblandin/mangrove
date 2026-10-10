@@ -29,6 +29,12 @@ pub struct RepositoryInfo {
 #[serde(rename_all = "camelCase")]
 pub struct TrackingList {
     pub branches: Vec<BranchTracking>,
+    /// Counts stop at shallow boundaries: the hidden history can make them
+    /// differ from a complete clone's.
+    pub shallow: bool,
+    /// Changes with the shallow boundaries and grafts the counts depend on.
+    /// Under equal keys, a pair of commits has the same counts.
+    pub counts_key: String,
 }
 
 /// A local branch with `branch.<name>.remote` and `branch.<name>.merge`.
@@ -69,6 +75,17 @@ pub enum UpstreamGone {
     /// No fetch refspec of the remote maps the branch, or a negative one
     /// excludes it.
     NoMatchingRefspec,
+}
+
+/// A count of `Workspace::ahead_behind` for one pair of commits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum AheadBehind {
+    /// Commits reachable only from the branch, and only from its upstream.
+    Counts { ahead: usize, behind: usize },
+    /// The graph between them cannot be read, for example when a partial
+    /// clone lacks objects.
+    Unavailable { error: String },
 }
 
 #[derive(Debug, Serialize)]

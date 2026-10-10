@@ -1,7 +1,15 @@
-use std::{fs, path::Path, thread, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 use git2::{Oid, Repository, Signature, Time};
-use mangrove_core::Workspace;
+use mangrove_core::{
+    model::{AheadBehind, UpstreamState},
+    Workspace,
+};
 
 fn commit(repository: &Repository, parent: Option<Oid>, message: &str) -> Oid {
     let mut builder = repository.treebuilder(None).unwrap();
@@ -163,5 +171,57 @@ fn supports_bare_repositories_and_respects_skip_fetch_all() {
             .unwrap()
             .target(),
         Some(tip)
+    );
+}
+
+#[test]
+fn fetched_upstream_commits_count_as_behind_without_moving_the_local_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = remote(&root.path().join("origin"));
+    let initial = commit(&origin, None, "initial");
+    let source = root.path().join("source");
+    let local = Repository::clone(origin.path().to_str().unwrap(), &source).unwrap();
+    commit(&origin, Some(initial), "next");
+    let workspace = Workspace::new(root.path().join("cache")).unwrap();
+    let count = || {
+        let info = workspace.open_repository(source.to_str().unwrap()).unwrap();
+        let list = workspace.branch_tracking(&info.id).unwrap();
+        let [branch] = list.branches.as_slice() else {
+            panic!("{list:?}");
+        };
+        let UpstreamState::Tracking { sha } = &branch.state else {
+            panic!("{branch:?}");
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let pairs = [(branch.sha.clone(), sha.clone())];
+        (
+            info.id.clone(),
+            workspace
+                .ahead_behind(&info.id, &pairs, deadline, &|| false)
+                .unwrap()
+                .remove(0),
+        )
+    };
+    let (id, before) = count();
+    assert_eq!(
+        before,
+        Some(AheadBehind::Counts {
+            ahead: 0,
+            behind: 0
+        })
+    );
+
+    assert!(workspace.fetch_repository(&id).unwrap().error.is_none());
+    let (_, after) = count();
+    assert_eq!(
+        after,
+        Some(AheadBehind::Counts {
+            ahead: 0,
+            behind: 1
+        })
+    );
+    assert_eq!(
+        local.find_reference("refs/heads/main").unwrap().target(),
+        Some(initial)
     );
 }

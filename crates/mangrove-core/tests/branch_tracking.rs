@@ -1,19 +1,28 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    process::Command,
+    sync::atomic::{AtomicI64, Ordering},
+    time::{Duration, Instant},
+};
 
 use git2::{Oid, Repository, Signature, Time};
 use mangrove_core::{
-    model::{BranchTracking, TrackingList, UpstreamGone, UpstreamState},
-    Workspace,
+    model::{AheadBehind, BranchTracking, TrackingList, UpstreamGone, UpstreamState},
+    Workspace, MAX_AHEAD_BEHIND_PAIRS,
 };
 use tempfile::TempDir;
 
+/// Commit dates increase, as Git's graph walks expect.
 fn commit(repository: &Repository, parents: &[Oid], message: &str) -> Oid {
+    static TIMESTAMP: AtomicI64 = AtomicI64::new(1_700_000_000);
     let mut builder = repository.treebuilder(None).unwrap();
     let blob = repository.blob(message.as_bytes()).unwrap();
     builder.insert("file.txt", blob, 0o100644).unwrap();
     let tree = repository.find_tree(builder.write().unwrap()).unwrap();
-    let signature =
-        Signature::new("Test", "test@example.test", &Time::new(1_700_000_000, 0)).unwrap();
+    let time = Time::new(TIMESTAMP.fetch_add(60, Ordering::Relaxed), 0);
+    let signature = Signature::new("Test", "test@example.test", &time).unwrap();
     let parents: Vec<_> = parents
         .iter()
         .map(|id| repository.find_commit(*id).unwrap())
@@ -388,4 +397,220 @@ fn linked_worktrees_bare_repositories_and_detached_heads_share_the_configuration
             sha: bare_tip.to_string()
         }
     );
+}
+
+fn pair(local: Oid, upstream: Oid) -> (String, String) {
+    (local.to_string(), upstream.to_string())
+}
+
+fn counts(ahead: usize, behind: usize) -> Option<AheadBehind> {
+    Some(AheadBehind::Counts { ahead, behind })
+}
+
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(60)
+}
+
+/// `git rev-list --left-right --count local...upstream`.
+fn rev_list(path: &Path, local: Oid, upstream: Oid) -> (usize, usize) {
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(["rev-list", "--left-right", "--count"])
+        .arg(format!("{local}...{upstream}"))
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let (ahead, behind) = text.trim().split_once('\t').unwrap();
+    (ahead.parse().unwrap(), behind.parse().unwrap())
+}
+
+/// A five-commit main line with a branch from its second commit, a merge of
+/// that branch and a history without common ancestor.
+struct Graph {
+    fixture: Fixture,
+    main: Vec<Oid>,
+    feature: Oid,
+    merge: Oid,
+    orphan: Oid,
+}
+
+fn graph() -> Graph {
+    let fixture = fixture();
+    let mut main = vec![fixture.tip];
+    for index in 1..6 {
+        main.push(commit(&fixture.repository, &[main[index - 1]], "main"));
+    }
+    let first = commit(&fixture.repository, &[main[2]], "feature");
+    let feature = commit(&fixture.repository, &[first], "feature");
+    let merge = commit(&fixture.repository, &[main[5], feature], "merge");
+    let root = commit(&fixture.repository, &[], "orphan");
+    let orphan = commit(&fixture.repository, &[root], "orphan");
+    reference(&fixture.repository, "refs/heads/main", main[5]);
+    Graph {
+        fixture,
+        main,
+        feature,
+        merge,
+        orphan,
+    }
+}
+
+#[test]
+fn counts_match_libgit2_and_git_rev_list() {
+    let Graph {
+        fixture,
+        main,
+        feature,
+        merge,
+        orphan,
+    } = graph();
+    let cases = [
+        ((feature, main[5]), (2, 3)),
+        ((merge, main[5]), (3, 0)),
+        ((main[1], main[5]), (0, 4)),
+        ((main[3], main[3]), (0, 0)),
+        ((orphan, main[5]), (2, 6)),
+    ];
+    let workspace = Workspace::new(fixture.root.path().join("cache")).unwrap();
+    let info = workspace
+        .open_repository(fixture.source.to_str().unwrap())
+        .unwrap();
+    let pairs: Vec<_> = cases.iter().map(|((l, u), _)| pair(*l, *u)).collect();
+    let result = workspace
+        .ahead_behind(&info.id, &pairs, far(), &|| false)
+        .unwrap();
+    for (((local, upstream), expected), count) in cases.into_iter().zip(result) {
+        assert_eq!(count, counts(expected.0, expected.1));
+        assert_eq!(
+            fixture
+                .repository
+                .graph_ahead_behind(local, upstream)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(rev_list(&fixture.source, local, upstream), expected);
+    }
+}
+
+#[test]
+fn counting_stops_between_pairs_at_the_deadline_or_when_cancelled() {
+    let Graph {
+        fixture,
+        main,
+        feature,
+        merge,
+        orphan,
+    } = graph();
+    let workspace = Workspace::new(fixture.root.path().join("cache")).unwrap();
+    let info = workspace
+        .open_repository(fixture.source.to_str().unwrap())
+        .unwrap();
+    let pairs = [
+        pair(feature, main[5]),
+        pair(main[3], main[3]),
+        pair(merge, main[5]),
+        pair(orphan, main[5]),
+    ];
+    let count = |deadline, cancelled: bool| {
+        workspace
+            .ahead_behind(&info.id, &pairs, deadline, &|| cancelled)
+            .unwrap()
+    };
+    // Equal commits need no walk.
+    assert_eq!(count(far(), true), [None, counts(0, 0), None, None]);
+    // A past deadline still computes one pair; computed pairs are cached.
+    let past = Instant::now();
+    assert_eq!(count(past, false), [counts(2, 3), counts(0, 0), None, None]);
+    assert_eq!(
+        count(past, false),
+        [counts(2, 3), counts(0, 0), counts(3, 0), None]
+    );
+    assert_eq!(
+        count(far(), false),
+        [counts(2, 3), counts(0, 0), counts(3, 0), counts(2, 6)]
+    );
+
+    let missing = "1".repeat(40);
+    let result = workspace
+        .ahead_behind(&info.id, &[(missing, main[5].to_string())], far(), &|| {
+            false
+        })
+        .unwrap();
+    assert!(matches!(&result[0], Some(AheadBehind::Unavailable { .. })));
+    assert!(workspace
+        .ahead_behind(&info.id, &[("main".into(), "HEAD".into())], far(), &|| {
+            false
+        })
+        .is_err());
+    let too_many = vec![pair(feature, main[5]); MAX_AHEAD_BEHIND_PAIRS + 1];
+    assert!(workspace
+        .ahead_behind(&info.id, &too_many, far(), &|| false)
+        .is_err());
+}
+
+#[test]
+fn counts_outlive_refreshes_and_serve_linked_worktrees_until_shallow_boundaries_or_grafts_change() {
+    let Graph {
+        fixture,
+        main,
+        feature,
+        merge,
+        ..
+    } = graph();
+    let workspace = Workspace::new(fixture.root.path().join("cache")).unwrap();
+    let pairs = [pair(feature, main[5]), pair(merge, main[5])];
+    let cached = |id: &str| workspace.ahead_behind(id, &pairs, far(), &|| true).unwrap();
+    let (id, list) = tracking(&workspace, &fixture.source);
+    assert!(!list.shallow);
+    assert_eq!(cached(&id), [None, None]);
+    workspace
+        .ahead_behind(&id, &pairs, far(), &|| false)
+        .unwrap();
+
+    // A fetch renews the session when it moves a ref.
+    reference(&fixture.repository, "refs/remotes/origin/main", main[5]);
+    let (refreshed, refreshed_list) = tracking(&workspace, &fixture.source);
+    assert_ne!(refreshed, id);
+    assert_eq!(refreshed_list.counts_key, list.counts_key);
+    assert!(workspace
+        .ahead_behind(&id, &pairs, far(), &|| false)
+        .is_err());
+    assert_eq!(cached(&refreshed), [counts(2, 3), counts(3, 0)]);
+    let linked = fixture.root.path().join("linked");
+    fixture
+        .repository
+        .worktree("linked", &linked, None)
+        .unwrap();
+    let (worktree, worktree_list) = tracking(&workspace, &linked);
+    assert_eq!(worktree_list.counts_key, list.counts_key);
+    assert_eq!(cached(&worktree), [counts(2, 3), counts(3, 0)]);
+
+    // A graft renews the session, even without a ref or shallow change.
+    let info = fixture.repository.path().join("info");
+    fs::create_dir_all(&info).unwrap();
+    fs::write(info.join("grafts"), format!("{}\n", main[3])).unwrap();
+    let (grafted, grafted_list) = tracking(&workspace, &fixture.source);
+    assert_ne!(grafted, refreshed);
+    assert_ne!(grafted_list.counts_key, list.counts_key);
+    assert_eq!(cached(&grafted), [None, None]);
+    fs::remove_file(info.join("grafts")).unwrap();
+
+    fs::write(
+        fixture.repository.path().join("shallow"),
+        format!("{}\n", main[1]),
+    )
+    .unwrap();
+    let (shallow, shallow_list) = tracking(&workspace, &fixture.source);
+    assert!(shallow_list.shallow);
+    assert_ne!(shallow_list.counts_key, list.counts_key);
+    assert_eq!(cached(&shallow), [None, None]);
 }

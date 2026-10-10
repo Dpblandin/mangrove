@@ -43,6 +43,8 @@ const MAX_OPEN_REPOSITORIES: usize = 8;
 const MAX_REPOSITORY_NAMES: usize = 6;
 const MAX_SEARCH_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SEARCH_SNAPSHOTS: usize = 4;
+/// Pairs accepted by one `Workspace::ahead_behind` call.
+pub const MAX_AHEAD_BEHIND_PAIRS: usize = 10_000;
 
 pub fn repository_names(paths: &[String]) -> Result<Vec<RepositoryName>> {
     if paths.len() > MAX_REPOSITORY_NAMES {
@@ -112,6 +114,9 @@ struct Session {
     error: Mutex<Option<String>>,
     commit_diffs: Mutex<commit_diff::CommitDiffCache>,
     working_tree: Mutex<working_tree::WorkingTreeCache>,
+    counter: tracking::Counter,
+    shallow: bool,
+    counts_key: String,
     opened: Instant,
 }
 
@@ -249,6 +254,7 @@ pub struct Workspace {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     write_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     open_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    count_caches: Mutex<HashMap<String, Weak<Mutex<tracking::CountCache>>>>,
     generation: AtomicU64,
     workers: Arc<IndexPool>,
     fetch_lock: Mutex<()>,
@@ -262,6 +268,7 @@ impl Workspace {
             sessions: Mutex::new(HashMap::new()),
             write_locks: Mutex::new(HashMap::new()),
             open_locks: Mutex::new(HashMap::new()),
+            count_caches: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(1),
             workers: IndexPool::start(),
             fetch_lock: Mutex::new(()),
@@ -325,7 +332,7 @@ impl Workspace {
         let key = format!("{:x}", Sha256::digest(git_dir.to_string_lossy().as_bytes()));
         // Serialize refreshes for this repository, while page/diff reads and
         // refreshes of other repositories can still acquire their sessions.
-        let open_lock = repository_lock(&self.open_locks, &key);
+        let open_lock = shared(&self.open_locks, &key);
         let _open_guard = open_lock.lock().unwrap();
         let head = repository
             .head()
@@ -402,28 +409,35 @@ impl Workspace {
         if git_dir != common_dir {
             shallow_paths.push(git_dir.join("shallow"));
         }
-        let mut shallow = Vec::with_capacity(shallow_paths.len());
-        for path in shallow_paths {
-            shallow.push(match fs::read(path) {
-                Ok(shallow) => shallow,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                Err(error) => {
-                    return Err(format!(
-                        "Impossible de lire les frontières shallow : {error}"
-                    ))
-                }
-            });
+        let shallow = shallow_paths
+            .iter()
+            .map(|path| optional_file(path, "les frontières shallow"))
+            .collect::<Result<Vec<_>>>()?;
+        // Grafts change the parents libgit2 reads as well; it ignores
+        // `refs/replace`. Linked worktrees share objects, so ahead/behind
+        // counts, until shallow boundaries or grafts change them.
+        let grafts = optional_file(&common_dir.join("info").join("grafts"), "les greffes")?;
+        let mut counts_key = Sha256::new();
+        counts_key.update(common_dir.as_os_str().as_encoded_bytes());
+        for boundaries in shallow.iter().filter(|boundaries| !boundaries.is_empty()) {
+            counts_key.update((boundaries.len() as u64).to_le_bytes());
+            counts_key.update(boundaries);
         }
+        counts_key.update(b"grafts");
+        counts_key.update(&grafts);
+        let counts_key = format!("{:x}", counts_key.finalize());
+        let count_cache = shared(&self.count_caches, &counts_key);
         let fingerprint = format!(
             "{:x}",
             Sha256::digest(
                 serde_json::to_vec(&(
-                    8u32,
+                    9u32,
                     &head_sha,
                     &head_name,
                     &references,
                     &remotes,
                     &shallow,
+                    &grafts,
                     &solo_refs
                 ))
                 .map_err(|e| e.to_string())?,
@@ -448,7 +462,7 @@ impl Workspace {
             }
             session.cancel.store(true, Ordering::Release);
         }
-        let write_lock = repository_lock(&self.write_locks, &key);
+        let write_lock = shared(&self.write_locks, &key);
         let database = cache_dir.join(format!("{key}.sqlite"));
         let (indexed, complete, index_run, published_run, buffered) = {
             let _guard = write_lock.lock().unwrap();
@@ -541,6 +555,9 @@ impl Workspace {
             error: Mutex::new(None),
             commit_diffs: Mutex::default(),
             working_tree: Mutex::default(),
+            shallow: shallow.iter().any(|boundaries| !boundaries.is_empty()),
+            counts_key,
+            counter: tracking::Counter::new(count_cache),
             opened: Instant::now(),
         });
         let mut sessions = self.sessions.lock().unwrap();
@@ -808,7 +825,37 @@ impl Workspace {
     pub fn branch_tracking(&self, id: &str) -> Result<TrackingList> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
-        tracking::branches(&repository, &session.info.references)
+        tracking::branches(
+            &repository,
+            &session.info.references,
+            session.shallow,
+            &session.counts_key,
+        )
+    }
+
+    /// Commits of each local SHA absent from its upstream SHA, and the reverse.
+    /// Cached counts come first; the others are computed in order until
+    /// `deadline`, at least one per call, or `cancelled`. `None` is a pair left
+    /// for a later call, which should pass every pair still to count. Only a
+    /// call stopped by its deadline keeps the repository open for the next
+    /// one: an empty or cancelled call releases it. A refresh keeps the
+    /// counts of unchanged pairs.
+    pub fn ahead_behind(
+        &self,
+        id: &str,
+        pairs: &[(String, String)],
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<Option<AheadBehind>>> {
+        if pairs.len() > MAX_AHEAD_BEHIND_PAIRS {
+            return Err("Le comptage est limité à 10\u{202f}000 branches par lecture.".into());
+        }
+        let session = self.session(id)?;
+        session
+            .counter
+            .ahead_behind(&session.source, pairs, deadline, &|| {
+                cancelled() || session.cancel.load(Ordering::Acquire)
+            })
     }
 
     pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {
@@ -960,12 +1007,22 @@ fn resolve_cache_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn repository_lock(locks: &Mutex<HashMap<String, Weak<Mutex<()>>>>, key: &str) -> Arc<Mutex<()>> {
-    let mut locks = locks.lock().unwrap();
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    let lock = locks.get(key).and_then(Weak::upgrade).unwrap_or_default();
-    locks.insert(key.to_owned(), Arc::downgrade(&lock));
-    lock
+/// The value of `key` while one of its users is alive.
+fn shared<T: Default>(entries: &Mutex<HashMap<String, Weak<T>>>, key: &str) -> Arc<T> {
+    let mut entries = entries.lock().unwrap();
+    entries.retain(|_, entry| entry.strong_count() > 0);
+    let entry = entries.get(key).and_then(Weak::upgrade).unwrap_or_default();
+    entries.insert(key.to_owned(), Arc::downgrade(&entry));
+    entry
+}
+
+/// The bytes of a file Git may omit, empty when it is absent.
+fn optional_file(path: &Path, contents: &str) -> Result<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("Impossible de lire {contents} : {error}")),
+    }
 }
 
 fn walk_position(connection: &rusqlite::Connection, sha: &str) -> Result<Option<usize>> {
