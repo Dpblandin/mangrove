@@ -2,23 +2,33 @@
 # Package the native application with the original Mangrove icon.
 set -eu
 
+usage() {
+  printf 'Usage: %s [--benchmark] [--target <triple>]\n' "$0"
+}
 benchmark=false
-case "${1-}" in
-  '') ;;
-  --benchmark) benchmark=true ;;
-  -h|--help)
-    printf 'Usage: %s [--benchmark]\n' "$0"
-    exit 0
-    ;;
-  *)
-    printf 'Usage: %s [--benchmark]\n' "$0" >&2
-    exit 2
-    ;;
-esac
-if [ "$#" -gt 1 ]; then
-  printf 'Usage: %s [--benchmark]\n' "$0" >&2
-  exit 2
-fi
+target=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --benchmark) benchmark=true ;;
+    --target)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        usage >&2
+        exit 2
+      fi
+      target=$2
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 if [ "$(uname -s)" != Darwin ]; then
   echo 'Le bundle .app se construit sur macOS.' >&2
   exit 1
@@ -50,19 +60,23 @@ case "$gpui_version" in
     exit 1
     ;;
 esac
+set -- --release --locked --manifest-path "$gpui_root/Cargo.toml" --target-dir "$gpui_target"
 if [ "$benchmark" = true ]; then
-  cargo build --release --locked --manifest-path "$gpui_root/Cargo.toml" \
-    --target-dir "$gpui_target" --features app-benchmark
-else
-  cargo build --release --locked --manifest-path "$gpui_root/Cargo.toml" \
-    --target-dir "$gpui_target"
+  set -- "$@" --features app-benchmark
 fi
-gpui_executable="$gpui_target/release/mangrove-gpui"
+# A cross-compiled build lands in target/<triple>/release, like Cargo's own output.
+gpui_release="$gpui_target/release"
+if [ -n "$target" ]; then
+  set -- "$@" --target "$target"
+  gpui_release="$gpui_target/$target/release"
+fi
+cargo build "$@"
+gpui_executable="$gpui_release/mangrove-gpui"
 if [ ! -x "$gpui_executable" ]; then
   printf 'Exécutable Mangrove introuvable : %s\n' "$gpui_executable" >&2
   exit 1
 fi
-gpui_bundle_parent="$gpui_target/release/bundle"
+gpui_bundle_parent="$gpui_release/bundle"
 gpui_bundle="$gpui_bundle_parent/$gpui_app_name.app"
 mkdir -p "$gpui_bundle_parent"
 gpui_stage=$(mktemp -d "$gpui_bundle_parent/.mangrove-package.XXXXXX")
@@ -90,12 +104,14 @@ cat > "$gpui_staged_bundle/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>icon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$gpui_version</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleVersion</key><string>$gpui_version</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
 plutil -lint "$gpui_staged_bundle/Contents/Info.plist" >&2
+# Seal Info.plist and resources with an ad-hoc signature bound to the bundle identifier.
+codesign --force --sign - "$gpui_staged_bundle" >&2
 if [ -e "$gpui_bundle" ] || [ -L "$gpui_bundle" ]; then
   mv "$gpui_bundle" "$gpui_previous"
 fi

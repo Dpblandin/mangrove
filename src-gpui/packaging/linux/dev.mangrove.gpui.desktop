@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Mangrove
+GenericName=Git client
+GenericName[fr]=Client Git
+Comment=Explore Git repositories, their history and diffs
+Comment[fr]=Explorer les dépôts Git, leur historique et leurs diffs
+Exec=mangrove-gpui
+Icon=dev.mangrove.gpui
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;history;diff;blame;
+StartupWMClass=dev.mangrove.gpui

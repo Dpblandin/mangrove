@@ -50,16 +50,18 @@ Le fetch manuel récupère les références de tous les remotes du dépôt actif
 
 La coloration native utilise Tree-sitter et un fallback lexical lorsque la grammaire ou sa requête est indisponible, notamment pour CMake et Kotlin avec les dépendances actuelles. Les budgets de coloration et les limites du moteur peuvent produire un affichage en texte simple ou un patch tronqué ; voir [l’architecture](../docs/architecture.md) et [la consultation des fichiers](../docs/file-browser.md).
 
-## Packaging macOS
+## Packaging
 
-Le script construit une application autonome locale avec l’icône de Mangrove et l’identifiant `dev.mangrove.gpui` :
+Le script macOS construit une application autonome locale avec l’icône de Mangrove et l’identifiant `dev.mangrove.gpui` :
 
 ```sh
 sh src-gpui/scripts/package-macos.sh
 open "src-gpui/target/release/bundle/Mangrove.app"
+# Build Intel depuis un Mac Apple Silicon, dans target/x86_64-apple-darwin/release/bundle :
+sh src-gpui/scripts/package-macos.sh --target x86_64-apple-darwin
 ```
 
-Le bundle n’est pas signé ni notarisé. La distribution, la signature et la notarisation restent à préparer ; les parcours interactifs et le packaging Windows/Linux restent à valider sur ces plateformes.
+Le bundle est signé ad hoc, sans certificat Developer ID ni notarisation. Sous Linux, `sh src-gpui/scripts/package-linux.sh` prépare dans `target/release/bundle/mangrove` un préfixe `bin/` et `share/` avec l’entrée du lanceur et les icônes de `packaging/linux`. Sous Windows, `build.rs` intègre à l’exécutable l’icône et le manifeste DPI de `packaging/windows`, et les builds release s’ouvrent sans console. Le [workflow de release](../docs/releases.md) assemble ces builds en DMG, archive `.tar.gz` et archive `.zip`. Les parcours interactifs restent à valider sous Windows et Linux.
 
 ## Vérification et limites de QA
 

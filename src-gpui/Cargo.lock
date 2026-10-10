@@ -4204,6 +4204,7 @@ dependencies = [
  "accesskit",
  "chrono",
  "dirs 6.0.0",
+ "embed-resource",
  "git2",
  "gpui-kit",
  "icu_collator",

@@ -1,3 +1,6 @@
+// Release builds open no console window next to the application on Windows.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod chrome;
 mod code_view;
@@ -30,6 +33,9 @@ use mangrove_core::Workspace;
 #[cfg(feature = "app-benchmark")]
 use std::time::Instant;
 use std::{path::PathBuf, sync::Arc};
+
+/// Bundle identifier, cache directory and Linux desktop entry name.
+const APP_IDENTIFIER: &str = "dev.mangrove.gpui";
 
 /// Launch configuration keeps normal CLI, cache and preferences independent
 /// from the optional application benchmark.
@@ -64,7 +70,7 @@ impl Startup {
             path: std::env::args().nth(1),
             cache: dirs::cache_dir()
                 .unwrap_or_else(std::env::temp_dir)
-                .join("dev.mangrove.gpui"),
+                .join(APP_IDENTIFIER),
             preferences,
             #[cfg(feature = "app-benchmark")]
             started,
@@ -120,6 +126,8 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(980.), px(608.))),
+                    // Matches the Linux desktop entry, which provides the launcher icon.
+                    app_id: Some(APP_IDENTIFIER.into()),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Mangrove".into()),
                         ..Default::default()
