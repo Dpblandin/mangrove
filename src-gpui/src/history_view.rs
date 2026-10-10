@@ -71,6 +71,8 @@ pub struct HistoryView {
     selected_index: usize,
     selection_needs_position: bool,
     reveal_selection: bool,
+    /// Solo replaced the list, whose own traversal can still be published.
+    reveal_on_publish: bool,
     error: Option<String>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
@@ -291,6 +293,7 @@ impl HistoryView {
             selected_index: 0,
             selection_needs_position: false,
             reveal_selection: false,
+            reveal_on_publish: false,
             error: None,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle().tab_stop(true),
@@ -567,6 +570,7 @@ impl HistoryView {
         self.selection_needs_position = !self.selected_sha.is_empty();
         // Solo replaces the list: show the kept commit, or the new first one.
         self.reveal_selection = self.selection_needs_position && solo_changed;
+        self.reveal_on_publish = solo_changed;
         self.error = info.index.error.clone();
         self.max_lanes = 1;
         self.lane_offset = 0;
@@ -721,6 +725,9 @@ impl HistoryView {
             self.search_indexed = 0;
             self.search_refreshed = None;
             self.selection_needs_position = !self.selected_sha.is_empty();
+            // A Solo traversal moves the kept commit once more.
+            let reveal = std::mem::take(&mut self.reveal_on_publish);
+            self.reveal_selection |= reveal && self.selection_needs_position;
             self.max_lanes = 1;
             if !self.filtered() {
                 self.total = indexed;

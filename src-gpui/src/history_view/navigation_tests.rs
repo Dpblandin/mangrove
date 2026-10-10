@@ -1,8 +1,14 @@
 use super::{HistoryEvent, HistoryView};
-use crate::{history::PAGE_SIZE, theme::Palette};
+use crate::{
+    history::{PAGE_SIZE, PositionRead},
+    theme::Palette,
+};
 use git2::{Oid, Repository, Signature, Time};
 use gpui_kit::{AppContext, Entity, TestAppContext, WindowOptions, px, size, test::TestWindowExt};
-use mangrove_core::{Workspace, model::RepositoryInfo};
+use mangrove_core::{
+    Workspace,
+    model::{IndexProgress, RepositoryInfo},
+};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
@@ -536,4 +542,44 @@ fn a_refresh_relaunches_a_jump_still_waiting_for_its_commit(cx: &mut TestAppCont
     finish(&engine, &soloed);
     settle(cx);
     assert_eq!(selection(cx, &view), (fixture.newest.clone(), 0, true));
+}
+
+#[gpui_kit::test]
+fn publishing_a_solo_traversal_reveals_the_kept_commit_again(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    // Fewer rows than the Solo history fit in the viewport.
+    cx.simulate_window_resize(cx.windows()[0], size(px(980.), px(420.)));
+    let position = FIRST_OLDER + 7;
+    let target = commit_at(&engine, &info, position);
+    jump(cx, &view, &target);
+    assert_eq!(selection(cx, &view), (target.clone(), position, true));
+    let solo = vec!["refs/heads/topic".to_owned()];
+    let soloed = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+    finish(&engine, &soloed);
+    let soloed = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+    let solo_position = engine
+        .commit_position(&soloed.id, &target)
+        .unwrap()
+        .unwrap();
+    assert!(solo_position < position);
+    // A Solo session first serves the previous traversal while its own
+    // builds; the kept commit is found there first.
+    let mut buffered = soloed.clone();
+    buffered.index = IndexProgress {
+        complete: false,
+        ..info.index.clone()
+    };
+    set_repository(cx, &view, buffered.clone());
+    view.update(cx, |view, cx| {
+        let read = PositionRead::Selection {
+            generation: view.page_requests.generation(),
+            sha: target.clone(),
+            filter: String::new(),
+        };
+        view.accept_position(read, Ok((Some(position), buffered.index)), cx);
+    });
+    // Status polling then publishes the Solo traversal.
+    settle(cx);
+    assert_eq!(selection(cx, &view), (target, solo_position, true));
 }
