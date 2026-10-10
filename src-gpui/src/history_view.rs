@@ -319,15 +319,12 @@ impl HistoryView {
         &mut self,
         sha: String,
         query: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if normalized_query(&query).is_empty() {
-            self.jump_to(sha, window, cx);
-            return;
-        }
         // Like a search typed over a selection: the commit stays selected
-        // while its row is looked up, and an absent one yields the first result.
+        // while its row is looked up, and an absent one, such as an amended
+        // commit, yields the first row.
         self.cancel_navigation();
         self.working.selected = false;
         self.selected_sha = sha.clone();
@@ -335,7 +332,15 @@ impl HistoryView {
             sha,
             keyboard: false,
         });
-        self.set_query(query, cx);
+        if normalized_query(&query) != normalized_query(&self.query) {
+            self.set_query(query, cx);
+            return;
+        }
+        self.query = query;
+        self.keep_selection();
+        self.request_page(0, cx);
+        self.refresh_position(cx);
+        self.changed(cx);
     }
     #[cfg(feature = "app-benchmark")]
     pub fn selected_index(&self) -> usize {
@@ -628,13 +633,7 @@ impl HistoryView {
         self.query_task = None;
         self.cancel_navigation();
         self.cancel_pages();
-        // The inspector keeps its commit while its row in the new list is
-        // looked up; an absent commit falls back to the first result.
-        let keep = !self.selected_sha.is_empty() && !self.working.selected;
-        self.autoselect = !keep;
-        self.selection_needs_position = keep;
-        self.reveal_selection = keep;
-        self.selected_index = 0;
+        self.keep_selection();
         self.total = 0;
         self.error = None;
         self.menu = None;
@@ -660,6 +659,16 @@ impl HistoryView {
             });
         }));
         self.changed(cx);
+    }
+
+    /// The inspector keeps its commit while its row in a new list is looked
+    /// up; an absent commit, or none, falls back to the first row.
+    fn keep_selection(&mut self) {
+        let keep = !self.selected_sha.is_empty() && !self.working.selected;
+        self.autoselect = !keep;
+        self.selection_needs_position = keep;
+        self.reveal_selection = keep;
+        self.selected_index = 0;
     }
 
     fn set_filter(&mut self, filter: String) {
