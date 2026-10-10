@@ -10,6 +10,7 @@ mod repository_context;
 mod similarity;
 #[cfg(test)]
 mod test_support;
+mod tracking;
 mod working_tree;
 mod worktree_filter;
 
@@ -799,6 +800,15 @@ impl Workspace {
             return Ok(None);
         }
         commit_diff::line_totals(&repository, &diff, cancelled)
+    }
+
+    /// Upstreams of the session's local branches, at the SHAs of its
+    /// references. The configuration is read again on each call: `git branch
+    /// -u` moves no ref, so it renews neither the session nor its fingerprint.
+    pub fn branch_tracking(&self, id: &str) -> Result<TrackingList> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        tracking::branches(&repository, &session.info.references)
     }
 
     pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {

@@ -23,6 +23,54 @@ pub struct RepositoryInfo {
     pub index: IndexProgress,
 }
 
+/// Upstreams of a session's local branches. A branch without an upstream is
+/// not listed, even when a remote branch of the same name exists.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackingList {
+    pub branches: Vec<BranchTracking>,
+}
+
+/// A local branch with `branch.<name>.remote` and `branch.<name>.merge`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchTracking {
+    /// Full name of the local branch: `refs/heads/main`.
+    pub branch: String,
+    pub sha: String,
+    /// A remote name, or `.` when the upstream is a branch of this repository.
+    pub remote: String,
+    /// Full name of the upstream reference, when the configuration resolves it.
+    pub upstream: Option<String>,
+    /// The upstream for display: `origin/main`, or `main` for a local branch.
+    pub label: String,
+    pub state: UpstreamState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum UpstreamState {
+    /// The upstream reference exists and points to `sha`.
+    Tracking { sha: String },
+    /// The configured upstream cannot be read.
+    Gone { reason: UpstreamGone },
+    /// The configuration of its remote is invalid, for example its name or
+    /// a fetch refspec.
+    Invalid { error: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UpstreamGone {
+    /// The upstream reference does not exist, for example after a prune.
+    MissingRef,
+    /// No remote of this name is configured.
+    MissingRemote,
+    /// No fetch refspec of the remote maps the branch, or a negative one
+    /// excludes it.
+    NoMatchingRefspec,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryName {

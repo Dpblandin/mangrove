@@ -287,6 +287,32 @@ fn inspecting_commits_search_and_diffs_preserves_all_source_bytes_and_mtimes() {
 }
 
 #[test]
+fn reading_branch_upstreams_preserves_all_source_bytes_and_mtimes() {
+    let fixture = Fixture::new();
+    let first = commit(&fixture.repository, "first", &[], &[], Some("HEAD"));
+    fixture
+        .repository
+        .remote("origin", "git@github.com:example/private.git")
+        .unwrap();
+    fixture
+        .repository
+        .reference("refs/remotes/origin/main", first, false, "test")
+        .unwrap();
+    let mut config = fixture.repository.config().unwrap();
+    config.set_str("branch.main.remote", "origin").unwrap();
+    config
+        .set_str("branch.main.merge", "refs/heads/main")
+        .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let tracking = workspace.branch_tracking(&info.id).unwrap();
+    assert_eq!(tracking.branches[0].label, "origin/main");
+    finish(&workspace, &info.id);
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
 fn search_handles_unicode_punctuation_sha_and_conflicting_reference_labels() {
     let fixture = Fixture::new();
     let first = commit(
