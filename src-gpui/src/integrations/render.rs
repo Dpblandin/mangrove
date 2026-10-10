@@ -121,6 +121,7 @@ impl IntegrationsView {
                                         trigger: load_trigger.clone(),
                                         state: load_state,
                                         palette: p,
+                                        offset,
                                     }),
                             )
                             .when(loading, |view| {
@@ -247,13 +248,7 @@ impl IntegrationsView {
                     cx.listener(|this, _, _, cx| this.read(ReadRequest::Repositories(None), cx)),
                 )
         };
-        let count = self.repositories.len();
-        let description = format!(
-            "{} dépôt{} chargé{}",
-            count,
-            if count > 1 { "s" } else { "" },
-            if count > 1 { "s" } else { "" }
-        );
+        let description = count_label(self.repositories.len(), "dépôt chargé", "dépôts chargés");
         div()
             .flex()
             .items_center()
@@ -262,7 +257,7 @@ impl IntegrationsView {
                 note(&description, p)
                     .flex_1()
                     .truncate()
-                    .text_size(px(10. + offset)),
+                    .text_size(px(11. + offset)),
             )
             .child(control)
     }
@@ -569,7 +564,7 @@ impl IntegrationsView {
                 div()
                     .px(px(12.))
                     .mb(px(12.))
-                    .text_size(px(10. + self.offset))
+                    .text_size(px(11. + self.offset))
                     .text_color(rgb(p.muted))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("HÉBERGEMENT GIT"),
@@ -624,7 +619,7 @@ impl IntegrationsView {
                 .border_t_1()
                 .border_color(rgb(p.border))
                 .pt(px(16.))
-                .child(note("Comptes du profil", p).text_size(px(10. + self.offset)))
+                .child(note("Comptes du profil", p).text_size(px(11. + self.offset)))
                 .child(
                     div()
                         .mt(px(4.))
@@ -1187,7 +1182,7 @@ impl IntegrationsView {
             div()
                 .px(px(8.))
                 .py(px(12.))
-                .text_size(px(10. + self.offset))
+                .text_size(px(11. + self.offset))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(p.muted))
                 .child("COMPTES CONNECTÉS"),
@@ -1253,7 +1248,7 @@ impl IntegrationsView {
                                     .whitespace_normal()
                                     .child(account.label.clone()),
                             )
-                            .child(note(edition.label(), p).text_size(px(10. + self.offset))),
+                            .child(note(edition.label(), p).text_size(px(11. + self.offset))),
                     )
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.select_account(id.clone(), cx)),
@@ -1526,6 +1521,16 @@ impl Render for IntegrationsView {
         div()
             .id("integrations-view")
             .track_focus(&self.focus_handle)
+            // The first Escape leaves the field; the next one reaches the app.
+            .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                if this.profile_rename.read(cx).focus_handle(cx).is_focused(window) {
+                    this.cancel_profile_rename(window, cx);
+                } else if this.input_focused(window, cx) {
+                    this.focus_handle.focus(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1710,9 +1715,6 @@ fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
         .rounded(RADIUS_SM)
         .border_1()
         .border_color(rgb(p.border))
-        .text_color(rgb(p.muted))
-        .text_size(px(9.))
-        .font_weight(FontWeight::SEMIBOLD)
         .child(match edition.provider() {
             Provider::GitHub => icon(IconName::Github, size * 0.65, p.muted).into_any_element(),
             Provider::GitLab => {

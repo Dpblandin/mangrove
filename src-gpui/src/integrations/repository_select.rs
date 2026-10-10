@@ -157,6 +157,7 @@ pub(super) struct RepositoryMenu {
     trigger: RepositoryLoadTrigger,
     state: RepositoryLoadState,
     palette: Palette,
+    offset: f32,
 }
 
 impl RepositoryMenu {
@@ -165,6 +166,7 @@ impl RepositoryMenu {
         trigger: RepositoryLoadTrigger,
         state: RepositoryLoadState,
         palette: Palette,
+        offset: f32,
     ) -> Self {
         let groups = data.borrow().matched_groups();
         Self {
@@ -173,6 +175,7 @@ impl RepositoryMenu {
             trigger,
             state,
             palette,
+            offset,
         }
     }
 }
@@ -228,7 +231,7 @@ impl SearchableListDelegate for RepositoryMenu {
                 .truncate()
                 .px(px(8.))
                 .py(px(4.))
-                .text_size(px(11.))
+                .text_size(px(11. + self.offset))
                 .text_color(rgb(self.palette.muted))
                 .child(self.groups.get(section)?.title.clone())
                 .into_any_element(),
@@ -249,7 +252,7 @@ impl SearchableListDelegate for RepositoryMenu {
         {
             return None;
         }
-        let trailing = load_indicator(self.state, self.trigger.clone(), self.palette);
+        let trailing = load_indicator(self.state, self.trigger.clone(), self.palette, self.offset);
         Some(
             div()
                 .relative()
@@ -290,21 +293,26 @@ fn visibility_sentinel(trigger: RepositoryLoadTrigger) -> impl IntoElement {
     .size_full()
 }
 
-fn load_indicator(state: RepositoryLoadState, trigger: RepositoryLoadTrigger, p: Palette) -> Div {
+fn load_indicator(
+    state: RepositoryLoadState,
+    trigger: RepositoryLoadTrigger,
+    p: Palette,
+    offset: f32,
+) -> Div {
     match state {
         RepositoryLoadState::Ready | RepositoryLoadState::Loading => div()
             .flex()
             .items_center()
             .gap(px(6.))
             .text_color(rgb(p.muted))
-            .text_size(px(11.))
+            .text_size(px(11. + offset))
             .child(Spinner::new().small())
             .child("Chargement…"),
         RepositoryLoadState::Retry => div().child(
             Button::new("repositories-retry")
                 .px(px(6.))
                 .py(px(2.))
-                .text_size(px(11.))
+                .text_size(px(11. + offset))
                 .text_color(rgb(p.accent))
                 .accessibility_label("Réessayer le chargement des dépôts")
                 .child("Réessayer")
@@ -322,6 +330,7 @@ pub(super) struct RepositoryEmpty {
     pub(super) trigger: RepositoryLoadTrigger,
     pub(super) state: RepositoryLoadState,
     pub(super) palette: Palette,
+    pub(super) offset: f32,
 }
 
 impl RenderOnce for RepositoryEmpty {
@@ -329,7 +338,7 @@ impl RenderOnce for RepositoryEmpty {
         div()
             .relative()
             .p(px(16.))
-            .text_size(px(12.))
+            .text_size(px(12. + self.offset))
             .text_color(rgb(self.palette.muted))
             .when(self.state == RepositoryLoadState::Ready, |view| {
                 view.child(visibility_sentinel(self.trigger.clone()))
@@ -337,7 +346,7 @@ impl RenderOnce for RepositoryEmpty {
             .child(if self.state == RepositoryLoadState::Complete {
                 div().child("Aucun dépôt ne correspond.")
             } else {
-                load_indicator(self.state, self.trigger, self.palette)
+                load_indicator(self.state, self.trigger, self.palette, self.offset)
             })
     }
 }

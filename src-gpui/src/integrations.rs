@@ -7,7 +7,7 @@ use gpui_kit::{
     base::Button,
     component::{
         Disableable, Sizable,
-        input::{Input, InputEvent, InputState},
+        input::{Escape as InputEscape, Input, InputEvent, InputState},
         scroll::Scrollbar,
         searchable_list::{SearchableGroup, SearchableListDelegate, SearchableListItem},
         select::{Select, SelectEvent, SelectState},
@@ -360,6 +360,7 @@ impl IntegrationsView {
             RepositoryLoadTrigger::new(cx.entity().downgrade(), 0),
             RepositoryLoadState::Complete,
             palette,
+            offset,
         );
         let repository_select =
             cx.new(|cx| SelectState::new(options, None, window, cx).searchable(true));
@@ -1322,6 +1323,7 @@ impl IntegrationsView {
             RepositoryLoadTrigger::new(cx.entity().downgrade(), self.repository_select_scope),
             self.repository_load_state(),
             self.palette,
+            self.offset,
         );
         if !self.repository_select_reset {
             // Pages only append sections: existing full/filtered IndexPaths stay
@@ -1586,6 +1588,26 @@ impl IntegrationsView {
             ));
             cx.notify();
         }
+    }
+
+    fn input_focused(&self, window: &Window, cx: &App) -> bool {
+        [
+            &self.profile_name,
+            &self.label,
+            &self.server,
+            &self.username,
+            &self.token,
+            &self.client_id,
+            &self.consumer_secret,
+            &self.key_path,
+            &self.favorite,
+            &self.ssh_remote,
+            &self.clone_url,
+            &self.clone_parent,
+            &self.clone_name,
+        ]
+        .into_iter()
+        .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     fn start_profile_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
