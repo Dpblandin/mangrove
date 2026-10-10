@@ -454,7 +454,10 @@ impl Mangrove {
             }
             entry
         }));
-        if self.error.is_some() || self.history.read(cx).error().is_some() {
+        if self.error.is_some()
+            || self.fetch_error.is_some()
+            || self.history.read(cx).error().is_some()
+        {
             entries.push(CommandEntry::new(
                 Command::DismissError,
                 "Fermer le message d’erreur",
@@ -597,7 +600,7 @@ impl Mangrove {
                     .update(cx, |view, cx| view.focus_list(window, cx));
             }
             Command::Refresh => self.refresh(window, cx),
-            Command::Fetch => self.fetch(window, cx),
+            Command::Fetch => self.fetch(true, window, cx),
             Command::References => {
                 self.show_workspace(window, cx);
                 self.sidebar

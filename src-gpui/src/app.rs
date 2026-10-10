@@ -2,7 +2,7 @@
 #[cfg(feature = "app-benchmark")]
 use crate::perf::{Configuration, PerfAction, PerfSession, PerfSnapshot};
 use crate::{
-    chrome::{Chrome, ChromeEvent},
+    chrome::{Chrome, ChromeEvent, Notice},
     command_palette::{CommandPalette, PaletteEvent},
     history_view::{HistoryEvent, HistoryView},
     inspector::{InspectorEvent, InspectorView},
@@ -15,11 +15,14 @@ use crate::{
 };
 use gpui_kit::{component::input::Escape as InputEscape, prelude::*, *};
 use mangrove_core::{Workspace, model::RepositoryInfo};
+use std::sync::Arc;
 #[cfg(feature = "app-benchmark")]
 use std::time::Instant;
-use std::{sync::Arc, time::Duration};
 
 mod commands;
+mod fetch;
+
+use fetch::FetchFeedback;
 
 actions!(
     mangrove,
@@ -99,6 +102,8 @@ pub struct Mangrove {
     opening: bool,
     fetching: bool,
     error: Option<String>,
+    fetch_error: Option<Notice>,
+    fetch_feedback: FetchFeedback,
     generation: u64,
     refresh_queued: bool,
     pending_navigation: Option<String>,
@@ -191,6 +196,8 @@ impl Mangrove {
             opening: false,
             fetching: false,
             error: None,
+            fetch_error: None,
+            fetch_feedback: FetchFeedback::default(),
             generation: 0,
             refresh_queued: false,
             pending_navigation: None,
@@ -248,8 +255,10 @@ impl Mangrove {
     fn sync_chrome(&mut self, cx: &mut Context<Self>) {
         let error = self
             .error
-            .clone()
-            .or_else(|| self.history.read(cx).error().map(str::to_owned));
+            .as_deref()
+            .or_else(|| self.history.read(cx).error())
+            .map(Notice::plain)
+            .or_else(|| self.fetch_error.clone());
         let name = self
             .repository
             .as_ref()
@@ -293,6 +302,8 @@ impl Mangrove {
         self.generation += 1;
         self.open_lane.invalidate_pending();
         self.fetch_timer = None;
+        self.fetch_error = None;
+        self.fetch_feedback.reset_backoff();
         self.opening = false;
         self.refresh_queued = false;
         self.repository = None;
@@ -374,6 +385,8 @@ impl Mangrove {
         }
         if !same_path {
             self.repository = None;
+            self.fetch_error = None;
+            self.fetch_feedback.reset_backoff();
             self.history.update(cx, |view, cx| view.clear(cx));
             self.sidebar
                 .update(cx, |view, cx| view.prepare_repository_open(&path, cx));
@@ -448,6 +461,7 @@ impl Mangrove {
                                     .update(cx, |history, cx| history.jump_to(sha, window, cx));
                             }
                             view.sync_selection(cx);
+                            view.error = None;
                         }
                         Err(error) => {
                             view.error = Some(error);
@@ -813,7 +827,7 @@ impl Mangrove {
                 self.focus.focus(window, cx);
                 cx.notify();
             }
-            ChromeEvent::Fetch => self.fetch(window, cx),
+            ChromeEvent::Fetch => self.fetch(true, window, cx),
             ChromeEvent::PreferencesChanged => self.apply_preferences(window, cx),
             ChromeEvent::ProfileChanged => {
                 self.recent_task = None;
@@ -831,6 +845,9 @@ impl Mangrove {
             }
             ChromeEvent::DismissError => {
                 self.error = None;
+                if let Some(notice) = self.fetch_error.take() {
+                    self.fetch_feedback.dismiss(notice);
+                }
                 self.history
                     .update(cx, |history, cx| history.clear_error(cx));
                 self.sync_chrome(cx);
@@ -855,20 +872,19 @@ impl Mangrove {
             return;
         }
         let generation = self.generation;
+        let delay = self.fetch_feedback.delay(interval);
         self.fetch_timer = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs(u64::from(interval) * 60))
-                .await;
+            cx.background_executor().timer(delay).await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |view, cx| {
                     if view.generation == generation {
-                        view.fetch(window, cx);
+                        view.fetch(false, window, cx);
                     }
                 });
             });
         }));
     }
-    fn fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn fetch(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repository.clone() else {
             return;
         };
@@ -877,23 +893,26 @@ impl Mangrove {
         }
         self.fetching = true;
         self.fetch_timer = None;
-        self.error = None;
         self.sync_chrome(cx);
-        let generation = self.generation;
         let engine = self.engine.clone();
         self.fetch_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let session = repo.id.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { engine.fetch_repository(&repo.id) })
+                .spawn(async move { engine.fetch_repository(&session) })
                 .await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |view, cx| {
                     view.fetching = false;
-                    if view.generation == generation {
-                        view.error = match result {
-                            Ok(result) => result.error,
-                            Err(error) => Some(error),
-                        };
+                    // A refresh may have replaced the generation meanwhile;
+                    // the result still belongs to the same repository session.
+                    if view
+                        .repository
+                        .as_ref()
+                        .is_some_and(|current| current.id == repo.id)
+                    {
+                        let error = result.map_or_else(Some, |result| result.error);
+                        view.fetch_error = view.fetch_feedback.finish(error, manual);
                         view.refresh(window, cx);
                     }
                     view.sync_chrome(cx);

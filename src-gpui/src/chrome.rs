@@ -5,8 +5,9 @@ use crate::{
     preferences::{Pane, Preferences, RecentRepository, profile_store},
     recent_repositories::{RecentMetadata, RecentNamesRequest},
     settings::{SettingsEvent, SettingsView},
-    theme::{Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
 };
+use accesskit::Role;
 use gpui_kit::{
     assets::IconName,
     base::Button as NativeButton,
@@ -22,6 +23,29 @@ use gpui_kit::{
 };
 use mangrove_remote::{Profile, ProfileStore, Profiles};
 use std::{collections::HashMap, time::Duration};
+
+/// A workspace message: one summary line and its optional raw detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub summary: String,
+    pub detail: Option<String>,
+}
+
+impl Notice {
+    /// Multi-line messages keep their first line as summary.
+    pub fn plain(message: &str) -> Self {
+        let message = message.trim();
+        let summary = message
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(message);
+        Self {
+            summary: summary.to_owned(),
+            detail: (summary != message).then(|| message.to_owned()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChromeTab {
@@ -86,7 +110,8 @@ pub struct Chrome {
     busy_task: Option<Task<()>>,
     choosing: bool,
     fetching: bool,
-    error: Option<String>,
+    error: Option<Notice>,
+    error_expanded: bool,
     recent_filter: Entity<InputState>,
     welcome_scroll: ScrollHandle,
     repository_browser: bool,
@@ -179,7 +204,8 @@ impl Chrome {
             busy_task: None,
             choosing: false,
             fetching: false,
-            error: profile_error,
+            error: profile_error.as_deref().map(Notice::plain),
+            error_expanded: false,
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
             repository_browser: false,
@@ -208,7 +234,7 @@ impl Chrome {
         name: Option<String>,
         has_remotes: bool,
         busy: bool,
-        error: Option<String>,
+        error: Option<Notice>,
         cx: &mut Context<Self>,
     ) {
         if self.name == name
@@ -234,6 +260,9 @@ impl Chrome {
                     });
                 }));
             }
+        }
+        if self.error != error {
+            self.error_expanded = false;
         }
         self.name = name;
         self.has_remotes = has_remotes;
@@ -1152,14 +1181,13 @@ impl Chrome {
                         offset,
                     )),
             )
-            .when_some(self.error.clone(), |view, error| {
+            .when_some(self.error.clone(), |view, notice| {
                 view.child(
                     div()
+                        .w_full()
+                        .max_w(px(660.))
                         .mt(px(15.))
-                        .max_w(px(450.))
-                        .text_size(px(11. + offset))
-                        .text_color(rgb(p.danger))
-                        .child(error),
+                        .child(self.render_notice(&notice, cx)),
                 )
             })
             .when(!self.preferences.recent.is_empty(), |view| {
@@ -1279,6 +1307,117 @@ impl Chrome {
             ))
             .into_any_element()
     }
+    /// One summary line, at most three when wrapped, with the raw detail on demand.
+    fn render_notice(&self, notice: &Notice, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.preferences.palette();
+        let offset = self.preferences.font_size_offset;
+        let line = (11. + offset) * 1.6;
+        let expanded = self.error_expanded;
+        div()
+            .id("workspace-error")
+            .role(Role::Alert)
+            .aria_label(notice.summary.clone())
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .text_left()
+            .text_size(px(11. + offset))
+            .line_height(px(line))
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(rgb(mix(p.danger, p.border, 0.45)))
+            .bg(rgb(mix(p.danger, p.bg, 0.10)))
+            .text_color(rgb(p.danger))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .h(px(line))
+                            .flex()
+                            .items_center()
+                            .child(icon(IconName::CircleAlert, 14., p.danger)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .line_clamp(3)
+                            .text_ellipsis()
+                            .child(notice.summary.clone()),
+                    )
+                    .child(
+                        Button::new("dismiss-workspace-error")
+                            .ghost()
+                            .w(px(24.))
+                            .h(px(24.))
+                            .focus_visible(move |style| {
+                                style.border_1().border_color(rgb(p.accent))
+                            })
+                            .icon(icon(IconName::X, 14., p.muted))
+                            .accessibility_label("Fermer le message")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::DismissError)),
+                            ),
+                    ),
+            )
+            .when_some(notice.detail.clone(), |view, detail| {
+                let copied = detail.clone();
+                view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .ml(px(18.))
+                        .child(
+                            notice_action(
+                                "workspace-error-toggle",
+                                if expanded {
+                                    "Masquer le détail"
+                                } else {
+                                    "Afficher le détail"
+                                },
+                                p,
+                                offset,
+                            )
+                            .aria_expanded(expanded)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.error_expanded = !this.error_expanded;
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            notice_action("workspace-error-copy", "Copier le détail", p, offset)
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                                }),
+                        ),
+                )
+                .when(expanded, |view| {
+                    view.child(
+                        div()
+                            .id("workspace-error-detail")
+                            .ml(px(24.))
+                            .max_h(px(160.))
+                            .overflow_y_scroll()
+                            .p(px(8.))
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .bg(rgb(p.bg))
+                            .font_family(MONO)
+                            .text_color(rgb(p.text))
+                            .child(detail),
+                    )
+                })
+            })
+    }
+
     /// Place in the relative workspace content, beside history and inspector.
     pub fn render_error(
         &mut self,
@@ -1289,28 +1428,14 @@ impl Chrome {
         if self.name.is_none() || self.busy {
             return None;
         }
-        let error = self.error.clone()?;
-        let p = self.preferences.palette();
+        let notice = self.error.clone()?;
         Some(
-            div()
-                .id("workspace-error")
+            self.render_notice(&notice, cx)
                 .absolute()
                 .bottom(px(43.))
                 .left(px(20.))
                 .right(px(details_width + 20.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(15.))
-                .text_size(px(11. + self.preferences.font_size_offset))
-                .line_height(px(18.))
-                .px(px(12.))
-                .py(px(8.))
-                .rounded(RADIUS_MD)
-                .border_1()
-                .border_color(rgb(mix(p.danger, p.border, 0.45)))
-                .bg(rgb(mix(p.danger, p.bg, 0.10)))
-                .text_color(rgb(p.danger))
+                .occlude()
                 .shadow(vec![BoxShadow {
                     color: rgba(0x00000055).into(),
                     offset: point(px(0.), px(6.)),
@@ -1318,16 +1443,6 @@ impl Chrome {
                     spread_radius: px(0.),
                     inset: false,
                 }])
-                .child(div().flex_1().min_w_0().child(error))
-                .child(
-                    Button::new("dismiss-workspace-error")
-                        .ghost()
-                        .w(px(28.))
-                        .h(px(28.))
-                        .icon(icon(IconName::X, 14., p.muted))
-                        .accessibility_label("Fermer le message")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::DismissError))),
-                )
                 .into_any_element(),
         )
     }
@@ -1524,4 +1639,20 @@ fn kbd(label: &str, p: Palette, offset: f32) -> AnyElement {
         .text_color(rgb(p.muted))
         .child(label.to_string())
         .into_any_element()
+}
+
+fn notice_action(id: &'static str, label: &'static str, p: Palette, offset: f32) -> NativeButton {
+    NativeButton::new(id)
+        .px(px(6.))
+        .py(px(2.))
+        .rounded(RADIUS_SM)
+        .border_1()
+        .border_color(rgb(mix(p.danger, p.bg, 0.10)))
+        .text_size(px(11. + offset))
+        .text_color(rgb(p.accent))
+        .cursor_pointer()
+        .hover(move |style| style.bg(rgb(p.hover)))
+        .focus_visible(move |style| style.border_color(rgb(p.accent)))
+        .accessibility_label(label)
+        .child(label)
 }
