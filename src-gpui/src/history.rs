@@ -385,7 +385,8 @@ pub fn highlight_terms(filter: &str) -> Vec<String> {
     terms
 }
 
-fn fold(text: &str) -> String {
+/// Case- and accent-insensitive form of `text`, shared by every local search.
+pub(crate) fn fold(text: &str) -> String {
     Folded::new(text).text
 }
 

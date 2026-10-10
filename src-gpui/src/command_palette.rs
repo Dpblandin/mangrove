@@ -2,6 +2,7 @@
 //! different repository or file. Only visible rows are rendered.
 use crate::{
     file_browser::FileView,
+    history::fold,
     preferences::Pane,
     settings::SettingsSection,
     theme::{Palette, RADIUS_LG, RADIUS_SM, icon, scrollbar_theme},
@@ -16,7 +17,6 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use icu_normalizer::{DecomposingNormalizer, properties::CanonicalCombiningClassMapBorrowed};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -137,15 +137,6 @@ impl CommandEntry {
     pub fn is_current(&self, current: &[Self]) -> bool {
         self.disabled.is_none() && current.iter().any(|entry| entry == self)
     }
-}
-
-fn fold(text: &str) -> String {
-    let combining = CanonicalCombiningClassMapBorrowed::new();
-    DecomposingNormalizer::new_nfd()
-        .normalize_iter(text.chars())
-        .filter(|character| combining.get_u8(*character) == 0)
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 #[derive(Default)]
