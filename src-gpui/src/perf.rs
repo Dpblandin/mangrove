@@ -4,6 +4,7 @@
 //! through the same handlers as user interactions. `tick` must run on the window's
 //! next-frame callback during workloads, and on a quiet timer during idle.
 
+use crate::preferences::DiffLayout;
 use gpui_kit::profiler::{self, FrameEvent, FrameTimingCollector};
 use serde::Serialize;
 use std::{
@@ -65,6 +66,8 @@ pub struct Configuration {
     pub syntax_files: [String; 2],
     pub heavy_file: String,
     pub scroll_files: bool,
+    /// The layout of the central diffs, unified unless asked otherwise.
+    pub diff_layout: DiffLayout,
 }
 
 impl Configuration {
@@ -88,6 +91,12 @@ impl Configuration {
             Ok(value) if value == "diff" => false,
             Err(std::env::VarError::NotPresent) => false,
             _ => return Err("MANGROVE_BENCH_SCROLL_TARGET must be diff or unstaged-files".into()),
+        };
+        configuration.diff_layout = match std::env::var("MANGROVE_BENCH_DIFF_LAYOUT") {
+            Ok(value) if value == "split" => DiffLayout::Split,
+            Ok(value) if value == "unified" => DiffLayout::Unified,
+            Err(std::env::VarError::NotPresent) => DiffLayout::Unified,
+            _ => return Err("MANGROVE_BENCH_DIFF_LAYOUT must be unified or split".into()),
         };
         Ok(Some(configuration))
     }
@@ -127,6 +136,7 @@ impl Configuration {
             ],
             heavy_file: "generated/catalog.ts".into(),
             scroll_files: false,
+            diff_layout: DiffLayout::Unified,
         }))
     }
 
@@ -151,6 +161,8 @@ pub struct PerfSnapshot {
     /// 0 or 1 for the two small syntax targets; `None` for another file.
     pub syntax_target: Option<usize>,
     pub heavy_diff: bool,
+    /// The diff is shown side by side.
+    pub diff_split: bool,
     pub file_count: usize,
     pub history_total: usize,
     pub diff_rows: usize,
@@ -205,6 +217,7 @@ struct Workload {
     changed_files: usize,
     heavy_diff_rows: usize,
     heavy_diff_colored: usize,
+    heavy_diff_split: usize,
     selection_samples: usize,
     burst_selections: usize,
     syntax_samples: usize,
@@ -661,6 +674,7 @@ impl PerfSession {
                     );
                     self.report.workload.heavy_diff_rows = snapshot.diff_rows;
                     self.report.workload.heavy_diff_colored = usize::from(snapshot.syntax_ready);
+                    self.report.workload.heavy_diff_split = usize::from(snapshot.diff_split);
                     self.transition(Stage::DiffScroll, "diff_scroll");
                 }
             }

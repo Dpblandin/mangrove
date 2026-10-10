@@ -10,7 +10,7 @@ use crate::{
     },
     format::{commit_date, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
-    preferences::Preferences,
+    preferences::{DiffLayout, Preferences},
     syntax,
     theme::{Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
     view_cache::render_cached_view,
@@ -45,6 +45,7 @@ pub enum InspectorEvent {
     },
     WorkingTreeCounts(Vec<(String, usize)>),
     DiffFontChanged(f32),
+    DiffLayoutChanged(DiffLayout),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -219,6 +220,7 @@ impl DiffCache {
         let highlights = &prepared.highlights;
         let tokens = highlights.tokens.iter().map(Vec::len).sum::<usize>();
         let words = highlights.words.iter().map(Vec::len).sum::<usize>();
+        let pairs = highlights.pairs.as_ref().map_or(0, |pairs| pairs.len());
         let bytes = prepared
             .diff
             .hunks
@@ -226,7 +228,8 @@ impl DiffCache {
             .map(|h| h.header.len() + h.lines.iter().map(|l| l.content.len()).sum::<usize>())
             .sum::<usize>()
             + tokens * std::mem::size_of::<syntax::Token>()
-            + words * std::mem::size_of::<Range<usize>>();
+            + words * std::mem::size_of::<Range<usize>>()
+            + pairs * std::mem::size_of::<(usize, usize)>();
         if bytes > MAX_CACHE_BYTES || tokens > MAX_CACHE_TOKENS {
             if background {
                 self.background_full = true;
@@ -461,6 +464,11 @@ impl InspectorView {
         let browser = cx.new(|cx| FileBrowser::new(engine.clone(), gate.clone(), window, cx));
         let code_subscription = cx.subscribe(&viewer, |view, _, event, cx| match event {
             CodeViewEvent::FontSizeChanged(size) => cx.emit(InspectorEvent::DiffFontChanged(*size)),
+            CodeViewEvent::LayoutChanged(layout) => {
+                cx.emit(InspectorEvent::DiffLayoutChanged(*layout))
+            }
+            // The local and stash header shows the layout toggle.
+            CodeViewEvent::LayoutSwitched => cx.notify(),
             CodeViewEvent::NavigateCommit(sha) => {
                 cx.emit(InspectorEvent::NavigateCommit(sha.clone()))
             }
@@ -474,6 +482,9 @@ impl InspectorView {
             }
             FileBrowserEvent::FontSizeChanged(size) => {
                 cx.emit(InspectorEvent::DiffFontChanged(*size))
+            }
+            FileBrowserEvent::LayoutChanged(layout) => {
+                cx.emit(InspectorEvent::DiffLayoutChanged(*layout))
             }
             FileBrowserEvent::ShowLarge => view.show_large(cx),
         });
@@ -918,6 +929,13 @@ impl InspectorView {
                 .map(|diff| diff.hunks.iter().map(|h| h.lines.len()).sum())
                 .unwrap_or(0),
         )
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_split(&self, cx: &App) -> bool {
+        if !self.compact && matches!(self.selection, Selection::Commit(_)) {
+            return self.browser.read(cx).benchmark_split(cx);
+        }
+        self.viewer.read(cx).is_split()
     }
     #[cfg(feature = "app-benchmark")]
     pub fn benchmark_scroll_to(&mut self, offset: f32, cx: &mut Context<Self>) {
@@ -2061,6 +2079,8 @@ impl InspectorView {
                 .child(render_cached_view(self.browser.clone(), window))
                 .into_any_element();
         }
+        // The local and stash diffs share the compact view's viewer.
+        self.viewer.update(cx, |v, cx| v.set_split_host(true, cx));
         self.sync_viewer(window, cx);
         let p = self.palette;
         let o = self.preferences.font_size_offset;
@@ -2071,8 +2091,13 @@ impl InspectorView {
             .or_else(|| self.intent.choice())
             .map(|file| path_label(&file.path, file.old_path.as_deref()))
             .unwrap_or_default();
-        let (hunks, controls) = self.viewer.update(cx, |v, cx| {
-            (v.hunk_controls(cx), v.font_controls(window, cx))
+        let image = self.image_preview.read(cx).has_target();
+        let (layout, hunks, controls) = self.viewer.update(cx, |v, cx| {
+            (
+                (!image).then(|| v.layout_controls(window, cx)).flatten(),
+                v.hunk_controls(cx),
+                v.font_controls(window, cx),
+            )
         });
         div()
             .size_full()
@@ -2098,6 +2123,7 @@ impl InspectorView {
                     .bg(rgb(p.panel))
                     .child(icon(IconName::FileText, 15., p.muted))
                     .child(path_title("local-path", path, o).flex_1())
+                    .children(layout)
                     .child(hunks)
                     .child(controls)
                     .child(
@@ -2499,6 +2525,7 @@ impl InspectorView {
         self.choose(files[target].clone(), cx);
     }
     fn compact_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.viewer.update(cx, |v, cx| v.set_split_host(false, cx));
         self.sync_viewer(window, cx);
         let p = self.palette;
         let o = self.preferences.font_size_offset;
@@ -3836,16 +3863,19 @@ mod tests {
     }
 
     #[test]
-    fn cached_patches_count_the_bytes_of_their_changed_words() {
+    fn cached_patches_count_the_bytes_of_their_changed_words_and_pairs() {
         let mut cache = DiffCache::default();
         cache.remember("plain".into(), diff(10), PreviewLimit::MIN, false);
         let plain = cache.bytes;
         let mut prepared = diff(10);
         prepared.highlights.words = Arc::new(vec![Vec::new(), vec![0..2, 4..6, 8..10]]);
+        prepared.highlights.pairs = Some(Arc::new(vec![(1, 2)]));
         cache.remember("plain".into(), prepared, PreviewLimit::MIN, false);
         assert_eq!(
             cache.bytes,
-            plain + 3 * std::mem::size_of::<std::ops::Range<usize>>()
+            plain
+                + 3 * std::mem::size_of::<std::ops::Range<usize>>()
+                + std::mem::size_of::<(usize, usize)>()
         );
         assert_eq!(cache.tokens, 0);
     }

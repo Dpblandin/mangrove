@@ -62,6 +62,8 @@ impl LineKind {
 /// indexed like `syntax::Tokens`: one row per hunk header, then its lines.
 pub type Words = Arc<Vec<Ranges>>;
 type Ranges = Vec<Range<usize>>;
+/// Each paired deletion and addition, by row, in patch order.
+pub type Pairs = Arc<Vec<(usize, usize)>>;
 
 /// Remove the single line terminator introduced by Git, preserving all other
 /// whitespace (including a literal trailing carriage return).
@@ -71,19 +73,9 @@ pub fn strip_line_ending(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// The changed words of each pair of a deletion and an addition in `diff`.
-/// `None` means cancellation. Like syntax, an exhausted budget leaves no
-/// highlight at all rather than highlight part of the file.
-pub fn changed_words(diff: &FileDiff, should_cancel: impl Fn() -> bool) -> Option<Words> {
-    changed_words_within(diff, MAX_STEPS, Instant::now() + TIME_BUDGET, should_cancel)
-}
-
-fn changed_words_within(
-    diff: &FileDiff,
-    steps: usize,
-    deadline: Instant,
-    should_cancel: impl Fn() -> bool,
-) -> Option<Words> {
+/// The kind and text of the rows a code view shows for `diff`: a header
+/// per hunk, then its lines.
+pub fn rows(diff: &FileDiff) -> (Vec<LineKind>, Vec<&str>) {
     let mut kinds = Vec::new();
     let mut texts = Vec::new();
     for hunk in &diff.hunks {
@@ -94,37 +86,88 @@ fn changed_words_within(
             texts.push(strip_line_ending(&line.content));
         }
     }
-    let mut words = vec![Vec::new(); kinds.len()];
+    (kinds, texts)
+}
+
+/// Each deletion paired with an addition, block after block: the rows that
+/// share changed words and face each other side by side. `None` means
+/// cancellation.
+pub fn pairs(
+    kinds: &[LineKind],
+    texts: &[&str],
+    should_cancel: impl Fn() -> bool,
+) -> Option<Vec<(usize, usize)>> {
+    let mut pairs = Vec::new();
+    for block in blocks(kinds) {
+        if should_cancel() {
+            return None;
+        }
+        pairs.extend(
+            block
+                .pairs(texts)
+                .into_iter()
+                .map(|(old, new)| (block.deletions[old], block.additions[new])),
+        );
+    }
+    Some(pairs)
+}
+
+/// The changed words of each pair, indexed like the rows. `None` means
+/// cancellation. Like syntax, an exhausted budget leaves no highlight at
+/// all rather than highlight part of the file.
+pub fn changed_words(
+    texts: &[&str],
+    pairs: &[(usize, usize)],
+    should_cancel: impl Fn() -> bool,
+) -> Option<Words> {
+    changed_words_within(
+        texts,
+        pairs,
+        MAX_STEPS,
+        Instant::now() + TIME_BUDGET,
+        should_cancel,
+    )
+}
+
+fn changed_words_within(
+    texts: &[&str],
+    pairs: &[(usize, usize)],
+    steps: usize,
+    deadline: Instant,
+    should_cancel: impl Fn() -> bool,
+) -> Option<Words> {
+    let mut words = vec![Vec::new(); texts.len()];
     let mut budget = Budget(Some(steps));
     let mut ranges = 0;
-    for block in blocks(&kinds) {
+    for &(old, new) in pairs {
         if should_cancel() {
             return None;
         }
         if Instant::now() > deadline {
             return Some(Arc::default());
         }
-        for (old, new) in block.pairs(&texts) {
-            let Some((removed, added)) = changed_ranges(texts[old], texts[new], &mut budget) else {
-                return Some(Arc::default());
-            };
-            ranges += removed.len() + added.len();
-            if ranges > MAX_RANGES {
-                return Some(Arc::default());
-            }
-            words[old] = removed;
-            words[new] = added;
+        let Some((removed, added)) = changed_ranges(texts[old], texts[new], &mut budget) else {
+            return Some(Arc::default());
+        };
+        ranges += removed.len() + added.len();
+        if ranges > MAX_RANGES {
+            return Some(Arc::default());
         }
+        words[old] = removed;
+        words[new] = added;
     }
     (!should_cancel()).then(|| Arc::new(words))
 }
 
 /// The deletions and additions between two context lines or hunk headers,
-/// by row. Annotations neither end a block nor belong to it.
+/// by row. Annotations do not end a block: those among its lines join it.
 #[derive(Default)]
-struct Block {
-    deletions: Vec<usize>,
-    additions: Vec<usize>,
+pub struct Block {
+    pub deletions: Vec<usize>,
+    pub additions: Vec<usize>,
+    pub annotations: Vec<usize>,
+    /// The consecutive rows of the block.
+    pub rows: Range<usize>,
 }
 
 impl Block {
@@ -132,27 +175,31 @@ impl Block {
         self.deletions.is_empty() && self.additions.is_empty()
     }
 
-    /// Each deletion paired with an addition, by row.
+    /// Each paired deletion and addition, by position in the block.
     fn pairs(&self, texts: &[&str]) -> Vec<(usize, usize)> {
         let lines = |rows: &[usize]| rows.iter().map(|&row| texts[row]).collect::<Vec<_>>();
         pair_block(&lines(&self.deletions), &lines(&self.additions))
-            .into_iter()
-            .map(|(old, new)| (self.deletions[old], self.additions[new]))
-            .collect()
     }
 }
 
-fn blocks(kinds: &[LineKind]) -> Vec<Block> {
+pub fn blocks(kinds: &[LineKind]) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut block = Block::default();
     for (row, kind) in kinds.iter().enumerate() {
         match kind {
             LineKind::Deletion => block.deletions.push(row),
             LineKind::Addition => block.additions.push(row),
-            LineKind::Annotation => {}
-            _ if block.is_empty() => {}
-            _ => blocks.push(mem::take(&mut block)),
+            LineKind::Annotation if !block.is_empty() => block.annotations.push(row),
+            _ if block.is_empty() => continue,
+            _ => {
+                blocks.push(mem::take(&mut block));
+                continue;
+            }
         }
+        if block.rows.is_empty() {
+            block.rows.start = row;
+        }
+        block.rows.end = row + 1;
     }
     if !block.is_empty() {
         blocks.push(block);
@@ -544,7 +591,9 @@ mod tests {
     }
 
     fn words(diff: &FileDiff) -> Vec<Vec<Range<usize>>> {
-        changed_words(diff, || false).unwrap().to_vec()
+        let (kinds, texts) = rows(diff);
+        let pairs = pairs(&kinds, &texts, || false).unwrap();
+        changed_words(&texts, &pairs, || false).unwrap().to_vec()
     }
 
     /// The changed text of each row, to read the expectations.
@@ -820,27 +869,22 @@ mod tests {
             }))
             .collect();
         let diff = patch(lines);
+        let (kinds, texts) = rows(&diff);
+        let paired = pairs(&kinds, &texts, || false).unwrap();
+        assert_eq!(paired.len(), 200);
         let far = Instant::now() + Duration::from_secs(60);
-        let full = changed_words_within(&diff, MAX_STEPS, far, || false).unwrap();
+        let within =
+            |steps, deadline| changed_words_within(&texts, &paired, steps, deadline, || false);
+        let full = within(MAX_STEPS, far).unwrap();
         assert_eq!(full.len(), 401);
         assert!(full[1..].iter().all(|ranges| !ranges.is_empty()));
-        assert_eq!(
-            full,
-            changed_words_within(&diff, MAX_STEPS, far, || false).unwrap()
-        );
+        assert_eq!(full, within(MAX_STEPS, far).unwrap());
         // A budget too small for the whole file highlights none of it.
-        assert!(
-            changed_words_within(&diff, 2_000, far, || false)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(within(2_000, far).unwrap().is_empty());
         let past = Instant::now() - Duration::from_secs(1);
-        assert!(
-            changed_words_within(&diff, MAX_STEPS, past, || false)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(changed_words(&diff, || true).is_none());
+        assert!(within(MAX_STEPS, past).unwrap().is_empty());
+        assert!(pairs(&kinds, &texts, || true).is_none());
+        assert!(changed_words(&texts, &paired, || true).is_none());
     }
 
     #[test]
@@ -899,10 +943,10 @@ mod tests {
                 ),
             )
         };
-        for pairs in [1_000, 2_000] {
-            let block = patch((0..pairs).map(old).chain((0..pairs).map(new)).collect());
+        for count in [1_000, 2_000] {
+            let block = patch((0..count).map(old).chain((0..count).map(new)).collect());
             let blocks = patch(
-                (0..pairs / 10)
+                (0..count / 10)
                     .flat_map(|block| {
                         let rows = block * 10..block * 10 + 10;
                         rows.clone()
@@ -916,14 +960,16 @@ mod tests {
                 let mut samples: Vec<_> = (0..41)
                     .map(|_| {
                         let started = Instant::now();
-                        let words = changed_words(&diff, || false).unwrap();
+                        let (kinds, texts) = rows(&diff);
+                        let paired = pairs(&kinds, &texts, || false).unwrap();
+                        let words = changed_words(&texts, &paired, || false).unwrap();
                         assert!(words.iter().any(|ranges| !ranges.is_empty()));
                         started.elapsed().as_secs_f64() * 1_000.
                     })
                     .collect();
                 samples.sort_by(f64::total_cmp);
                 println!(
-                    "changed_words pairs={pairs} {label}: p50={:.2} ms p95={:.2} ms max={:.2} ms",
+                    "changed_words pairs={count} {label}: p50={:.2} ms p95={:.2} ms max={:.2} ms",
                     samples[20], samples[38], samples[40]
                 );
             }

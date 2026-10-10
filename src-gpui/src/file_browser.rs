@@ -4,7 +4,7 @@ use crate::{
     code_view::{CodeView, CodeViewEvent, Highlights, ReadingPosition, hunk_shortcut},
     format::{commit_date, count_label, format_count, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
-    preferences::Preferences,
+    preferences::{DiffLayout, Preferences},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon},
     view_cache::render_cached_view,
 };
@@ -188,6 +188,7 @@ pub enum FileBrowserEvent {
     Close,
     NavigateCommit(String),
     FontSizeChanged(f32),
+    LayoutChanged(DiffLayout),
     /// The inspector's patch was skipped: read it up to `PreviewLimit::MAX`.
     ShowLarge,
 }
@@ -287,13 +288,22 @@ impl FileBrowser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let viewer = cx.new(|cx| CodeView::new(window, cx));
+        let viewer = cx.new(|cx| {
+            let mut viewer = CodeView::new(window, cx);
+            viewer.set_split_host(true, cx);
+            viewer
+        });
         let image_preview = cx.new(|_| ImagePreview::new(engine.clone(), gate.clone()));
         let subscription = cx.subscribe(&viewer, |view, _, event, cx| match event {
             CodeViewEvent::NavigateCommit(sha) => view.inspect_commit(sha.clone(), cx),
             CodeViewEvent::FontSizeChanged(size) => {
                 cx.emit(FileBrowserEvent::FontSizeChanged(*size))
             }
+            CodeViewEvent::LayoutChanged(layout) => {
+                cx.emit(FileBrowserEvent::LayoutChanged(*layout))
+            }
+            // The header shows the layout toggle.
+            CodeViewEvent::LayoutSwitched => cx.notify(),
             CodeViewEvent::Parent => view.parent_version(cx),
             CodeViewEvent::ShowLarge => view.show_large(cx),
         });
@@ -450,6 +460,10 @@ impl FileBrowser {
                 .map(|diff| diff.hunks.iter().map(|h| h.lines.len()).sum())
                 .unwrap_or(0),
         )
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_split(&self, cx: &App) -> bool {
+        self.viewer.read(cx).is_split()
     }
     #[cfg(feature = "app-benchmark")]
     pub fn benchmark_scroll_to(&mut self, offset: f32, cx: &mut Context<Self>) {
@@ -1140,6 +1154,12 @@ impl Render for FileBrowser {
         let controls = self.font_controls(window, cx);
         let diff_mode = self.mode == FileView::Diff;
         let hunks = diff_mode.then(|| self.viewer.update(cx, |view, cx| view.hunk_controls(cx)));
+        let layout = (diff_mode && !self.image_preview.read(cx).has_target())
+            .then(|| {
+                self.viewer
+                    .update(cx, |view, cx| view.layout_controls(window, cx))
+            })
+            .flatten();
         let counts = self
             .diff
             .as_deref()
@@ -1198,6 +1218,7 @@ impl Render for FileBrowser {
                             .when(busy, |s| s.opacity(0.6))
                             .child(sha),
                     )
+                    .children(layout)
                     .children(hunks)
                     .child(controls)
                     .child(
@@ -1969,5 +1990,109 @@ mod tests {
     #[test]
     fn displayed_sha_keeps_seven_characters() {
         assert_eq!(super::short_sha("0123456789abcdef"), "0123456");
+    }
+
+    /// The inspector shows the file browser through the view cache.
+    struct CachedHost {
+        browser: gpui_kit::Entity<FileBrowser>,
+    }
+
+    impl gpui_kit::Render for CachedHost {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            _: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{ParentElement, Styled, div};
+            div()
+                .size_full()
+                .child(crate::view_cache::render_cached_view(
+                    self.browser.clone(),
+                    window,
+                ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_layout_toggle_acts_once_per_key_press_and_keeps_the_focus(cx: &mut TestAppContext) {
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::test::TestWindowExt;
+        use mangrove_core::model::DiffLine;
+        let root = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Workspace::new(root.path().join("cache")).unwrap());
+        cx.update(gpui_kit::init);
+        let (window, host) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let browser = cx.new(|cx| FileBrowser::new(engine, Arc::default(), window, cx));
+                cx.new(|_| CachedHost { browser })
+            })
+            .unwrap()
+        });
+        let browser = cx.read(|cx| host.read(cx).browser.clone());
+        let line = |kind: &str, content: &str| DiffLine {
+            kind: kind.into(),
+            old_line: Some(1),
+            new_line: Some(1),
+            content: content.into(),
+        };
+        let edited = PreparedDiff {
+            diff: Arc::new(FileDiff {
+                hunks: vec![DiffHunk {
+                    header: "@@ -1,2 +1,2 @@".into(),
+                    lines: vec![
+                        line("context", "fn main() {}"),
+                        line("deletion", "let value = 1;"),
+                        line("addition", "let value = 2;"),
+                    ],
+                }],
+                ..FileDiff::default()
+            }),
+            highlights: Highlights::default(),
+            highlights_ready: true,
+        };
+        browser.update(cx, |view, cx| {
+            view.present(FilePresentation::ready(1, target("a"), edited), cx);
+            view.set_visible(true, cx);
+        });
+        // The application saves the asked layout and hands it back.
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = asked.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(
+                &browser,
+                move |browser, event: &super::FileBrowserEvent, cx| {
+                    if let super::FileBrowserEvent::LayoutChanged(layout) = event {
+                        recorded.borrow_mut().push(*layout);
+                        let preferences = Preferences {
+                            diff_layout: *layout,
+                            ..Preferences::default()
+                        };
+                        browser.update(cx, |view, cx| view.set_preferences(preferences, cx));
+                    }
+                },
+            )
+        });
+        cx.run_until_parked();
+        // The layout toggle is the first tab stop of the header.
+        let focused = cx
+            .update_window(window, |_, window, cx| {
+                window.focus_next(cx);
+                window.focused(cx)
+            })
+            .unwrap();
+        assert!(focused.is_some());
+        let press = |cx: &mut TestAppContext, key: &str| {
+            cx.update_window(window, |_, window, cx| {
+                window.press(key, cx);
+                window.focused(cx)
+            })
+            .unwrap()
+        };
+        assert_eq!(press(cx, "enter"), focused);
+        cx.run_until_parked();
+        assert_eq!(*asked.borrow(), [DiffLayout::Split]);
+        assert_eq!(press(cx, "space"), focused);
+        cx.run_until_parked();
+        assert_eq!(*asked.borrow(), [DiffLayout::Split, DiffLayout::Unified]);
     }
 }

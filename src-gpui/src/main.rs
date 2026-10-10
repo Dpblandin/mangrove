@@ -57,9 +57,10 @@ impl Startup {
         #[cfg(feature = "app-benchmark")]
         let benchmark = perf::Configuration::from_env()?;
         #[cfg(feature = "app-benchmark")]
-        let preferences = if benchmark.is_some() {
+        let preferences = if let Some(benchmark) = &benchmark {
             preferences::Preferences {
                 auto_fetch_interval: 0,
+                diff_layout: benchmark.diff_layout,
                 ..Default::default()
             }
         } else {

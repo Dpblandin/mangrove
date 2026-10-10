@@ -5,6 +5,7 @@ use crate::{
     command_palette::{Command, CommandEntry},
     file_browser::FileView,
     format::{control_shortcut_label, display_path, short_sha, shortcut_label},
+    preferences::DiffLayout,
     settings::SettingsSection,
     tabs::HOME,
     theme::ThemeId,
@@ -137,6 +138,19 @@ impl Mangrove {
                 "Affichage",
                 "zoom police fichier code",
             ),
+            CommandEntry::new(
+                Command::DiffLayout(match prefs.diff_layout {
+                    DiffLayout::Unified => DiffLayout::Split,
+                    DiffLayout::Split => DiffLayout::Unified,
+                }),
+                match prefs.diff_layout {
+                    DiffLayout::Unified => "Afficher les diffs côte à côte",
+                    DiffLayout::Split => "Afficher les diffs en vue unifiée",
+                },
+                "Affichage",
+                "split side by side unified colonnes diff disposition",
+            )
+            .detail("Vue centrale ; le diff du panneau des détails reste unifié"),
             CommandEntry::new(
                 Command::ResetPane(Pane::Left),
                 "Réinitialiser la largeur du panneau des branches",
@@ -619,6 +633,10 @@ impl Mangrove {
                 chrome
                     .preferences
                     .set_diff_font_size(chrome.preferences.diff_font_size + *delta as f32);
+                chrome.prefs_changed(window, cx);
+            }),
+            Command::DiffLayout(layout) => self.chrome.update(cx, |chrome, cx| {
+                chrome.preferences.diff_layout = *layout;
                 chrome.prefs_changed(window, cx);
             }),
             Command::ResetPane(pane) => self.chrome.update(cx, |chrome, cx| {

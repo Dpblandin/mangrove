@@ -54,7 +54,9 @@ fn main() -> Result<(), String> {
             syntax::cached_diff_tokens_cancellable(&file.path, &diff, || false).unwrap_or_default();
         let syntax_cached_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = Instant::now();
-        let words = diff::changed_words(&diff, || false).unwrap_or_default();
+        let (kinds, texts) = diff::rows(&diff);
+        let pairs = diff::pairs(&kinds, &texts, || false).unwrap_or_default();
+        let words = diff::changed_words(&texts, &pairs, || false).unwrap_or_default();
         let words_ms = started.elapsed().as_secs_f64() * 1000.;
         files.push(json!({
             "path": file.path,
