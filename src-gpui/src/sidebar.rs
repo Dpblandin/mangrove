@@ -407,12 +407,20 @@ enum SidebarRow {
         count: Option<usize>,
         expanded: bool,
     },
-    Worktree(usize),
+    /// Context entries keep their list index for rendering and their path or
+    /// SHA as identity, since a refresh can shift the indices.
+    Worktree {
+        index: usize,
+        path: String,
+    },
     Stashes {
         count: Option<usize>,
         expanded: bool,
     },
-    Stash(usize),
+    Stash {
+        index: usize,
+        sha: String,
+    },
     Notice {
         text: String,
         error: bool,
@@ -441,7 +449,7 @@ impl SidebarRow {
             Self::Spacer(height) => *height,
             Self::NoReferences => (11. + font_offset) * 1.5 + 40.,
             Self::ContextSeparator { margin_top } => margin_top + 8.,
-            Self::Worktree(_) | Self::Stash(_) => context_item_height(font_offset),
+            Self::Worktree { .. } | Self::Stash { .. } => context_item_height(font_offset),
             Self::Notice { .. } => (11. + font_offset) * 1.5 + 16.,
         })
     }
@@ -452,7 +460,7 @@ impl SidebarRow {
         match self {
             Self::Group { .. } | Self::Worktrees { .. } | Self::Stashes { .. } => Some(0),
             Self::Folder { depth, .. } | Self::Reference { depth, .. } => Some(depth + 1),
-            Self::Worktree(_) | Self::Stash(_) => Some(1),
+            Self::Worktree { .. } | Self::Stash { .. } => Some(1),
             Self::Spacer(_)
             | Self::NoReferences
             | Self::ContextSeparator { .. }
@@ -801,31 +809,20 @@ impl SidebarView {
             Some(SidebarRow::Reference { reference, .. }) => {
                 SidebarEvent::NavigateReference(reference.name.clone())
             }
-            Some(SidebarRow::Worktree(item)) => {
+            Some(SidebarRow::Worktree { index, .. }) => {
                 let Some(item) = self
                     .context
                     .worktrees
                     .data
                     .as_ref()
-                    .and_then(|list| list.worktrees.get(*item))
+                    .and_then(|list| list.worktrees.get(*index))
                     .filter(|item| item.available)
                 else {
                     return;
                 };
                 SidebarEvent::OpenWorktree(item.path.clone())
             }
-            Some(SidebarRow::Stash(item)) => {
-                let Some(item) = self
-                    .context
-                    .stashes
-                    .data
-                    .as_ref()
-                    .and_then(|list| list.stashes.get(*item))
-                else {
-                    return;
-                };
-                SidebarEvent::SelectStash(item.sha.clone())
-            }
+            Some(SidebarRow::Stash { sha, .. }) => SidebarEvent::SelectStash(sha.clone()),
             _ => return self.toggle_row(index, cx),
         };
         cx.emit(event);
@@ -1019,14 +1016,17 @@ impl SidebarView {
                 0.
             },
         });
-        let worktree_indices = self
-            .context
-            .worktrees
-            .data
-            .as_ref()
-            .map(|list| filtered_worktree_indices(list, &self.reference_state.filter));
+        let worktree_rows = self.context.worktrees.data.as_ref().map(|list| {
+            filtered_worktree_indices(list, &self.reference_state.filter)
+                .into_iter()
+                .map(|index| SidebarRow::Worktree {
+                    index,
+                    path: list.worktrees[index].path.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
         self.rows.push(SidebarRow::Worktrees {
-            count: worktree_indices.as_ref().map(Vec::len),
+            count: worktree_rows.as_ref().map(Vec::len),
             expanded: self.context.worktrees_expanded,
         });
         if self.context.worktrees_expanded {
@@ -1041,15 +1041,14 @@ impl SidebarView {
                     error: false,
                 });
             }
-            if let Some(indices) = worktree_indices {
-                if indices.is_empty() && self.reference_state.searching() {
+            if let Some(rows) = worktree_rows {
+                if rows.is_empty() && self.reference_state.searching() {
                     self.rows.push(SidebarRow::Notice {
                         text: "Aucun worktree trouvé.".into(),
                         error: false,
                     });
                 }
-                self.rows
-                    .extend(indices.into_iter().map(SidebarRow::Worktree));
+                self.rows.extend(rows);
                 if self
                     .context
                     .worktrees
@@ -1098,7 +1097,12 @@ impl SidebarView {
             }
             if let Some(list) = &self.context.stashes.data {
                 self.rows
-                    .extend((0..list.stashes.len()).map(SidebarRow::Stash));
+                    .extend(list.stashes.iter().enumerate().map(|(index, stash)| {
+                        SidebarRow::Stash {
+                            index,
+                            sha: stash.sha.clone(),
+                        }
+                    }));
                 if list.truncated {
                     self.rows.push(SidebarRow::Notice {
                         text: "Les 128 stashes les plus récents sont affichés.".into(),
@@ -1600,7 +1604,9 @@ impl SidebarView {
                     view.toggle_stashes(cx);
                 }))
                 .into_any_element(),
-            SidebarRow::Worktree(item_index) => {
+            SidebarRow::Worktree {
+                index: item_index, ..
+            } => {
                 let Some(item) = self
                     .context
                     .worktrees
@@ -1703,7 +1709,9 @@ impl SidebarView {
                     }));
                 self.tree_item(row, index, window).into_any_element()
             }
-            SidebarRow::Stash(item_index) => {
+            SidebarRow::Stash {
+                index: item_index, ..
+            } => {
                 let Some(item) = self
                     .context
                     .stashes
@@ -1950,8 +1958,8 @@ fn same_row_identity(left: &SidebarRow, right: &SidebarRow) -> bool {
         (SidebarRow::NoReferences, SidebarRow::NoReferences)
         | (SidebarRow::Worktrees { .. }, SidebarRow::Worktrees { .. })
         | (SidebarRow::Stashes { .. }, SidebarRow::Stashes { .. }) => true,
-        (SidebarRow::Worktree(a), SidebarRow::Worktree(b))
-        | (SidebarRow::Stash(a), SidebarRow::Stash(b)) => a == b,
+        (SidebarRow::Worktree { path: a, .. }, SidebarRow::Worktree { path: b, .. })
+        | (SidebarRow::Stash { sha: a, .. }, SidebarRow::Stash { sha: b, .. }) => a == b,
         (SidebarRow::Notice { text: a, .. }, SidebarRow::Notice { text: b, .. }) => a == b,
         _ => false,
     }
@@ -2007,7 +2015,7 @@ mod tests {
         Workspace,
         model::{IndexProgress, Reference, RepositoryInfo, WorktreeInfo, WorktreeList},
     };
-    use std::{cell::RefCell, cmp::Ordering, rc::Rc, sync::Arc};
+    use std::{cell::RefCell, cmp::Ordering, path::Path, rc::Rc, sync::Arc};
     use tempfile::TempDir;
 
     fn reference(label: &str) -> Arc<Reference> {
@@ -2067,7 +2075,10 @@ mod tests {
                 expanded: true,
             },
             notice("Lecture des worktrees…"),
-            SidebarRow::Worktree(0),
+            SidebarRow::Worktree {
+                index: 0,
+                path: "/main".into(),
+            },
             SidebarRow::Stashes {
                 count: Some(0),
                 expanded: true,
@@ -2192,7 +2203,7 @@ mod tests {
                         assert_eq!(height, ROW_HEIGHT);
                         assert!(line <= height);
                     }
-                    SidebarRow::Worktree(_) | SidebarRow::Stash(_) => {
+                    SidebarRow::Worktree { .. } | SidebarRow::Stash { .. } => {
                         assert!(2. * line <= height)
                     }
                     SidebarRow::Group { .. }
@@ -2204,18 +2215,24 @@ mod tests {
         }
     }
 
-    fn open_sidebar(cx: &mut TestAppContext) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+    fn sidebar_window(
+        cx: &mut TestAppContext,
+        engine: Arc<Workspace>,
+    ) -> (AnyWindowHandle, Entity<SidebarView>) {
         cx.update(gpui_kit::init);
         cx.update(|cx| cx.bind_keys([KeyBinding::new("escape", Escape, None)]));
+        cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| SidebarView::new(engine, window, cx))
+            })
+        })
+        .unwrap()
+    }
+
+    fn open_sidebar(cx: &mut TestAppContext) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
         let cache = tempfile::tempdir().unwrap();
         let engine = Arc::new(Workspace::new(cache.path().join("cache")).unwrap());
-        let (window, view) = cx
-            .update(|cx| {
-                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                    cx.new(|cx| SidebarView::new(engine, window, cx))
-                })
-            })
-            .unwrap();
+        let (window, view) = sidebar_window(cx, engine);
         let references = ["feature/a", "feature/b", "main"]
             .into_iter()
             .map(|label| (*reference(label)).clone())
@@ -2259,6 +2276,8 @@ mod tests {
                 Some(SidebarRow::Reference { reference, .. }) => reference.label.clone(),
                 Some(SidebarRow::Worktrees { .. }) => "Worktrees".into(),
                 Some(SidebarRow::Stashes { .. }) => "Stashes".into(),
+                Some(SidebarRow::Worktree { path, .. }) => path.clone(),
+                Some(SidebarRow::Stash { sha, .. }) => sha.clone(),
                 other => format!("{:?}", other.map(SidebarRow::level)),
             }
         })
@@ -2334,6 +2353,93 @@ mod tests {
         assert_eq!(active_label(cx, &view), "Branches locales");
         press(cx, window, "up");
         assert_eq!(focus(cx), (false, true));
+    }
+
+    fn signature() -> git2::Signature<'static> {
+        git2::Signature::new(
+            "Test",
+            "test@example.test",
+            &git2::Time::new(1_700_000_000, 0),
+        )
+        .unwrap()
+    }
+
+    /// Stashes `text` as a change of the committed file and returns its SHA.
+    fn stash(path: &Path, text: &str) -> String {
+        let mut repository = git2::Repository::open(path).unwrap();
+        std::fs::write(path.join("file.txt"), text).unwrap();
+        repository
+            .stash_save(&signature(), text, None)
+            .unwrap()
+            .to_string()
+    }
+
+    /// A one-commit repository with `count` stashes, the newest last.
+    fn stash_repository(count: usize) -> (TempDir, Arc<Workspace>, RepositoryInfo, Vec<String>) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("repository");
+        let repository = git2::Repository::init(&path).unwrap();
+        std::fs::write(path.join("file.txt"), "base").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        repository
+            .commit(Some("HEAD"), &signature(), &signature(), "base", &tree, &[])
+            .unwrap();
+        let shas = (0..count)
+            .map(|index| stash(&path, &format!("change {index}")))
+            .collect();
+        let engine = Arc::new(Workspace::new(root.path().join("cache")).unwrap());
+        let info = engine.open_repository(path.to_str().unwrap()).unwrap();
+        (root, engine, info, shas)
+    }
+
+    #[gpui_kit::test]
+    fn active_stash_keeps_its_sha_when_a_new_stash_shifts_the_list(cx: &mut TestAppContext) {
+        let (_root, engine, info, shas) = stash_repository(2);
+        let (window, view) = sidebar_window(cx, engine.clone());
+        view.update(cx, |view, cx| {
+            view.set_repository(Arc::new(info.clone()), cx)
+        });
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.show_context(false, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        press(cx, window, "down");
+        press(cx, window, "down");
+        // stash@{1} is the older of the two.
+        assert_eq!(active_label(cx, &view), shas[0]);
+
+        stash(Path::new(&info.path), "change 2");
+        let info = engine.open_repository(&info.path).unwrap();
+        view.update(cx, |view, cx| view.set_repository(Arc::new(info), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .context
+                .stashes
+                .data
+                .as_ref()
+                .unwrap()
+                .stashes
+                .len()),
+            3
+        );
+        assert_eq!(active_label(cx, &view), shas[0]);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(format!("{event:?}"));
+            })
+        });
+        press(cx, window, "enter");
+        assert_eq!(
+            events.borrow().as_slice(),
+            [format!("{:?}", SidebarEvent::SelectStash(shas[0].clone()))]
+        );
     }
 
     #[gpui_kit::test]
@@ -2555,12 +2661,18 @@ mod tests {
                 count: Some(1),
                 expanded: true,
             },
-            SidebarRow::Worktree(0),
+            SidebarRow::Worktree {
+                index: 0,
+                path: "/main".into(),
+            },
             SidebarRow::Stashes {
                 count: Some(1),
                 expanded: true,
             },
-            SidebarRow::Stash(0),
+            SidebarRow::Stash {
+                index: 0,
+                sha: "a".repeat(40),
+            },
             SidebarRow::Spacer(24.),
         ]);
         let list = ListState::new(rows.len(), ListAlignment::Top, px(200.));
