@@ -258,3 +258,153 @@ fn opening_a_solo_history_does_not_navigate_to_a_worktree_head_outside_it(cx: &m
         assert!(history.error.is_none(), "{:?}", history.error);
     });
 }
+
+fn settle(cx: &mut TestAppContext) {
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+}
+
+fn search(cx: &mut TestAppContext, view: &Entity<HistoryView>, query: &str) {
+    view.update(cx, |view, cx| view.set_query(query.into(), cx));
+    settle(cx);
+}
+
+fn jump(cx: &mut TestAppContext, view: &Entity<HistoryView>, sha: &str) {
+    cx.update_window(cx.windows()[0], |_, window, cx| {
+        view.update(cx, |view, cx| view.jump_to(sha.into(), window, cx));
+    })
+    .unwrap();
+    settle(cx);
+}
+
+fn record_selections(
+    cx: &mut TestAppContext,
+    view: &Entity<HistoryView>,
+) -> Rc<RefCell<Vec<String>>> {
+    let selections = Rc::new(RefCell::new(Vec::new()));
+    let captured = selections.clone();
+    cx.update(|cx| {
+        cx.subscribe(view, move |_, event, _| {
+            if let HistoryEvent::Selected { sha, .. } = event {
+                captured.borrow_mut().push(sha.clone());
+            }
+        })
+        .detach()
+    });
+    selections
+}
+
+/// Selected commit, its list offset, and whether its row is in the viewport.
+fn selection(cx: &mut TestAppContext, view: &Entity<HistoryView>) -> (String, usize, bool) {
+    cx.update_window(cx.windows()[0], |_, window, cx| {
+        window.render_frame(cx);
+        let history = view.read(cx);
+        let scroll = history.scroll.0.borrow();
+        let top = px(super::ROW_HEIGHT) * history.selected_index + scroll.base_handle.offset().y;
+        let visible =
+            top >= px(0.) && top + px(super::ROW_HEIGHT) <= scroll.base_handle.bounds().size.height;
+        (
+            history.selected_sha.clone(),
+            history.selected_index,
+            visible,
+        )
+    })
+    .unwrap()
+}
+
+fn open_main(
+    cx: &mut TestAppContext,
+    fixture: &Fixture,
+) -> (Arc<Workspace>, RepositoryInfo, Entity<HistoryView>) {
+    let engine = fixture.workspace();
+    let view = open_view(cx, engine.clone());
+    let info = engine
+        .open_repository(fixture.main.to_str().unwrap())
+        .unwrap();
+    finish(&engine, &info);
+    let info = engine.open_repository(&info.path).unwrap();
+    set_repository(cx, &view, info.clone());
+    settle(cx);
+    (engine, info, view)
+}
+
+fn commit_at(engine: &Workspace, info: &RepositoryInfo, position: usize) -> String {
+    let mut page = engine.list_commits(&info.id, position, 1, "").unwrap();
+    let commit = page.commits.remove(0);
+    assert_eq!(commit.summary, "older change");
+    commit.sha
+}
+
+// Walk: 132 newer changes, the linked worktree commit, 32 older changes, base.
+const FIRST_OLDER: usize = PAGE_SIZE + 5;
+
+#[gpui_kit::test]
+fn searching_keeps_a_matching_selection_and_clearing_reveals_it_again(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    let position = FIRST_OLDER + 7;
+    let target = commit_at(&engine, &info, position);
+    jump(cx, &view, &target);
+    assert_eq!(selection(cx, &view), (target.clone(), position, true));
+    let selections = record_selections(cx, &view);
+
+    // Every result is on page zero.
+    search(cx, &view, "older");
+    assert_eq!(selection(cx, &view), (target.clone(), 7, true));
+    // A result beyond page zero is found by its offset.
+    search(cx, &view, "change");
+    assert_eq!(selection(cx, &view), (target.clone(), position, true));
+    search(cx, &view, "");
+    assert_eq!(selection(cx, &view), (target.clone(), position, true));
+    assert!(selections.borrow().is_empty());
+
+    // A commit outside the results gives way to the first result.
+    search(cx, &view, "newer");
+    assert_eq!(selection(cx, &view), (fixture.newest.clone(), 0, true));
+    assert_eq!(
+        selections.borrow().as_slice(),
+        std::slice::from_ref(&fixture.newest)
+    );
+    cx.read(|cx| assert!(view.read(cx).error.is_none()));
+}
+
+#[gpui_kit::test]
+fn navigating_to_a_reference_keeps_a_search_only_when_it_contains_the_commit(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    let target = commit_at(&engine, &info, FIRST_OLDER + 3);
+    search(cx, &view, "older");
+    jump(cx, &view, &target);
+    assert_eq!(selection(cx, &view), (target.clone(), 3, true));
+    cx.read(|cx| assert_eq!(view.read(cx).query, "older"));
+
+    jump(cx, &view, &fixture.newest);
+    assert_eq!(selection(cx, &view), (fixture.newest.clone(), 0, true));
+    cx.read(|cx| {
+        let history = view.read(cx);
+        assert!(history.query.is_empty() && !history.filtered());
+    });
+}
+
+#[gpui_kit::test]
+fn applying_solo_replaces_a_selection_outside_the_filtered_history(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    assert_eq!(selection(cx, &view).0, fixture.newest);
+    let selections = record_selections(cx, &view);
+    let solo = vec!["refs/heads/topic".to_owned()];
+    let soloed = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+    finish(&engine, &soloed);
+    let soloed = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+    set_repository(cx, &view, soloed);
+    settle(cx);
+    // The topic tip is the first commit of its Solo history.
+    assert_eq!(selection(cx, &view), (fixture.head.clone(), 0, true));
+    assert_eq!(
+        selections.borrow().as_slice(),
+        std::slice::from_ref(&fixture.head)
+    );
+}
