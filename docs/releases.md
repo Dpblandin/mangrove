@@ -12,6 +12,8 @@ Chaque version de Mangrove est publiée dans les [releases GitHub](https://githu
 | `mangrove-X.Y.Z-windows-x86_64.zip` | Windows 10 et 11 x86_64 |
 | `SHA256SUMS.txt` | Sommes de contrôle des fichiers ci-dessus |
 
+Chaque archive contient aussi `LICENSE.md`, la licence de Mangrove, et `THIRD-PARTY-LICENSES.md`, les licences des composants tiers intégrés. Sous Linux, ces deux fichiers sont dans `share/doc/mangrove`.
+
 Sur toutes les plateformes, le fetch et le clonage utilisent Git installé sur la machine.
 
 ### macOS

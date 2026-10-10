@@ -1,0 +1,13 @@
+# Licences des composants tiers
+
+Mangrove intègre les composants open source ci-dessous. Chaque section donne une licence, puis le texte complet de la licence.
+{{#each licenses}}
+
+## {{{name}}}
+
+Utilisée par : {{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}, {{/unless}}{{/each}}.
+
+```text
+{{{text}}}
+```
+{{/each}}

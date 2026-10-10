@@ -11,7 +11,7 @@ on:
       - scripts/release*.sh
       - src-gpui/build.rs
       - src-gpui/packaging/**
-      - src-gpui/scripts/package-*.sh
+      - src-gpui/scripts/**
   workflow_dispatch:
 
 permissions:
@@ -23,9 +23,9 @@ concurrency:
 
 jobs:
   prepare:
-    name: Version and notes
+    name: Version, notes and licenses
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -58,6 +58,19 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: sh scripts/release-notes.sh "$VERSION"
+      - run: rustup show
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about --version 0.9.2 --features cli
+      - name: Collect Mangrove's license and the third-party licenses
+        run: |
+          mkdir notices
+          cp LICENSE.md notices/
+          sh src-gpui/scripts/third-party-licenses.sh notices/THIRD-PARTY-LICENSES.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notices
+          path: notices/
+          if-no-files-found: error
 
   build:
     name: Build / ${{ matrix.name }}
@@ -98,6 +111,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: notices
       - name: Install Linux GPUI dependencies
         if: runner.os == 'Linux'
         run: |
@@ -121,7 +138,7 @@ jobs:
           codesign --verify --strict "$app"
           test "$(lipo -archs "$app/Contents/MacOS/mangrove-gpui")" = "$ARCH"
           stage=$(mktemp -d)
-          cp -R "$app" "$stage/"
+          cp -R "$app" notices/* "$stage/"
           ln -s /Applications "$stage/Applications"
           mkdir -p dist
           # hdiutil occasionally reports a busy resource on hosted runners.
@@ -135,7 +152,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           prefix=$(sh src-gpui/scripts/package-linux.sh)
-          mkdir -p dist
+          mkdir -p "$prefix/share/doc/mangrove" dist
+          cp notices/* "$prefix/share/doc/mangrove/"
           tar --owner=0 --group=0 -czf "dist/$ASSET" -C "$(dirname "$prefix")" mangrove
       - name: Package the Windows application
         if: runner.os == 'Windows'
@@ -155,6 +173,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'Mangrove'
           New-Item -ItemType Directory -Force -Path $stage, dist | Out-Null
           Copy-Item $exe (Join-Path $stage 'Mangrove.exe')
+          Copy-Item notices/* $stage
           Compress-Archive -Path $stage -DestinationPath "dist/$env:ASSET"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
