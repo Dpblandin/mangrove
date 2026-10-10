@@ -12,7 +12,7 @@ Client Git desktop natif pour explorer l’historique, les branches et les diffs
 - **Modifications locales** : fichiers indexés, non indexés et non suivis, en lecture seule.
 - **Fetch** : manuel ou automatique, avec des erreurs résumées et le détail de Git.
 - **Intégrations** : profils, comptes GitLab, GitHub et Bitbucket (dépôts, PR/MR, CI), clonage HTTPS ou SSH ; jetons dans le coffre de l’OS ([détails](docs/integrations.md)).
-- **Interface** : cinq thèmes dont [Catppuccin](https://catppuccin.com/palette/) Macchiato, palette de commandes **Cmd/Ctrl + P** ([commandes](docs/command-palette.md)), navigation au clavier, panneaux redimensionnables et zoom.
+- **Interface** : six thèmes dont [Catppuccin](https://catppuccin.com/palette/) Macchiato, palette de commandes **Cmd/Ctrl + P** ([commandes](docs/command-palette.md)), navigation au clavier, panneaux redimensionnables et zoom.
 
 ## Installer
 

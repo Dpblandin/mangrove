@@ -14,8 +14,9 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
+    /// Lane colors keep counting; each theme cycles them over its own palette.
     fn color(&mut self) -> usize {
-        let color = self.next_color % 8;
+        let color = self.next_color;
         self.next_color += 1;
         color
     }
