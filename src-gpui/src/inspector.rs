@@ -7,7 +7,7 @@ use crate::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
         ReadGate, action, is_activate, notice, status_icon,
     },
-    format::{commit_date, commit_timestamp, format_count, initials, short_sha},
+    format::{commit_date, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax,
@@ -2276,7 +2276,7 @@ impl InspectorView {
         let p = self.palette;
         let o = self.preferences.font_size_offset;
         let identity = format!("{name} <{email}>");
-        let date = format!("{role} · {}", commit_timestamp(time));
+        let date = format!("{role} · {}", commit_date(time));
         div()
             .min_w_0()
             .flex()
