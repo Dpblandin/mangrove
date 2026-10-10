@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     command_palette::{Command, CommandEntry},
     file_browser::FileView,
-    format::{display_path, short_sha},
+    format::{control_shortcut_label, display_path, short_sha, shortcut_label},
     settings::SettingsSection,
     tabs::HOME,
     theme::ThemeId,
@@ -33,7 +33,7 @@ impl Mangrove {
                 "Dépôts",
                 "open repository local dossier",
             )
-            .shortcut("O")
+            .shortcut(shortcut_label("O"))
             .unavailable(blocked.or(self.opening.then_some("Ouverture en cours"))),
             CommandEntry::new(
                 Command::NewTab,
@@ -42,7 +42,7 @@ impl Mangrove {
                 "new tab accueil home récents favoris",
             )
             .detail("Ouvre l’accueil dans un nouvel onglet")
-            .shortcut("T")
+            .shortcut(shortcut_label("T"))
             .unavailable(blocked),
             CommandEntry::new(
                 Command::BrowseRepositories,
@@ -57,7 +57,7 @@ impl Mangrove {
                 "Paramètres",
                 "settings preferences configuration",
             )
-            .shortcut(",")
+            .shortcut(shortcut_label(","))
             .unavailable(blocked),
         ];
         for (section, label, keywords) in [
@@ -110,21 +110,21 @@ impl Mangrove {
                 "Affichage",
                 "zoom taille police",
             )
-            .shortcut("+"),
+            .shortcut(shortcut_label("+")),
             CommandEntry::new(
                 Command::Zoom(Some(-1)),
                 "Réduire le texte",
                 "Affichage",
                 "zoom taille police",
             )
-            .shortcut("−"),
+            .shortcut(shortcut_label("−")),
             CommandEntry::new(
                 Command::Zoom(None),
                 "Rétablir la taille du texte",
                 "Affichage",
                 "zoom reset taille police défaut",
             )
-            .shortcut("0"),
+            .shortcut(shortcut_label("0")),
             CommandEntry::new(
                 Command::DiffZoom(1),
                 "Agrandir le texte des diffs",
@@ -180,7 +180,7 @@ impl Mangrove {
                 "Application",
                 "quit exit fermer",
             )
-            .shortcut("Q"),
+            .shortcut(shortcut_label("Q")),
         ]);
         if let Some(id) = self.tabs.active {
             entries.push(
@@ -190,25 +190,43 @@ impl Mangrove {
                     "Onglets",
                     "close tab",
                 )
-                .shortcut("W")
+                .shortcut(shortcut_label("W"))
                 .unavailable(blocked),
             );
         }
-        for tab in &self.tabs.entries {
-            entries.push(
-                CommandEntry::new(
-                    Command::ActivateTab(tab.id),
-                    format!("Onglet : {}", tab.name),
-                    "Onglets",
-                    "switch tab changer",
-                )
-                .detail(tab.path.as_deref().map_or_else(
-                    || format!("{HOME} : dépôts récents et favoris"),
-                    display_path,
-                ))
-                .active(self.tabs.active == Some(tab.id))
-                .unavailable(blocked),
-            );
+        if self.tabs.entries.len() > 1 {
+            for (step, label, shift) in
+                [(1, "Onglet suivant", false), (-1, "Onglet précédent", true)]
+            {
+                entries.push(
+                    CommandEntry::new(
+                        Command::CycleTab(step),
+                        label,
+                        "Onglets",
+                        "next previous tab changer",
+                    )
+                    .shortcut(control_shortcut_label("Tab", shift))
+                    .unavailable(blocked),
+                );
+            }
+        }
+        for (index, tab) in self.tabs.entries.iter().enumerate() {
+            let mut entry = CommandEntry::new(
+                Command::ActivateTab(tab.id),
+                format!("Onglet : {}", tab.name),
+                "Onglets",
+                "switch tab changer",
+            )
+            .detail(tab.path.as_deref().map_or_else(
+                || format!("{HOME} : dépôts récents et favoris"),
+                display_path,
+            ))
+            .active(self.tabs.active == Some(tab.id))
+            .unavailable(blocked);
+            if let Some(digit) = self.tabs.shortcut_digit(index) {
+                entry = entry.shortcut(shortcut_label(&digit.to_string()));
+            }
+            entries.push(entry);
         }
         for recent in &prefs.recent {
             entries.push(
@@ -254,7 +272,7 @@ impl Mangrove {
                 "Git",
                 "search auteur message sha",
             )
-            .shortcut("F"),
+            .shortcut(shortcut_label("F")),
             CommandEntry::new(
                 Command::Refresh,
                 "Actualiser le dépôt",
@@ -488,10 +506,15 @@ impl Mangrove {
             return;
         }
         self.palette_open = false;
-        self.palette_previous_focus
+        // The workspace root carries no keyboard behavior of its own.
+        match self
+            .palette_previous_focus
             .take()
-            .unwrap_or_else(|| self.focus.clone())
-            .focus(window, cx);
+            .filter(|previous| *previous != self.focus)
+        {
+            Some(previous) => previous.focus(window, cx),
+            None => self.restore_focus(window, cx),
+        }
         cx.notify();
     }
     pub(super) fn sync_palette(&mut self, cx: &mut Context<Self>) {
@@ -525,10 +548,8 @@ impl Mangrove {
             Command::OpenRepository => self.pick_repository(window, cx),
             Command::NewTab => self.new_tab(window, cx),
             Command::CloseTab(id) => self.close_tab(*id, window, cx),
-            Command::ActivateTab(id) => {
-                self.activate_tab(*id, window, cx);
-                self.focus.focus(window, cx);
-            }
+            Command::ActivateTab(id) => self.activate_tab(*id, window, cx),
+            Command::CycleTab(step) => self.cycle_tab(*step, window, cx),
             Command::OpenRecent(path) => self.open(path.clone(), false, None, window, cx),
             Command::RemoveRecent(path) => self
                 .chrome

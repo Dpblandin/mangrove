@@ -31,6 +31,8 @@ actions!(
         OpenRepository,
         NewTab,
         CloseTab,
+        NextTab,
+        PreviousTab,
         ShowSettings,
         ShowCommandPalette,
         Escape,
@@ -40,6 +42,13 @@ actions!(
         ZoomReset
     ]
 );
+
+/// Cmd/Ctrl+1 to 8 select a tab position, 9 the last tab.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = mangrove, no_json)]
+pub struct SelectTab {
+    pub position: usize,
+}
 
 pub fn bind_keys(cx: &mut App) {
     use gpui_kit::component::input::{Copy, Cut, Paste, SelectAll};
@@ -58,27 +67,38 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new(&format!("{modifier}--"), ZoomOut, None),
             KeyBinding::new(&format!("{modifier}-0"), ZoomReset, None),
         ]);
+        cx.bind_keys((1..=9).map(|position| {
+            KeyBinding::new(
+                &format!("{modifier}-{position}"),
+                SelectTab { position },
+                None,
+            )
+        }));
     }
-    cx.bind_keys([KeyBinding::new("escape", Escape, None)]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+        KeyBinding::new("escape", Escape, None),
+    ]);
     cx.set_menus([
         Menu::new("Mangrove").items([
             MenuItem::action("Paramètres…", ShowSettings),
             MenuItem::separator(),
             MenuItem::action("Quitter Mangrove", Quit),
         ]),
-        Menu::new("File").items([
+        Menu::new("Fichier").items([
             MenuItem::action("Ouvrir un dépôt…", OpenRepository),
             MenuItem::action("Nouvel onglet", NewTab),
             MenuItem::action("Fermer l’onglet", CloseTab),
         ]),
-        Menu::new("Edit").items([
+        Menu::new("Édition").items([
             MenuItem::action("Couper", Cut),
             MenuItem::action("Copier", Copy),
             MenuItem::action("Coller", Paste),
             MenuItem::separator(),
             MenuItem::action("Tout sélectionner", SelectAll),
         ]),
-        Menu::new("View").items([
+        Menu::new("Affichage").items([
             MenuItem::action("Palette de commandes…", ShowCommandPalette),
             MenuItem::separator(),
             MenuItem::action("Rechercher des commits", Search),
@@ -86,6 +106,13 @@ pub fn bind_keys(cx: &mut App) {
             MenuItem::action("Agrandir le texte", ZoomIn),
             MenuItem::action("Réduire le texte", ZoomOut),
             MenuItem::action("Taille du texte par défaut", ZoomReset),
+        ]),
+        Menu::new("Fenêtre").items([
+            MenuItem::action("Onglet suivant", NextTab),
+            MenuItem::action("Onglet précédent", PreviousTab),
+            MenuItem::separator(),
+            MenuItem::action("Premier onglet", SelectTab { position: 1 }),
+            MenuItem::action("Dernier onglet", SelectTab { position: 9 }),
         ]),
     ]);
 }
@@ -183,6 +210,8 @@ impl Mangrove {
                     }
                 }
             }),
+            // Closed tabs, settings and dialogs leave no focused element behind.
+            cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)),
         ];
         let mut this = Self {
             engine,
@@ -462,6 +491,9 @@ impl Mangrove {
                             }
                             view.sync_selection(cx);
                             view.error = None;
+                            if view.focus.is_focused(window) {
+                                view.restore_focus(window, cx);
+                            }
                         }
                         Err(error) => {
                             view.error = Some(error);
@@ -489,18 +521,26 @@ impl Mangrove {
             self.open(repo.path.clone(), true, None, window, cx);
         }
     }
+    /// Activating a tab, even the current one, shows its content and focus.
     fn activate_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.active == Some(id) {
-            return;
-        }
-        let path = self.tabs.activate(id);
-        self.clear_workspace(cx);
+        self.chrome
+            .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         self.leave_settings(window, cx);
-        self.focus.focus(window, cx);
-        if let Some(path) = path {
-            self.open(path, true, None, window, cx);
-        } else {
-            self.refresh_recent(cx);
+        if self.tabs.active != Some(id) {
+            let path = self.tabs.activate(id);
+            self.clear_workspace(cx);
+            if let Some(path) = path {
+                self.open(path, true, None, window, cx);
+            } else {
+                self.refresh_recent(cx);
+            }
+        }
+        self.restore_focus(window, cx);
+        cx.notify();
+    }
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.neighbor(step) {
+            self.activate_tab(id, window, cx);
         }
     }
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -513,7 +553,7 @@ impl Mangrove {
         if active {
             let path = self.tabs.active_tab().and_then(|tab| tab.path.clone());
             self.clear_workspace(cx);
-            self.focus.focus(window, cx);
+            self.restore_focus(window, cx);
             if let Some(path) = path {
                 self.open(path, true, None, window, cx);
             } else {
@@ -528,8 +568,27 @@ impl Mangrove {
         self.tabs.create();
         self.leave_settings(window, cx);
         self.clear_workspace(cx);
-        self.focus.focus(window, cx);
+        self.restore_focus(window, cx);
         self.refresh_recent(cx);
+    }
+    /// True when the center shows the history list, which may take the focus.
+    fn history_visible(&self, cx: &App) -> bool {
+        let chrome = self.chrome.read(cx);
+        self.repository.is_some()
+            && !self.settings
+            && !self.palette_open
+            && !chrome.repository_browser_open()
+            && !chrome.choosing_repository()
+            && !self.inspector.read(cx).central_active()
+    }
+    /// Give the keyboard to the history list when shown, else to the workspace.
+    fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history_visible(cx) {
+            self.history
+                .update(cx, |history, cx| history.focus_list(window, cx));
+        } else {
+            self.focus.focus(window, cx);
+        }
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self
@@ -768,10 +827,7 @@ impl Mangrove {
     fn chrome_event(&mut self, event: &ChromeEvent, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             event,
-            ChromeEvent::OpenRepository(_)
-                | ChromeEvent::ActivateTab(_)
-                | ChromeEvent::NewTab
-                | ChromeEvent::ProfileChanged
+            ChromeEvent::OpenRepository(_) | ChromeEvent::NewTab | ChromeEvent::ProfileChanged
         ) {
             self.chrome
                 .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
@@ -791,7 +847,7 @@ impl Mangrove {
             ChromeEvent::CloseRepositoryBrowser => {
                 self.chrome
                     .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
-                self.focus.focus(window, cx);
+                self.restore_focus(window, cx);
                 cx.notify();
             }
             ChromeEvent::ManageIntegrations => {
@@ -824,7 +880,7 @@ impl Mangrove {
             }
             ChromeEvent::BackToWorkspace => {
                 self.leave_settings(window, cx);
-                self.focus.focus(window, cx);
+                self.restore_focus(window, cx);
                 cx.notify();
             }
             ChromeEvent::Fetch => self.fetch(true, window, cx),
@@ -1084,6 +1140,9 @@ impl Render for Mangrove {
             .capture_action(cx.listener(Self::guard_palette::<OpenRepository>))
             .capture_action(cx.listener(Self::guard_palette::<NewTab>))
             .capture_action(cx.listener(Self::guard_palette::<CloseTab>))
+            .capture_action(cx.listener(Self::guard_palette::<NextTab>))
+            .capture_action(cx.listener(Self::guard_palette::<PreviousTab>))
+            .capture_action(cx.listener(Self::guard_palette::<SelectTab>))
             .capture_action(cx.listener(Self::guard_palette::<ShowSettings>))
             .capture_action(cx.listener(Self::guard_palette::<Search>))
             .capture_action(cx.listener(Self::guard_palette::<ZoomIn>))
@@ -1101,6 +1160,15 @@ impl Render for Mangrove {
                     view.close_tab(id, window, cx);
                 }
             }))
+            .on_action(cx.listener(|view, _: &NextTab, window, cx| view.cycle_tab(1, window, cx)))
+            .on_action(
+                cx.listener(|view, _: &PreviousTab, window, cx| view.cycle_tab(-1, window, cx)),
+            )
+            .on_action(cx.listener(|view, action: &SelectTab, window, cx| {
+                if let Some(id) = view.tabs.by_shortcut(action.position) {
+                    view.activate_tab(id, window, cx);
+                }
+            }))
             .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
                 view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
             }))
@@ -1116,13 +1184,7 @@ impl Render for Mangrove {
                 // ModeChanged restores the list focus through a queued
                 // event; focus the search after that event and the view switch.
                 cx.on_next_frame(window, |view, window, cx| {
-                    if !view.settings
-                        && !view.palette_open
-                        && !view.chrome.read(cx).repository_browser_open()
-                        && view.repository.is_some()
-                        && !view.inspector.read(cx).central_active()
-                        && !view.chrome.read(cx).choosing_repository()
-                    {
+                    if view.history_visible(cx) {
                         view.history
                             .update(cx, |history, cx| history.focus_search(window, cx));
                     }

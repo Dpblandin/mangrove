@@ -1,14 +1,15 @@
 //! Application chrome. The parent owns repositories, tasks and tab workspaces.
 use crate::{
+    command_palette::key_hint,
     format::{display_path, shortcut_label},
     integrations::{IntegrationsEvent, IntegrationsView},
     preferences::{Pane, Preferences, RecentRepository, profile_store},
     recent_repositories::{RecentMetadata, RecentNamesRequest, favorite_name, is_remote_favorite},
     settings::{SettingsEvent, SettingsView},
-    tabs::HOME,
+    tabs::{HOME, wrapped_index},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
 };
-use accesskit::Role;
+use accesskit::{Orientation, Role};
 use gpui_kit::{
     assets::IconName,
     base::Button as NativeButton,
@@ -214,7 +215,10 @@ impl Chrome {
             recent_filter,
             welcome_scroll: ScrollHandle::default(),
             repository_browser: false,
-            separator_focus: [cx.focus_handle(), cx.focus_handle()],
+            separator_focus: [
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+            ],
             resize: None,
             _subscriptions: subscriptions,
         }
@@ -228,7 +232,7 @@ impl Chrome {
         for tab in &tabs {
             self.tab_focus
                 .entry(tab.id)
-                .or_insert_with(|| cx.focus_handle());
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
         }
         self.tabs = tabs;
         self.active_tab = active;
@@ -532,6 +536,7 @@ impl Chrome {
             view.set_error(message, cx);
         });
     }
+    /// Arrows move between tabs without reloading them; Enter or Space activates.
     fn tab_key(
         &mut self,
         id: u64,
@@ -547,17 +552,15 @@ impl Chrome {
             return;
         };
         let target = match key.key.as_str() {
-            "left" => (index + self.tabs.len() - 1) % self.tabs.len(),
-            "right" => (index + 1) % self.tabs.len(),
+            "left" => wrapped_index(index, -1, self.tabs.len()),
+            "right" => wrapped_index(index, 1, self.tabs.len()),
             "home" => 0,
             "end" => self.tabs.len() - 1,
             _ => return,
         };
-        let id = self.tabs[target].id;
-        if let Some(focus) = self.tab_focus.get(&id) {
+        if let Some(focus) = self.tab_focus.get(&self.tabs[target].id) {
             window.focus(focus, cx);
         }
-        cx.emit(ChromeEvent::ActivateTab(id));
         cx.stop_propagation();
     }
     pub fn render_tabs(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -576,12 +579,15 @@ impl Chrome {
             .child(
                 div()
                     .id("tab-strip")
+                    .role(Role::TabList)
+                    .aria_label("Onglets")
                     .flex()
                     .min_w_0()
                     .overflow_x_scroll()
-                    .children(self.tabs.iter().map(|tab| {
+                    .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                         let id = tab.id;
                         let active = Some(id) == self.active_tab;
+                        let close = format!("Fermer l’onglet {}", tab.name);
                         div()
                             .id(("repository-tab", id))
                             .flex()
@@ -617,6 +623,11 @@ impl Chrome {
                                 div()
                                     .id(("tab-select", id))
                                     .track_focus(&self.tab_focus[&id])
+                                    .role(Role::Tab)
+                                    .aria_label(tab.name.clone())
+                                    .aria_selected(active)
+                                    .aria_position_in_set(index + 1)
+                                    .aria_size_of_set(self.tabs.len())
                                     .flex()
                                     .flex_1()
                                     .min_w_0()
@@ -628,6 +639,9 @@ impl Chrome {
                                     .text_size(px(12. + offset))
                                     .font_weight(FontWeight::MEDIUM)
                                     .cursor_pointer()
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
                                     .child(icon(
                                         if tab.path.is_some() {
                                             IconName::GitBranch
@@ -652,9 +666,16 @@ impl Chrome {
                                     .h(px(26.))
                                     .mr(px(5.))
                                     .rounded(RADIUS_SM)
+                                    .focus_visible(move |style| {
+                                        style.border_1().border_color(rgb(p.accent))
+                                    })
                                     .icon(icon(IconName::X, 13., p.muted))
-                                    .accessibility_label(format!("Fermer {}", tab.name))
-                                    .tooltip(format!("Fermer {}", tab.name))
+                                    .accessibility_label(close.clone())
+                                    .tooltip(if active {
+                                        format!("{close} · {}", shortcut_label("W"))
+                                    } else {
+                                        close
+                                    })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.emit(ChromeEvent::CloseTab(id));
@@ -670,9 +691,10 @@ impl Chrome {
                     .ml(px(5.))
                     .mt(px(4.))
                     .rounded(RADIUS_SM)
+                    .focus_visible(move |style| style.border_1().border_color(rgb(p.accent)))
                     .icon(icon(IconName::Plus, 17., p.muted))
                     .accessibility_label("Nouvel onglet")
-                    .tooltip("Nouvel onglet")
+                    .tooltip(format!("Nouvel onglet · {}", shortcut_label("T")))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::NewTab))),
             )
             .into_any_element()
@@ -759,7 +781,7 @@ impl Chrome {
                             .h(px(28.))
                             .icon(icon(IconName::Settings, 17., p.muted))
                             .accessibility_label("Paramètres")
-                            .tooltip("Paramètres · ⌘ ,")
+                            .tooltip(format!("Paramètres · {}", shortcut_label(",")))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.can_show_settings(cx) {
                                     cx.emit(ChromeEvent::ShowSettings)
@@ -774,7 +796,7 @@ impl Chrome {
                             .icon(icon(IconName::FolderOpen, 17., p.muted))
                             .disabled(self.busy || self.choosing)
                             .accessibility_label("Ouvrir un dépôt")
-                            .tooltip("Ouvrir un dépôt · ⌘ O")
+                            .tooltip(format!("Ouvrir un dépôt · {}", shortcut_label("O")))
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(ChromeEvent::PickRepository)),
                             ),
@@ -1267,7 +1289,7 @@ impl Chrome {
                                         .flex()
                                         .items_center()
                                         .gap(px(6.))
-                                        .child(kbd(&shortcut_label(key), p, offset))
+                                        .child(key_hint(shortcut_label(key), p, offset))
                                         .child(label)
                                 }),
                             ),
@@ -1573,6 +1595,15 @@ impl Chrome {
                 "right-divider"
             })
             .track_focus(&self.separator_focus[ix])
+            .role(Role::Splitter)
+            .aria_label(if pane == Pane::Left {
+                "Largeur du panneau des branches"
+            } else {
+                "Largeur du panneau des détails"
+            })
+            .aria_description("← et → redimensionnent, Entrée rétablit la largeur par défaut")
+            .aria_orientation(Orientation::Vertical)
+            .aria_numeric_value(f64::from(width))
             .w(px(6.))
             .flex_none()
             .h_full()
@@ -1580,6 +1611,12 @@ impl Chrome {
             .occlude()
             .cursor(CursorStyle::ResizeLeftRight)
             .bg(rgb(p.bg))
+            .focus_visible(move |style| {
+                style
+                    .bg(rgb(p.accent_soft))
+                    .border_x_1()
+                    .border_color(rgb(p.accent))
+            })
             .child(
                 div()
                     .absolute()
@@ -1594,12 +1631,7 @@ impl Chrome {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     window.focus(&this.separator_focus[ix], cx);
                     if event.click_count == 2 {
-                        this.preferences.reset_pane(pane);
-                        this.preferences_changed(cx);
-                        cx.emit(ChromeEvent::PaneResized(
-                            pane,
-                            if pane == Pane::Left { 226. } else { 390. },
-                        ));
+                        this.reset_pane(pane, cx);
                     } else {
                         this.resize = Some(Resize {
                             pane,
@@ -1639,6 +1671,11 @@ impl Chrome {
                 if key == "escape" && this.resize.is_some() {
                     this.finish_resize(true, cx);
                     cx.stop_active_drag(window);
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "enter" {
+                    this.reset_pane(pane, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1686,6 +1723,18 @@ impl Chrome {
                 cx.stop_propagation();
             }))
             .into_any_element()
+    }
+    fn reset_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        self.preferences.reset_pane(pane);
+        self.preferences_changed(cx);
+        cx.emit(ChromeEvent::PaneResized(
+            pane,
+            if pane == Pane::Left {
+                self.preferences.left_width
+            } else {
+                self.preferences.right_width
+            },
+        ));
     }
     fn move_resize(&mut self, pane: Pane, x: Pixels, cx: &mut Context<Self>) {
         let Some(resize) = self.resize.as_ref().filter(|resize| resize.pane == pane) else {
@@ -1754,19 +1803,6 @@ fn logo(size: f32) -> AnyElement {
         ))
     });
     img(logo.clone()).size(px(size)).into_any_element()
-}
-
-/// Key label, built with `shortcut_label` or a named key such as « Échap ».
-fn kbd(label: &str, p: Palette, offset: f32) -> AnyElement {
-    div()
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(RADIUS_SM)
-        .px(px(5.))
-        .text_size(px(11. + offset))
-        .text_color(rgb(p.muted))
-        .child(label.to_string())
-        .into_any_element()
 }
 
 fn notice_action(id: &'static str, label: &'static str, p: Palette, offset: f32) -> NativeButton {
