@@ -61,3 +61,7 @@ Une version se publie avec `scripts/release.sh X.Y.Z` ; voir [les releases](docs
 - `src-gpui` : application GPUI, dans un workspace Cargo séparé ([README](src-gpui/README.md)).
 - `scripts` : fixtures, benchmarks et release.
 - `docs` : [architecture](docs/architecture.md), [performances](docs/performance.md) et documentation des fonctionnalités.
+
+## Licence
+
+Mangrove est distribué sous [Functional Source License 1.1, avec MIT comme licence future](LICENSE.md) (FSL-1.1-MIT). L’utiliser, y compris au travail, le modifier et le redistribuer est permis ; l’intégrer à un produit ou service commercial concurrent ne l’est pas. Chaque version passe sous licence MIT deux ans après sa publication. Les licences des composants tiers accompagnent chaque build publié.

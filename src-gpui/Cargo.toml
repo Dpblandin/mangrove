@@ -3,7 +3,7 @@ name = "mangrove-gpui"
 version = "0.1.0"
 edition = "2024"
 publish = false
-license = "UNLICENSED"
+license = "FSL-1.1-MIT"
 
 # Keep native app and benchmark build profiles independent from the Git engine.
 [workspace]
