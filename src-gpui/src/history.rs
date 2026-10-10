@@ -1,7 +1,10 @@
+use crate::format::count_label;
 use gpui_kit::SharedString;
+use icu_normalizer::{DecomposingNormalizer, properties::CanonicalCombiningClassMapBorrowed};
 use mangrove_core::model::{CommitPage, CommitRow, IndexProgress, Reference};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -136,16 +139,19 @@ impl PageRequests {
     }
 }
 
+/// A non-empty filter looks up the result offset instead of the walk position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PositionRead {
     Selection {
         generation: u64,
         sha: String,
+        filter: String,
     },
     Jump {
         generation: u64,
         repository_generation: u64,
         sha: String,
+        filter: String,
         deadline: Instant,
     },
 }
@@ -154,6 +160,12 @@ impl PositionRead {
     pub fn sha(&self) -> &str {
         match self {
             Self::Selection { sha, .. } | Self::Jump { sha, .. } => sha,
+        }
+    }
+
+    pub fn filter(&self) -> &str {
+        match self {
+            Self::Selection { filter, .. } | Self::Jump { filter, .. } => filter,
         }
     }
 }
@@ -198,15 +210,149 @@ impl PositionRequests {
     }
 }
 
+/// Display priority in the reference column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReferenceRank {
+    Head,
+    Local,
+    Tag,
+    Remote,
+}
+
+impl ReferenceRank {
+    fn of(reference: &Reference, head: Option<&str>, head_name: &str) -> Self {
+        match reference.kind.as_str() {
+            "local" if head == Some(reference.sha.as_str()) && reference.label == head_name => {
+                Self::Head
+            }
+            "local" => Self::Local,
+            "tag" => Self::Tag,
+            _ => Self::Remote,
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Head => "branche courante",
+            Self::Local => "branche locale",
+            Self::Tag => "tag",
+            Self::Remote => "branche distante",
+        }
+    }
+}
+
+const MAX_BADGES: usize = 3;
+// Border, padding, icon and gap; the « +N » chip has no icon.
+const BADGE_CHROME: f32 = 25.;
+const CHIP_CHROME: f32 = 12.;
+const BADGE_GAP: f32 = 4.;
+const MAX_TOOLTIP_REFERENCES: usize = 16;
+
+pub struct ReferenceBadge {
+    pub label: SharedString,
+    pub rank: ReferenceRank,
+    chars: usize,
+}
+
 pub struct ReferenceGroup {
+    /// Displayed references first, each part in display priority.
     pub references: Arc<Vec<Reference>>,
-    pub badges: Vec<Arc<Reference>>,
-    pub has_branches: bool,
+    ranks: Vec<ReferenceRank>,
+    /// Solo displays only its own branches.
+    pub displayed: usize,
+    pub badges: Vec<ReferenceBadge>,
+}
+
+impl ReferenceGroup {
+    fn new(
+        references: Vec<Reference>,
+        solo: &HashSet<&str>,
+        head: Option<&str>,
+        head_name: &str,
+    ) -> Self {
+        let mut ranked: Vec<_> = references
+            .into_iter()
+            .map(|reference| {
+                let hidden = !solo.is_empty() && !solo.contains(reference.name.as_str());
+                (
+                    hidden,
+                    ReferenceRank::of(&reference, head, head_name),
+                    reference,
+                )
+            })
+            .collect();
+        ranked.sort_by_key(|(hidden, rank, _)| (*hidden, *rank));
+        let displayed = ranked.iter().filter(|(hidden, ..)| !hidden).count();
+        let (ranks, references): (Vec<_>, Vec<_>) = ranked
+            .into_iter()
+            .map(|(_, rank, reference)| (rank, reference))
+            .unzip();
+        let badges = references
+            .iter()
+            .zip(&ranks)
+            .take(displayed.min(MAX_BADGES))
+            .map(|(reference, rank)| ReferenceBadge {
+                label: reference.label.clone().into(),
+                rank: *rank,
+                chars: reference.label.chars().count(),
+            })
+            .collect();
+        Self {
+            references: Arc::new(references),
+            ranks,
+            displayed,
+            badges,
+        }
+    }
+
+    /// Bounded tooltip text listing the displayed references.
+    pub fn tooltip(&self) -> String {
+        let mut lines: Vec<_> = self
+            .references
+            .iter()
+            .zip(&self.ranks)
+            .take(self.displayed.min(MAX_TOOLTIP_REFERENCES))
+            .map(|(reference, rank)| format!("{} · {}", reference.label, rank.description()))
+            .collect();
+        if self.displayed > MAX_TOOLTIP_REFERENCES {
+            lines.push(count_label(
+                self.displayed - MAX_TOOLTIP_REFERENCES,
+                "autre référence",
+                "autres références",
+            ));
+        }
+        lines.join("\n")
+    }
+
+    /// Badges that fit a column `width` wide. The first one always shows,
+    /// truncated if needed; the others only fit beside the « +N » chip.
+    pub fn fitting_badges(&self, width: f32, char_width: f32) -> usize {
+        let mut used = 0.;
+        let mut shown = 0;
+        for (index, badge) in self.badges.iter().enumerate() {
+            let gap = if index == 0 { 0. } else { BADGE_GAP };
+            let badge_width = BADGE_CHROME + badge.chars as f32 * char_width;
+            let hidden = self.displayed - index - 1;
+            let chip = if hidden == 0 {
+                0.
+            } else {
+                BADGE_GAP + CHIP_CHROME + (hidden.ilog10() as f32 + 2.) * char_width
+            };
+            if index > 0 && used + gap + badge_width + chip > width {
+                break;
+            }
+            used += gap + badge_width;
+            shown = index + 1;
+        }
+        shown
+    }
 }
 
 pub fn group_references(
     references: &[Reference],
     solo: &[String],
+    head: Option<&str>,
+    head_name: &str,
 ) -> HashMap<String, Arc<ReferenceGroup>> {
     let solo: HashSet<_> = solo.iter().map(String::as_str).collect();
     let mut groups = HashMap::<String, Vec<Reference>>::new();
@@ -219,35 +365,142 @@ pub fn group_references(
     groups
         .into_iter()
         .map(|(sha, references)| {
-            let has_branches = references
-                .iter()
-                .any(|reference| reference.kind == "local" || reference.kind == "remote");
-            let badges = badges_for_solo(&references, &solo);
-            (
-                sha,
-                Arc::new(ReferenceGroup {
-                    references: Arc::new(references),
-                    badges,
-                    has_branches,
-                }),
-            )
+            let group = ReferenceGroup::new(references, &solo, head, head_name);
+            (sha, Arc::new(group))
         })
         .collect()
 }
 
-#[cfg(test)]
-fn reference_badges(references: &[Reference], solo: &[String]) -> Vec<Arc<Reference>> {
-    let solo: HashSet<_> = solo.iter().map(String::as_str).collect();
-    badges_for_solo(references, &solo)
+/// Search words as the unicode61 index matches them: case- and
+/// accent-insensitive word prefixes.
+pub fn highlight_terms(filter: &str) -> Vec<String> {
+    let mut terms: Vec<_> = filter
+        .split_whitespace()
+        .map(|term| fold(term.trim_matches(|character: char| !character.is_alphanumeric())))
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
-fn badges_for_solo(references: &[Reference], solo: &HashSet<&str>) -> Vec<Arc<Reference>> {
-    references
+fn fold(text: &str) -> String {
+    Folded::new(text).text
+}
+
+/// Folded text, mapped back to whole source characters.
+struct Folded {
+    text: String,
+    /// Source character of each folded byte; ASCII text maps to itself.
+    sources: Option<Vec<Range<usize>>>,
+}
+
+impl Folded {
+    fn new(text: &str) -> Self {
+        if text.is_ascii() {
+            return Self {
+                text: text.to_ascii_lowercase(),
+                sources: None,
+            };
+        }
+        let (text, sources) = folded(text);
+        Self {
+            text,
+            sources: Some(sources),
+        }
+    }
+
+    fn source(&self, folded: Range<usize>) -> Range<usize> {
+        match &self.sources {
+            Some(sources) => sources[folded.start].start..sources[folded.end - 1].end,
+            None => folded,
+        }
+    }
+}
+
+fn folded(text: &str) -> (String, Vec<Range<usize>>) {
+    let combining = CanonicalCombiningClassMapBorrowed::new();
+    let normalizer = DecomposingNormalizer::new_nfd();
+    let mut folded = String::with_capacity(text.len());
+    let mut sources: Vec<Range<usize>> = Vec::with_capacity(text.len());
+    let mut previous = 0;
+    for (start, character) in text.char_indices() {
+        let end = start + character.len_utf8();
+        let before = folded.len();
+        folded.extend(
+            normalizer
+                .normalize_iter(std::iter::once(character))
+                .filter(|character| combining.get_u8(*character) == 0)
+                .flat_map(char::to_lowercase),
+        );
+        if folded.len() == before {
+            // A lone combining mark stays with its base character.
+            let length = sources.len();
+            for source in &mut sources[length - previous..] {
+                source.end = end;
+            }
+        } else {
+            previous = folded.len() - before;
+            sources.extend(std::iter::repeat_n(start..end, previous));
+        }
+    }
+    (folded, sources)
+}
+
+/// Source ranges where a term starts a word of `text`.
+pub fn highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let folded = Folded::new(text);
+    let mut ranges: Vec<Range<usize>> = terms
         .iter()
-        .filter(|reference| solo.is_empty() || solo.contains(reference.name.as_str()))
-        .take(2)
-        .map(|reference| Arc::new(reference.clone()))
-        .collect()
+        .flat_map(|term| folded.text.match_indices(term.as_str()))
+        .filter(|(start, _)| {
+            folded.text[..*start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_alphanumeric())
+        })
+        .map(|(start, matched)| folded.source(start..start + matched.len()))
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(previous) if range.start <= previous.end => {
+                previous.end = previous.end.max(range.end)
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Source range of a prefix search, as SHA and reference queries match.
+pub fn prefix_range(text: &str, filter: &str) -> Option<Range<usize>> {
+    let filter = fold(filter);
+    let folded = Folded::new(text);
+    (!filter.is_empty() && folded.text.starts_with(&filter)).then(|| folded.source(0..filter.len()))
+}
+
+/// First result offset whose walk position is at least `target`. Results
+/// keep walk order, so a present commit is found at this offset.
+pub fn result_offset<E>(
+    total: usize,
+    target: usize,
+    mut position: impl FnMut(usize) -> Result<Option<usize>, E>,
+) -> Result<usize, E> {
+    let (mut low, mut high) = (0, total);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        match position(middle)? {
+            Some(found) if found < target => low = middle + 1,
+            _ => high = middle,
+        }
+    }
+    Ok(low)
 }
 
 /// Text used by a virtualized row is prepared once, away from the UI thread.
@@ -622,6 +875,7 @@ mod tests {
         let old = PositionRead::Selection {
             generation: 1,
             sha: "old".into(),
+            filter: String::new(),
         };
         requests.request(old.clone());
         let (old_read, old_lease) = requests.try_start().unwrap();
@@ -634,11 +888,13 @@ mod tests {
         requests.request(PositionRead::Selection {
             generation: 2,
             sha: "new".into(),
+            filter: String::new(),
         });
         let jump = PositionRead::Jump {
             generation: 3,
             repository_generation: 4,
             sha: "latest".into(),
+            filter: "fix".into(),
             deadline: Instant::now(),
         };
         requests.request(jump.clone());
@@ -655,32 +911,181 @@ mod tests {
         assert!(requests.try_start().is_none());
     }
 
+    fn reference(kind: &str, label: &str) -> Reference {
+        let prefix = match kind {
+            "local" => "refs/heads",
+            "remote" => "refs/remotes",
+            _ => "refs/tags",
+        };
+        Reference {
+            name: format!("{prefix}/{label}"),
+            label: label.into(),
+            kind: kind.into(),
+            sha: "same".into(),
+        }
+    }
+
+    fn labels(group: &ReferenceGroup) -> Vec<&str> {
+        group
+            .references
+            .iter()
+            .map(|reference| reference.label.as_str())
+            .collect()
+    }
+
     #[test]
     fn shared_reference_groups_keep_badges_bounded_and_solo_order_intact() {
         let references: Vec<_> = (0..10_000)
-            .map(|index| Reference {
-                name: format!("refs/heads/branch-{index}"),
-                label: format!("branch-{index}"),
-                kind: "local".into(),
-                sha: "same".into(),
-            })
+            .map(|index| reference("local", &format!("branch-{index}")))
             .collect();
-        let groups = group_references(&references, &[]);
-        let shared = groups.get("same").unwrap().references.clone();
-        assert!(Arc::ptr_eq(
-            &shared,
-            &groups.get("same").unwrap().references
-        ));
-        let badges = reference_badges(&shared, &[]);
-        assert_eq!(badges.len(), 2);
-        assert_eq!(badges[0].name, references[0].name);
-        assert_eq!(badges[1].name, references[1].name);
+        let groups = group_references(&references, &[], None, "main");
+        let group = groups.get("same").unwrap();
+        assert_eq!(group.references.len(), 10_000);
+        assert_eq!(group.displayed, 10_000);
+        assert_eq!(group.badges.len(), MAX_BADGES);
+        assert_eq!(group.badges[0].label, "branch-0");
+        assert_eq!(group.badges[1].label, "branch-1");
+        let tooltip = group.tooltip();
+        assert_eq!(tooltip.lines().count(), MAX_TOOLTIP_REFERENCES + 1);
+        assert!(tooltip.ends_with("9\u{202f}984 autres références"));
         let solo = [references[999].name.clone(), references[88].name.clone()];
-        let badges = reference_badges(&shared, &solo);
-        assert_eq!(badges.len(), 2);
-        assert_eq!(badges[0].name, references[88].name);
-        assert_eq!(badges[1].name, references[999].name);
-        assert_eq!(shared.len(), 10_000);
+        let groups = group_references(&references, &solo, None, "main");
+        let group = groups.get("same").unwrap();
+        assert_eq!(group.displayed, 2);
+        assert_eq!(group.badges.len(), 2);
+        assert_eq!(group.badges[0].label, "branch-88");
+        assert_eq!(group.badges[1].label, "branch-999");
+        // Hidden branches stay available to the Solo menu, after displayed ones.
+        assert_eq!(group.references.len(), 10_000);
+        assert_eq!(group.references[2].label, "branch-0");
+    }
+
+    #[test]
+    fn references_put_the_current_branch_then_locals_tags_and_remotes_first() {
+        let references = [
+            reference("remote", "origin/main"),
+            reference("tag", "v1.0"),
+            reference("local", "feature"),
+            reference("local", "main"),
+            reference("remote", "origin/feature"),
+            reference("tag", "v0.9"),
+        ];
+        let groups = group_references(&references, &[], Some("same"), "main");
+        let group = groups.get("same").unwrap();
+        assert_eq!(
+            labels(group),
+            [
+                "main",
+                "feature",
+                "v1.0",
+                "v0.9",
+                "origin/main",
+                "origin/feature"
+            ]
+        );
+        let ranks: Vec<_> = group.badges.iter().map(|badge| badge.rank).collect();
+        assert_eq!(
+            ranks,
+            [
+                ReferenceRank::Head,
+                ReferenceRank::Local,
+                ReferenceRank::Tag
+            ]
+        );
+        assert_eq!(
+            group.tooltip().lines().next(),
+            Some("main · branche courante")
+        );
+        // The same branch name elsewhere, or a detached HEAD, is not current.
+        for (head, name) in [(Some("other"), "main"), (Some("same"), "HEAD détachée")] {
+            let groups = group_references(&references, &[], head, name);
+            let group = groups.get("same").unwrap();
+            assert_eq!(group.badges[0].rank, ReferenceRank::Local);
+            assert_eq!(labels(group)[..2], ["feature", "main"]);
+        }
+    }
+
+    #[test]
+    fn narrow_reference_columns_keep_one_badge_and_count_the_others() {
+        let group = |labels: &[&str]| {
+            let references: Vec<_> = labels
+                .iter()
+                .map(|label| reference("local", label))
+                .collect();
+            group_references(&references, &[], None, "")
+                .remove("same")
+                .unwrap()
+        };
+        let single = group(&["a-very-long-branch-name-that-never-fits"]);
+        assert_eq!(single.fitting_badges(40., 7.), 1);
+        let many = group(&["main", "dev", "qa", "release"]);
+        assert_eq!(many.fitting_badges(40., 7.), 1);
+        // « main » (25 + 4 × 7), « dev » (4 + 25 + 3 × 7) and « +2 » (4 + 12 + 2 × 7).
+        assert_eq!(many.fitting_badges(132., 7.), 1);
+        assert_eq!(many.fitting_badges(133., 7.), 2);
+        assert_eq!(many.fitting_badges(1_000., 7.), MAX_BADGES);
+        let pair = group(&["main", "dev"]);
+        // The last badge needs no chip.
+        assert_eq!(pair.fitting_badges(103., 7.), 2);
+        assert_eq!(pair.fitting_badges(102., 7.), 1);
+    }
+
+    #[test]
+    fn highlights_follow_word_prefixes_without_case_or_accents() {
+        let terms = highlight_terms("  Écol (fix)  fix ÉCOL ");
+        assert_eq!(terms, ["ecol", "fix"]);
+        let text = "Fix: prefix école, Ecole";
+        let ranges = highlight_ranges(text, &terms);
+        let matched: Vec<_> = ranges.iter().map(|range| &text[range.clone()]).collect();
+        assert_eq!(matched, ["Fix", "écol", "Ecol"]);
+        // Decomposed accents and case folds that change UTF-8 length stay whole.
+        let decomposed = "ÉCOLE e\u{301}cole İstanbul";
+        let ranges = highlight_ranges(decomposed, &highlight_terms("ecole istan"));
+        let matched: Vec<_> = ranges
+            .iter()
+            .map(|range| &decomposed[range.clone()])
+            .collect();
+        assert_eq!(matched, ["ÉCOLE", "e\u{301}cole", "İstan"]);
+        assert!(highlight_ranges(text, &[]).is_empty());
+        assert!(highlight_terms(" -- ").is_empty());
+        let overlapping = highlight_ranges("release", &highlight_terms("rel release"));
+        assert_eq!((overlapping.len(), &overlapping[0]), (1, &(0..7)));
+    }
+
+    #[test]
+    fn prefix_highlights_match_sha_and_reference_queries() {
+        assert_eq!(prefix_range("abc1234", "ABC"), Some(0..3));
+        assert_eq!(prefix_range("abc1234", "bc"), None);
+        assert_eq!(prefix_range("Évolution", "evo"), Some(0..4));
+        assert_eq!(prefix_range("abc", ""), None);
+    }
+
+    #[test]
+    fn result_offsets_are_found_by_walk_position_in_logarithmic_reads() {
+        let positions = [3, 8, 13, 21, 34, 55];
+        let mut reads = 0;
+        let mut offset = |target| {
+            result_offset(positions.len(), target, |index| {
+                reads += 1;
+                Ok::<_, ()>(positions.get(index).copied())
+            })
+            .unwrap()
+        };
+        assert_eq!(offset(21), 3);
+        assert_eq!(offset(3), 0);
+        assert_eq!(offset(55), 5);
+        // Absent commits resolve to a neighbour, rejected by the SHA check.
+        assert_eq!(offset(22), 4);
+        assert_eq!(offset(99), 6);
+        assert!(reads <= 5 * 3);
+        assert_eq!(
+            result_offset(0, 1, |_| Err::<Option<usize>, _>("unused")),
+            Ok(0)
+        );
+        assert_eq!(
+            result_offset(4, 1, |_| Err::<Option<usize>, _>("io")),
+            Err("io")
+        );
     }
 
     fn rows(offset: usize, count: usize) -> Vec<CommitRow> {

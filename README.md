@@ -11,7 +11,7 @@ Le cahier des charges complet est dans [l’issue #1](https://github.com/Dpbland
 - Accueil simple : logo Mangrove, ouverture d’un dépôt et accès aux dépôts récents.
 - Historique topologique paginé, liste virtualisée et graphe Canvas.
 - Branches locales, références distantes et tags ; dossiers imbriqués repliables et navigation vers leur commit. Le filtre révèle les dossiers des références correspondantes sans perdre les replis de la navigation normale.
-- Mode **Solo** sur une ou plusieurs branches locales/distantes, accessible par clic droit ou bouton clavier : parcours et graphe recalculés, recherche limitée à ce parcours et retour explicite à la vue complète. La branche réellement active reste indiquée.
+- Mode **Solo** sur une ou plusieurs branches locales/distantes, accessible par clic droit ou bouton clavier : parcours et graphe recalculés, sélection du premier commit si le commit choisi en est absent, recherche limitée à ce parcours et retour explicite à la vue complète. La branche réellement active reste indiquée.
 - Sections **Worktrees** et **Stashes** chargées à la demande ; ouverture des worktrees existants en onglets, états manquant/verrouillé/détaché, et consultation séparée des diffs sauvegardés du worktree, de l’index et des fichiers non suivis. [Comportements et limites](docs/repository-context.md).
 - La navigation affiche uniquement les branches locales, les branches distantes et les tags. L’historique, le graphe et la recherche suivent ces branches, ces tags et HEAD. Les worktrees et les stashes conservent leurs sections dédiées.
 - Recherche locale dans les messages, auteurs et emails, avec préfixes de mots ; recherche par préfixe de SHA ou de référence.
