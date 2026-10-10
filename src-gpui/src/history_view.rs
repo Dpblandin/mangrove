@@ -3,8 +3,8 @@ use crate::{
     graph::{self, ROW_HEIGHT},
     history::{
         HistoryCache, HistoryPage, HistoryReadSlots, HistoryRow, PAGE_SIZE, PageRequests,
-        PositionRead, PositionRequests, ReferenceBadge, ReferenceGroup, ReferenceRank,
-        group_references, highlight_ranges, highlight_terms, prefix_range, result_offset,
+        PositionRead, PositionRequests, ReferenceBadge, ReferenceGroup, ReferenceRank, fold,
+        group_references, highlight_terms,
     },
     theme::{self, Palette, RADIUS_MD, RADIUS_SM},
 };
@@ -57,18 +57,23 @@ pub struct HistoryView {
     search: Entity<InputState>,
     _search_subscription: Subscription,
     filter: String,
-    highlight_terms: Vec<String>,
+    /// Folded filter, matched against reference labels.
+    folded_filter: String,
     debounce_pending: bool,
     repository_generation: u64,
     navigation_generation: u64,
     requested_index: Option<usize>,
     requested_keyboard: bool,
     jump_pending: bool,
+    /// Commit that a jump has still to select, relaunched by a refresh.
+    jump_target: Option<String>,
     selected_sha: String,
     autoselect: bool,
     selected_index: usize,
     selection_needs_position: bool,
     reveal_selection: bool,
+    /// Solo replaced the list, whose own traversal can still be published.
+    reveal_on_publish: bool,
     error: Option<String>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
@@ -276,18 +281,20 @@ impl HistoryView {
             search,
             _search_subscription: search_subscription,
             filter: String::new(),
-            highlight_terms: Vec::new(),
+            folded_filter: String::new(),
             debounce_pending: false,
             repository_generation: 0,
             navigation_generation: 0,
             requested_index: None,
             requested_keyboard: false,
             jump_pending: false,
+            jump_target: None,
             selected_sha: String::new(),
             autoselect: true,
             selected_index: 0,
             selection_needs_position: false,
             reveal_selection: false,
+            reveal_on_publish: false,
             error: None,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle().tab_stop(true),
@@ -319,15 +326,12 @@ impl HistoryView {
         &mut self,
         sha: String,
         query: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if normalized_query(&query).is_empty() {
-            self.jump_to(sha, window, cx);
-            return;
-        }
         // Like a search typed over a selection: the commit stays selected
-        // while its row is looked up, and an absent one yields the first result.
+        // while its row is looked up, and an absent one, such as an amended
+        // commit, yields the first row.
         self.cancel_navigation();
         self.working.selected = false;
         self.selected_sha = sha.clone();
@@ -335,7 +339,15 @@ impl HistoryView {
             sha,
             keyboard: false,
         });
-        self.set_query(query, cx);
+        if normalized_query(&query) != normalized_query(&self.query) {
+            self.set_query(query, cx);
+            return;
+        }
+        self.query = query;
+        self.keep_selection();
+        self.request_page(0, cx);
+        self.refresh_position(cx);
+        self.changed(cx);
     }
     #[cfg(feature = "app-benchmark")]
     pub fn selected_index(&self) -> usize {
@@ -521,6 +533,7 @@ impl HistoryView {
         if !same_path {
             self.clear(cx);
         }
+        let pending_jump = self.jump_target.take();
         self.references = group_references(
             &info.references,
             &info.solo_refs,
@@ -558,17 +571,23 @@ impl HistoryView {
         self.selection_needs_position = !self.selected_sha.is_empty();
         // Solo replaces the list: show the kept commit, or the new first one.
         self.reveal_selection = self.selection_needs_position && solo_changed;
+        self.reveal_on_publish = solo_changed;
         self.error = info.index.error.clone();
         self.max_lanes = 1;
         self.lane_offset = 0;
-        if !same_path
-            && info.solo_refs.is_empty()
-            && let Some(head) = info.head.clone()
-        {
+        let jump = if same_path {
+            // A refresh, such as an auto-fetch, relaunches a jump still waiting
+            // for its commit. A new Solo list selects its first row instead.
+            self.autoselect |= solo_changed && pending_jump.is_some();
+            pending_jump.filter(|_| !solo_changed)
+        } else {
             // Worktrees share the global history. Its first row can belong to
             // another branch, so open at this checkout's HEAD, even while its
             // position is still being indexed or lies beyond page zero.
-            self.jump_to(head, window, cx);
+            info.head.clone().filter(|_| info.solo_refs.is_empty())
+        };
+        if let Some(sha) = jump {
+            self.jump_to(sha, window, cx);
         } else {
             self.request_page(0, cx);
             // Completed indexes do not poll; rebase preserved keyboard selection now.
@@ -614,6 +633,11 @@ impl HistoryView {
         self.requested_keyboard = false;
         self.pages.set_requested_page(None);
         self.jump_pending = false;
+        self.jump_target = None;
+        // Navigation also ends the lookup of a kept selection, whose late
+        // result would bring the view back to that commit.
+        self.selection_needs_position = false;
+        self.reveal_selection = false;
         self.navigation_task = None;
         self.position_requests.clear();
     }
@@ -628,13 +652,7 @@ impl HistoryView {
         self.query_task = None;
         self.cancel_navigation();
         self.cancel_pages();
-        // The inspector keeps its commit while its row in the new list is
-        // looked up; an absent commit falls back to the first result.
-        let keep = !self.selected_sha.is_empty() && !self.working.selected;
-        self.autoselect = !keep;
-        self.selection_needs_position = keep;
-        self.reveal_selection = keep;
-        self.selected_index = 0;
+        self.keep_selection();
         self.total = 0;
         self.error = None;
         self.menu = None;
@@ -662,8 +680,18 @@ impl HistoryView {
         self.changed(cx);
     }
 
+    /// The inspector keeps its commit while its row in a new list is looked
+    /// up; an absent commit, or none, falls back to the first row.
+    fn keep_selection(&mut self) {
+        let keep = !self.selected_sha.is_empty() && !self.working.selected;
+        self.autoselect = !keep;
+        self.selection_needs_position = keep;
+        self.reveal_selection = keep;
+        self.selected_index = 0;
+    }
+
     fn set_filter(&mut self, filter: String) {
-        self.highlight_terms = highlight_terms(&filter);
+        self.folded_filter = fold(&filter);
         self.filter = filter;
     }
 
@@ -702,6 +730,9 @@ impl HistoryView {
             self.search_indexed = 0;
             self.search_refreshed = None;
             self.selection_needs_position = !self.selected_sha.is_empty();
+            // A Solo traversal moves the kept commit once more.
+            let reveal = std::mem::take(&mut self.reveal_on_publish);
+            self.reveal_selection |= reveal && self.selection_needs_position;
             self.max_lanes = 1;
             if !self.filtered() {
                 self.total = indexed;
@@ -906,7 +937,7 @@ impl HistoryView {
                         let started = Instant::now();
                         let result = engine
                             .list_commits(&id, page * PAGE_SIZE, PAGE_SIZE, &filter)
-                            .map(HistoryPage::new);
+                            .map(|page| HistoryPage::new(page, &highlight_terms(&filter)));
                         #[cfg(feature = "app-benchmark")]
                         crate::perf::record_operation("history_page", started.elapsed());
                         (lease, result)
@@ -1002,8 +1033,6 @@ impl HistoryView {
         self.autoselect = false;
         self.selected_sha = sha.clone();
         self.selected_index = position;
-        self.selection_needs_position = false;
-        self.reveal_selection = false;
         self.error = None;
         cx.emit(HistoryEvent::Selected { sha, keyboard });
         cx.notify();
@@ -1172,7 +1201,7 @@ impl HistoryView {
                         let result = if filter.is_empty() {
                             engine.commit_position_with_status(&id, &sha)
                         } else {
-                            search_position(&engine, &id, &filter, &sha)
+                            engine.search_offset(&id, &filter, &sha)
                         };
                         (lease, result)
                     })
@@ -1271,12 +1300,12 @@ impl HistoryView {
                         .as_ref()
                         .is_some_and(|info| !info.solo_refs.is_empty())
                 {
-                    self.jump_pending = false;
+                    self.abandon_jump();
                     cx.emit(HistoryEvent::ExitSoloAndNavigate(sha.clone()));
                     return;
                 }
                 if progress.complete || progress.error.is_some() || Instant::now() >= deadline {
-                    self.jump_pending = false;
+                    self.abandon_jump();
                     self.error = Some(
                         progress
                             .error
@@ -1299,11 +1328,16 @@ impl HistoryView {
                 }
             }
             Err(error) => {
-                self.jump_pending = false;
+                self.abandon_jump();
                 self.error = Some(error);
                 self.changed(cx);
             }
         }
+    }
+
+    fn abandon_jump(&mut self) {
+        self.jump_pending = false;
+        self.jump_target = None;
     }
 
     /// Navigate to a commit. A search containing it stays applied; otherwise
@@ -1317,8 +1351,6 @@ impl HistoryView {
             return;
         }
         self.cancel_navigation();
-        self.selection_needs_position = false;
-        self.reveal_selection = false;
         self.jump_pending = true;
         self.request_jump(sha, self.filter.clone(), cx);
         cx.notify();
@@ -1340,6 +1372,7 @@ impl HistoryView {
     }
 
     fn request_jump(&mut self, sha: String, filter: String, cx: &mut Context<Self>) {
+        self.jump_target = Some(sha.clone());
         self.position_requests.request(PositionRead::Jump {
             generation: self.navigation_generation,
             repository_generation: self.repository_generation,
@@ -1951,16 +1984,16 @@ impl HistoryView {
                     .get(&row.sha)
                     .filter(|group| group.displayed > 0)
                     .cloned();
-                let highlighted = |text: &SharedString, ranges: Vec<Range<usize>>| {
+                let highlighted = |text: &SharedString, ranges: &[Range<usize>]| {
                     if ranges.is_empty() {
                         text.clone().into_any_element()
                     } else {
                         StyledText::new(text.clone())
-                            .with_highlights(ranges.into_iter().map(|range| (range, highlight)))
+                            .with_highlights(ranges.iter().map(|range| (range.clone(), highlight)))
                             .into_any_element()
                     }
                 };
-                let sha_ranges = sha_query
+                let sha_ranges: Vec<_> = sha_query
                     .filter(|query| {
                         row.sha
                             .get(..query.len())
@@ -1984,9 +2017,7 @@ impl HistoryView {
                             Tooltip::new(tooltip.tooltip()).build(window, cx)
                         })
                         .children(group.badges[..shown].iter().map(|badge| {
-                            let highlight = filtered
-                                .then(|| prefix_range(&badge.label, &self.filter))
-                                .flatten();
+                            let highlight = badge.highlight(&self.folded_filter);
                             reference_badge(badge, highlight, font_size, palette)
                         }))
                         .when(hidden > 0, |style| {
@@ -2095,7 +2126,7 @@ impl HistoryView {
                                     .text_color(rgb(palette.text))
                                     .child(highlighted(
                                         &prepared.subject,
-                                        highlight_ranges(&prepared.subject, &self.highlight_terms),
+                                        &prepared.subject_highlights,
                                     )),
                             )
                             .when(row.parents.len() > 1, |style| {
@@ -2132,7 +2163,7 @@ impl HistoryView {
                                 )
                                 .child(div().min_w_0().truncate().child(highlighted(
                                     &prepared.author,
-                                    highlight_ranges(&prepared.author, &self.highlight_terms),
+                                    &prepared.author_highlights,
                                 ))),
                         )
                     })
@@ -2157,7 +2188,7 @@ impl HistoryView {
                                 .flex_shrink_0()
                                 .text_right()
                                 .font_family(theme::MONO)
-                                .child(highlighted(&prepared.short_sha, sha_ranges)),
+                                .child(highlighted(&prepared.short_sha, &sha_ranges)),
                         )
                     })
                     .when(selected, |style| {
@@ -2548,29 +2579,6 @@ impl Render for HistoryView {
 // run that it started with, but never restore a run superseded while in flight.
 fn position_snapshot_can_publish(started: &str, current: &str, snapshot: &str) -> bool {
     started == current || snapshot == current
-}
-
-/// Result offset of a commit in a search, from one-row reads of the cached
-/// result snapshot.
-fn search_position(
-    engine: &Workspace,
-    id: &str,
-    filter: &str,
-    sha: &str,
-) -> mangrove_core::Result<(Option<usize>, IndexProgress)> {
-    let (position, progress) = engine.commit_position_with_status(id, sha)?;
-    let Some(position) = position else {
-        return Ok((None, progress));
-    };
-    let total = engine.list_commits(id, 0, 1, filter)?.total;
-    let offset = result_offset(total, position, |offset| {
-        engine
-            .list_commits(id, offset, 1, filter)
-            .map(|page| page.commits.first().map(|commit| commit.position))
-    })?;
-    let page = engine.list_commits(id, offset, 1, filter)?;
-    let found = page.commits.first().is_some_and(|commit| commit.sha == sha);
-    Ok((found.then_some(offset), page.index))
 }
 
 fn normalized_query(query: &str) -> String {

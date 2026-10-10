@@ -1,8 +1,14 @@
 use super::{HistoryEvent, HistoryView};
-use crate::{history::PAGE_SIZE, theme::Palette};
+use crate::{
+    history::{PAGE_SIZE, PositionRead},
+    theme::Palette,
+};
 use git2::{Oid, Repository, Signature, Time};
 use gpui_kit::{AppContext, Entity, TestAppContext, WindowOptions, px, size, test::TestWindowExt};
-use mangrove_core::{Workspace, model::RepositoryInfo};
+use mangrove_core::{
+    Workspace,
+    model::{IndexProgress, RepositoryInfo},
+};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
@@ -409,6 +415,15 @@ fn applying_solo_replaces_a_selection_outside_the_filtered_history(cx: &mut Test
     );
 }
 
+fn restore_view(cx: &mut TestAppContext, view: &Entity<HistoryView>, sha: &str, query: &str) {
+    cx.update_window(cx.windows()[0], |_, window, cx| {
+        view.update(cx, |view, cx| {
+            view.restore_view(sha.into(), query.into(), window, cx)
+        });
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn restoring_a_tab_reselects_its_commit_within_its_search(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
@@ -419,12 +434,7 @@ fn restoring_a_tab_reselects_its_commit_within_its_search(cx: &mut TestAppContex
         view.update(cx, |view, cx| view.clear(cx));
         let reopened = engine.open_repository(&info.path).unwrap();
         set_repository(cx, &view, reopened);
-        cx.update_window(cx.windows()[0], |_, window, cx| {
-            view.update(cx, |view, cx| {
-                view.restore_view(sha.into(), query.into(), window, cx)
-            });
-        })
-        .unwrap();
+        restore_view(cx, &view, sha, query);
         settle(cx);
     };
     let selections = record_selections(cx, &view);
@@ -444,4 +454,184 @@ fn restoring_a_tab_reselects_its_commit_within_its_search(cx: &mut TestAppContex
     restore(cx, &fixture.newest, "older");
     let first_older = commit_at(&engine, &info, FIRST_OLDER);
     assert_eq!(selection(cx, &view), (first_older, 0, true));
+}
+
+#[gpui_kit::test]
+fn restoring_a_tab_whose_commit_was_rewritten_selects_the_first_row(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    // An amend at the terminal replaces the tab's commit.
+    let main = Repository::open(&fixture.main).unwrap();
+    let amended = main
+        .find_commit(Oid::from_str(&fixture.newest).unwrap())
+        .unwrap()
+        .amend(Some("HEAD"), None, None, None, Some("amended change"), None)
+        .unwrap()
+        .to_string();
+    let exits = Rc::new(RefCell::new(0));
+    let counted = exits.clone();
+    cx.update(|cx| {
+        cx.subscribe(&view, move |_, event, _| {
+            if matches!(event, HistoryEvent::ExitSoloAndNavigate(_)) {
+                *counted.borrow_mut() += 1;
+            }
+        })
+        .detach()
+    });
+    let selections = record_selections(cx, &view);
+    for (solo, first) in [
+        (vec![], amended),
+        (vec!["refs/heads/topic".to_owned()], fixture.head.clone()),
+    ] {
+        view.update(cx, |view, cx| view.clear(cx));
+        let reopened = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+        finish(&engine, &reopened);
+        set_repository(
+            cx,
+            &view,
+            engine.open_repository_with_solo(&info.path, &solo).unwrap(),
+        );
+        restore_view(cx, &view, &fixture.newest, "");
+        settle(cx);
+        assert_eq!(selection(cx, &view), (first.clone(), 0, true));
+        assert_eq!(selections.borrow().last(), Some(&first));
+        cx.read(|cx| {
+            let history = view.read(cx);
+            assert!(history.error.is_none(), "{:?}", history.error);
+        });
+    }
+    // A restored Solo is kept rather than left for the missing commit.
+    assert_eq!(*exits.borrow(), 0);
+}
+
+#[gpui_kit::test]
+fn a_refresh_relaunches_a_jump_still_waiting_for_its_commit(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let engine = fixture.workspace();
+    let view = open_view(cx, engine.clone());
+    let selections = record_selections(cx, &view);
+    let linked = fixture.linked.to_str().unwrap();
+    // The worktree opens on a cold index: its HEAD jump waits for indexing.
+    set_repository(cx, &view, engine.open_repository(linked).unwrap());
+    // An auto-fetch changes the references before the jump lands.
+    let main = Repository::open(&fixture.main).unwrap();
+    let newest = Oid::from_str(&fixture.newest).unwrap();
+    main.reference("refs/remotes/origin/main", newest, true, "fetch")
+        .unwrap();
+    let refreshed = engine.open_repository(linked).unwrap();
+    set_repository(cx, &view, refreshed.clone());
+    finish(&engine, &refreshed);
+    settle(cx);
+    let position = engine
+        .commit_position(&refreshed.id, &fixture.head)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selection(cx, &view), (fixture.head.clone(), position, true));
+    assert_eq!(
+        selections.borrow().as_slice(),
+        std::slice::from_ref(&fixture.head)
+    );
+    cx.read(|cx| assert!(view.read(cx).error.is_none()));
+
+    // Solo replaces the list before the jump lands: its first row is selected.
+    view.update(cx, |view, cx| view.clear(cx));
+    set_repository(cx, &view, engine.open_repository(linked).unwrap());
+    let solo = vec!["refs/heads/main".to_owned()];
+    let soloed = engine.open_repository_with_solo(linked, &solo).unwrap();
+    set_repository(cx, &view, soloed.clone());
+    finish(&engine, &soloed);
+    settle(cx);
+    assert_eq!(selection(cx, &view), (fixture.newest.clone(), 0, true));
+}
+
+#[gpui_kit::test]
+fn publishing_a_solo_traversal_reveals_the_kept_commit_again(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    // Fewer rows than the Solo history fit in the viewport.
+    cx.simulate_window_resize(cx.windows()[0], size(px(980.), px(420.)));
+    let position = FIRST_OLDER + 7;
+    let target = commit_at(&engine, &info, position);
+    jump(cx, &view, &target);
+    assert_eq!(selection(cx, &view), (target.clone(), position, true));
+    let solo = vec!["refs/heads/topic".to_owned()];
+    let soloed = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+    finish(&engine, &soloed);
+    let soloed = engine.open_repository_with_solo(&info.path, &solo).unwrap();
+    let solo_position = engine
+        .commit_position(&soloed.id, &target)
+        .unwrap()
+        .unwrap();
+    assert!(solo_position < position);
+    // A Solo session first serves the previous traversal while its own
+    // builds; the kept commit is found there first.
+    let mut buffered = soloed.clone();
+    buffered.index = IndexProgress {
+        complete: false,
+        ..info.index.clone()
+    };
+    set_repository(cx, &view, buffered.clone());
+    view.update(cx, |view, cx| {
+        let read = PositionRead::Selection {
+            generation: view.page_requests.generation(),
+            sha: target.clone(),
+            filter: String::new(),
+        };
+        view.accept_position(read, Ok((Some(position), buffered.index)), cx);
+    });
+    // Status polling then publishes the Solo traversal.
+    settle(cx);
+    assert_eq!(selection(cx, &view), (target, solo_position, true));
+}
+
+#[gpui_kit::test]
+fn keyboard_navigation_ends_the_lookup_of_a_kept_selection(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (engine, info, view) = open_main(cx, &fixture);
+    let kept = engine.list_commits(&info.id, 10, 1, "").unwrap().commits[0]
+        .sha
+        .clone();
+    let last = info.index.indexed - 1;
+    let base = engine.list_commits(&info.id, last, 1, "").unwrap().commits[0]
+        .sha
+        .clone();
+    // End is pressed while the restored commit's row is still looked up,
+    // and before the last page has loaded.
+    cx.update_window(cx.windows()[0], |_, window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(!view.pages.current(last / PAGE_SIZE));
+            view.restore_view(kept, String::new(), window, cx);
+            view.select_index_keyboard(last, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx);
+    assert_eq!(selection(cx, &view), (base, last, true));
+}
+
+#[gpui_kit::test]
+fn search_pages_arrive_with_the_highlights_of_their_query(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (_, _, view) = open_main(cx, &fixture);
+    // Highlighted words of the first row's subject, then of its author.
+    let highlights = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let row = view.read(cx).pages.row_shared(0).unwrap();
+            [
+                (&row.subject, &row.subject_highlights),
+                (&row.author, &row.author_highlights),
+            ]
+            .map(|(text, ranges)| {
+                ranges
+                    .iter()
+                    .map(|range| text[range.clone()].to_owned())
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    assert!(highlights(cx).iter().all(Vec::is_empty));
+    search(cx, &view, "OLDER chan te");
+    assert_eq!(highlights(cx), [vec!["older", "chan"], vec!["Te"]]);
+    search(cx, &view, "");
+    assert!(highlights(cx).iter().all(Vec::is_empty));
 }

@@ -369,6 +369,50 @@ fn search_handles_unicode_punctuation_sha_and_conflicting_reference_labels() {
 }
 
 #[test]
+fn search_offsets_are_the_offsets_of_listed_results() {
+    let fixture = Fixture::new();
+    let mut tip = commit(&fixture.repository, "base", &[], &[], Some("HEAD"));
+    for index in 0..40 {
+        let kind = if index % 3 == 0 { "fix" } else { "chore" };
+        tip = commit(
+            &fixture.repository,
+            &format!("{kind} {index}"),
+            &[tip],
+            &[],
+            Some("HEAD"),
+        );
+    }
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let history = workspace.list_commits(&info.id, 0, 256, "").unwrap();
+    let results = workspace.list_commits(&info.id, 0, 256, "fix").unwrap();
+    assert_eq!(results.total, 14);
+    // « FIX » is not cached yet: one scan, then its cached snapshot.
+    for _ in 0..2 {
+        for commit in &history.commits {
+            let (offset, index) = workspace
+                .search_offset(&info.id, " FIX ", &commit.sha)
+                .unwrap();
+            let expected = results
+                .commits
+                .iter()
+                .position(|result| result.sha == commit.sha);
+            assert_eq!(offset, expected, "{}", commit.summary);
+            assert_eq!(index.index_run, results.index.index_run);
+            assert_eq!(index.indexed, 41);
+            let (position, _) = workspace.search_offset(&info.id, "", &commit.sha).unwrap();
+            assert_eq!(position, Some(commit.position));
+        }
+    }
+    let absent = "0".repeat(40);
+    assert_eq!(
+        workspace.search_offset(&info.id, "fix", &absent).unwrap().0,
+        None
+    );
+}
+
+#[test]
 fn history_is_topological_and_merge_edges_preserve_git_parent_order() {
     let fixture = Fixture::new();
     let root = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));

@@ -252,6 +252,14 @@ pub struct ReferenceBadge {
     pub label: SharedString,
     pub rank: ReferenceRank,
     chars: usize,
+    folded: Folded,
+}
+
+impl ReferenceBadge {
+    /// Label prefix matched by a reference search, given its folded filter.
+    pub fn highlight(&self, folded_filter: &str) -> Option<Range<usize>> {
+        self.folded.prefix(folded_filter)
+    }
 }
 
 pub struct ReferenceGroup {
@@ -295,6 +303,7 @@ impl ReferenceGroup {
                 label: reference.label.clone().into(),
                 rank: *rank,
                 chars: reference.label.chars().count(),
+                folded: Folded::new(&reference.label),
             })
             .collect();
         Self {
@@ -418,6 +427,11 @@ impl Folded {
             None => folded,
         }
     }
+
+    /// Source range of a folded prefix, as SHA and reference queries match.
+    fn prefix(&self, prefix: &str) -> Option<Range<usize>> {
+        (!prefix.is_empty() && self.text.starts_with(prefix)).then(|| self.source(0..prefix.len()))
+    }
 }
 
 fn folded(text: &str) -> (String, Vec<Range<usize>>) {
@@ -450,7 +464,7 @@ fn folded(text: &str) -> (String, Vec<Range<usize>>) {
 }
 
 /// Source ranges where a term starts a word of `text`.
-pub fn highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {
+fn highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {
     if terms.is_empty() {
         return Vec::new();
     }
@@ -479,33 +493,9 @@ pub fn highlight_ranges(text: &str, terms: &[String]) -> Vec<Range<usize>> {
     merged
 }
 
-/// Source range of a prefix search, as SHA and reference queries match.
-pub fn prefix_range(text: &str, filter: &str) -> Option<Range<usize>> {
-    let filter = fold(filter);
-    let folded = Folded::new(text);
-    (!filter.is_empty() && folded.text.starts_with(&filter)).then(|| folded.source(0..filter.len()))
-}
-
-/// First result offset whose walk position is at least `target`. Results
-/// keep walk order, so a present commit is found at this offset.
-pub fn result_offset<E>(
-    total: usize,
-    target: usize,
-    mut position: impl FnMut(usize) -> Result<Option<usize>, E>,
-) -> Result<usize, E> {
-    let (mut low, mut high) = (0, total);
-    while low < high {
-        let middle = low + (high - low) / 2;
-        match position(middle)? {
-            Some(found) if found < target => low = middle + 1,
-            _ => high = middle,
-        }
-    }
-    Ok(low)
-}
-
-/// Text used by a virtualized row is prepared once, away from the UI thread.
-/// The full commit remains available for selection and inspector operations.
+/// Text used by a virtualized row, and its search highlights, are prepared
+/// once, away from the UI thread. The full commit remains available for
+/// selection and inspector operations.
 pub struct HistoryRow {
     pub commit: Arc<CommitRow>,
     pub subject: SharedString,
@@ -513,10 +503,12 @@ pub struct HistoryRow {
     pub initials: SharedString,
     pub date: SharedString,
     pub short_sha: SharedString,
+    pub subject_highlights: Vec<Range<usize>>,
+    pub author_highlights: Vec<Range<usize>>,
 }
 
 impl HistoryRow {
-    fn new(commit: CommitRow) -> Self {
+    fn new(commit: CommitRow, terms: &[String]) -> Self {
         let subject = if commit.summary.is_empty() {
             "(sans message)".to_owned()
         } else {
@@ -528,6 +520,8 @@ impl HistoryRow {
             subject
         };
         Self {
+            subject_highlights: highlight_ranges(&subject, terms),
+            author_highlights: highlight_ranges(&commit.author, terms),
             subject: subject.into(),
             author: commit.author.clone().into(),
             initials: crate::format::initials(&commit.author).into(),
@@ -554,6 +548,8 @@ impl HistoryRow {
             + self.initials.len()
             + self.date.len()
             + self.short_sha.len()
+            + (self.subject_highlights.capacity() + self.author_highlights.capacity())
+                * std::mem::size_of::<Range<usize>>()
     }
 }
 
@@ -570,11 +566,12 @@ pub struct HistoryPage {
 }
 
 impl HistoryPage {
-    pub fn new(page: CommitPage) -> Self {
+    /// Rows of a page read for a search highlight its `terms`.
+    pub fn new(page: CommitPage, terms: &[String]) -> Self {
         let rows: Vec<_> = page
             .commits
             .into_iter()
-            .map(|row| Arc::new(HistoryRow::new(row)))
+            .map(|row| Arc::new(HistoryRow::new(row, terms)))
             .collect();
         let bytes = rows.capacity() * std::mem::size_of::<Arc<HistoryRow>>()
             + rows.iter().map(|row| row.allocation_bytes()).sum::<usize>();
@@ -587,21 +584,24 @@ impl HistoryPage {
         let measurement = if page.offset == 0 {
             rows.first().map(|first| {
                 let commit = &first.commit;
-                Arc::new(HistoryRow::new(CommitRow {
-                    sha: commit.sha.clone(),
-                    summary: first.subject.to_string(),
-                    author: commit.author.clone(),
-                    email: String::new(),
-                    time: commit.time,
-                    parents: commit.parents.iter().take(2).cloned().collect(),
-                    position: commit.position,
-                    graph: mangrove_core::model::GraphRow {
-                        lane: commit.graph.lane,
-                        color: commit.graph.color,
-                        width: commit.graph.width,
-                        edges: Vec::new(),
+                Arc::new(HistoryRow::new(
+                    CommitRow {
+                        sha: commit.sha.clone(),
+                        summary: first.subject.to_string(),
+                        author: commit.author.clone(),
+                        email: String::new(),
+                        time: commit.time,
+                        parents: commit.parents.iter().take(2).cloned().collect(),
+                        position: commit.position,
+                        graph: mangrove_core::model::GraphRow {
+                            lane: commit.graph.lane,
+                            color: commit.graph.color,
+                            width: commit.graph.width,
+                            edges: Vec::new(),
+                        },
                     },
-                }))
+                    terms,
+                ))
             })
         } else {
             None
@@ -1054,39 +1054,45 @@ mod tests {
     }
 
     #[test]
-    fn prefix_highlights_match_sha_and_reference_queries() {
-        assert_eq!(prefix_range("abc1234", "ABC"), Some(0..3));
-        assert_eq!(prefix_range("abc1234", "bc"), None);
-        assert_eq!(prefix_range("Évolution", "evo"), Some(0..4));
-        assert_eq!(prefix_range("abc", ""), None);
+    fn reference_badges_highlight_the_prefix_of_a_folded_search() {
+        let references = [reference("local", "abc1234"), reference("tag", "Évolution")];
+        let groups = group_references(&references, &[], None, "");
+        let badges = &groups.get("same").unwrap().badges;
+        let highlight = |badge: usize, filter: &str| badges[badge].highlight(&fold(filter));
+        assert_eq!(highlight(0, "ABC"), Some(0..3));
+        assert_eq!(highlight(0, "bc"), None);
+        assert_eq!(highlight(1, "evo"), Some(0..4));
+        assert_eq!(highlight(0, ""), None);
     }
 
     #[test]
-    fn result_offsets_are_found_by_walk_position_in_logarithmic_reads() {
-        let positions = [3, 8, 13, 21, 34, 55];
-        let mut reads = 0;
-        let mut offset = |target| {
-            result_offset(positions.len(), target, |index| {
-                reads += 1;
-                Ok::<_, ()>(positions.get(index).copied())
-            })
-            .unwrap()
-        };
-        assert_eq!(offset(21), 3);
-        assert_eq!(offset(3), 0);
-        assert_eq!(offset(55), 5);
-        // Absent commits resolve to a neighbour, rejected by the SHA check.
-        assert_eq!(offset(22), 4);
-        assert_eq!(offset(99), 6);
-        assert!(reads <= 5 * 3);
-        assert_eq!(
-            result_offset(0, 1, |_| Err::<Option<usize>, _>("unused")),
-            Ok(0)
+    fn pages_prepare_the_highlights_of_their_rows_and_measurement() {
+        let mut commits = rows(0, 2);
+        commits[0].summary = "École: fix".into();
+        commits[0].author = "Fixer".into();
+        commits[1].summary = "prefix".into();
+        let page = HistoryPage::new(
+            CommitPage {
+                commits,
+                offset: 0,
+                total: 2,
+                index: IndexProgress {
+                    indexed: 2,
+                    complete: true,
+                    error: None,
+                    index_run: "test".into(),
+                },
+            },
+            &highlight_terms("ecole fix"),
         );
-        assert_eq!(
-            result_offset(4, 1, |_| Err::<Option<usize>, _>("io")),
-            Err("io")
-        );
+        let first = &page.rows[0];
+        assert_eq!(first.subject_highlights, [0..6, 8..11]);
+        assert_eq!(first.author_highlights, vec![0..3]);
+        assert!(page.rows[1].subject_highlights.is_empty());
+        let measurement = page.measurement.as_ref().unwrap();
+        assert_eq!(measurement.subject_highlights, first.subject_highlights);
+        let unfiltered = HistoryRow::new(rows(0, 1).pop().unwrap(), &[]);
+        assert!(unfiltered.subject_highlights.is_empty());
     }
 
     fn rows(offset: usize, count: usize) -> Vec<CommitRow> {
@@ -1111,17 +1117,20 @@ mod tests {
 
     fn insert(cache: &mut HistoryCache, offset: usize, rows: Vec<CommitRow>, total: usize) -> bool {
         cache.insert(
-            HistoryPage::new(CommitPage {
-                commits: rows,
-                offset,
-                total,
-                index: IndexProgress {
-                    indexed: total,
-                    complete: true,
-                    error: None,
-                    index_run: "test".into(),
+            HistoryPage::new(
+                CommitPage {
+                    commits: rows,
+                    offset,
+                    total,
+                    index: IndexProgress {
+                        indexed: total,
+                        complete: true,
+                        error: None,
+                        index_run: "test".into(),
+                    },
                 },
-            }),
+                &[],
+            ),
             total,
         )
     }
@@ -1287,7 +1296,7 @@ mod tests {
     fn display_subject_is_unicode_bounded_while_the_original_commit_is_preserved() {
         let mut commits = rows(0, 1);
         commits[0].summary = "é🐚".repeat(25_000);
-        let prepared = HistoryRow::new(commits.pop().unwrap());
+        let prepared = HistoryRow::new(commits.pop().unwrap(), &[]);
         assert_eq!(prepared.subject.chars().count(), MAX_SUBJECT_CHARS + 1);
         assert!(prepared.subject.ends_with('…'));
         assert_eq!(prepared.commit.summary.chars().count(), 50_000);
