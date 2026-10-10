@@ -1,4 +1,5 @@
 use crate::{
+    format::count_label,
     integrations::{IntegrationsSection, IntegrationsView},
     preferences::{MAX_AUTO_FETCH_INTERVAL, parse_auto_fetch_interval},
     theme::{Palette, RADIUS_LG, RADIUS_MD, RADIUS_SM, ThemeId, icon, scrollbar_theme},
@@ -42,9 +43,9 @@ pub struct SettingsView {
     input: Entity<InputState>,
     theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     scroll: ScrollHandle,
+    focus_handle: FocusHandle,
     palette: Palette,
     font_size_offset: f32,
-    saved: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -63,8 +64,8 @@ impl SettingsView {
     ) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                // Stepping is bounded separately; keep invalid drafts available
-                // to the existing save validation instead of clamping on blur.
+                // Stepping is bounded separately; invalid drafts stay visible
+                // with their error until blur restores the saved interval.
                 .mask_pattern(MaskPattern::None)
                 .default_value(interval.to_string())
         });
@@ -79,12 +80,10 @@ impl SettingsView {
         });
         let input_subscription =
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-                InputEvent::Change => {
-                    this.saved = false;
-                    this.error = None;
-                    cx.notify();
+                InputEvent::Change => this.apply_draft(cx),
+                InputEvent::Blur if this.error.is_some() => {
+                    this.set_interval(this.interval, window, cx)
                 }
-                InputEvent::PressEnter { .. } => this.save(window, cx),
                 _ => {}
             });
         let theme_subscription = cx.subscribe(&theme_select, |_, _, event, cx| {
@@ -102,9 +101,9 @@ impl SettingsView {
             input,
             theme_select,
             scroll: ScrollHandle::default(),
+            focus_handle: cx.focus_handle(),
             palette,
             font_size_offset,
-            saved: false,
             error: None,
             _subscriptions: vec![input_subscription, theme_subscription],
         }
@@ -178,7 +177,6 @@ impl SettingsView {
             input.set_value(interval.to_string(), window, cx)
         });
         self.error = None;
-        self.saved = false;
         cx.notify();
     }
     pub fn set_image_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -200,20 +198,16 @@ impl SettingsView {
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(interval) = parse_auto_fetch_interval(self.input.read(cx).value().as_ref()) {
-            self.interval = interval;
-            self.error = None;
-            self.saved = true;
-            if !self.input.read(cx).focus_handle(cx).is_focused(window) {
-                self.focus(window, cx);
+    fn apply_draft(&mut self, cx: &mut Context<Self>) {
+        match resolve_interval(self.input.read(cx).value().as_ref(), self.interval) {
+            Ok(interval) => {
+                self.error = None;
+                if interval != self.interval {
+                    self.interval = interval;
+                    cx.emit(SettingsEvent::IntervalChanged(interval));
+                }
             }
-            cx.emit(SettingsEvent::IntervalChanged(interval));
-        } else {
-            self.error = Some(format!(
-                "Indiquez un nombre entier entre 0 et {MAX_AUTO_FETCH_INTERVAL}."
-            ));
-            self.focus(window, cx);
+            Err(error) => self.error = Some(error),
         }
         cx.notify();
     }
@@ -223,7 +217,6 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         let offset = self.font_size_offset;
-        let changed = self.input.read(cx).value().as_ref() != self.interval.to_string();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let step_input = self.input.clone();
         let number = NumberInput::new(&self.input)
@@ -284,7 +277,15 @@ impl Render for SettingsView {
 
         div()
             .id("settings-view")
-            .on_action(cx.listener(|_, _: &InputEscape, _, cx| cx.emit(SettingsEvent::Back)))
+            .track_focus(&self.focus_handle)
+            // The first Escape leaves the field; the next one reaches the workspace.
+            .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                if this.input.read(cx).focus_handle(cx).is_focused(window) {
+                    this.focus_handle.focus(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -323,10 +324,10 @@ impl Render for SettingsView {
                                     .rounded(RADIUS_SM)
                                     .px(px(5.))
                                     .py(px(2.))
-                                    .text_size(px(9. + offset))
+                                    .text_size(px(11. + offset))
+                                    .line_height(relative(1.2))
                                     .text_color(rgb(p.muted))
-                                    .opacity(0.7)
-                                    .child("Esc"),
+                                    .child("Échap"),
                             )
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Back))),
                     )
@@ -506,7 +507,7 @@ impl Render for SettingsView {
                                                                     .flex()
                                                                     .flex_col()
                                                                     .child(div().flex().items_center().gap(px(12.)).child(number).child(div().text_size(px(12. + offset)).line_height(px(16. + 2. * offset)).text_color(rgb(p.muted)).child("minutes")))
-                                                                    .child(div().mt(px(12.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Entre 0 et 60 minutes. 0 désactive l’auto-fetch. Récupère les références de tous les remotes du dépôt actif."))
+                                                                    .child(div().mt(px(12.)).text_size(px(12. + offset)).line_height(relative(1.625)).text_color(rgb(p.muted)).whitespace_normal().child("Entre 0 et 60 minutes ; 0 désactive l’auto-fetch. Récupère les références de tous les remotes du dépôt actif. Chaque valeur valide est enregistrée immédiatement."))
                                                                     .when_some(self.error.clone(), |view, error| view.child(div().mt(px(8.)).text_size(px(12. + offset)).line_height(px(16. + 2. * offset)).text_color(rgb(p.danger)).whitespace_normal().child(error))),
                                                             ),
                                                     )
@@ -526,37 +527,6 @@ impl Render for SettingsView {
                                                             .child(div().flex_1().min_w_0().whitespace_normal().child("De nombreux remotes peuvent affecter les performances. Les objets LFS ne sont pas récupérés automatiquement.")),
                                                     ),
                                             )
-                                            .child(
-                                                div()
-                                                    .mt(px(20.))
-                                                    .min_h(px(36.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap(px(16.))
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap(px(8.))
-                                                            .text_size(px(12. + offset))
-                                                            .line_height(px(16. + 2. * offset))
-                                                            .text_color(rgb(p.accent))
-                                                            .when(self.saved, |view| view.child(icon(IconName::Check, 14., p.accent)).child("Paramètres enregistrés.")),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .gap(px(12.))
-                                                            .child(settings_button("settings-reset", "Annuler les modifications", p, offset).hover(move |style| style.text_color(brightened(p.text)).border_color(brightened(p.border))).disabled(!changed).on_click(cx.listener(|this, _, window, cx| {
-                                                                this.set_interval(this.interval, window, cx);
-                                                                this.focus(window, cx);
-                                                            })))
-                                                            .child(settings_button("settings-save", "Enregistrer", p, offset).border_color(transparent_black()).bg(rgb(p.accent)).hover(move |style| style.bg(brightened(p.accent)).border_color(transparent_black())).disabled(!changed).on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))),
-                                                    ),
-                                            ),
                                     ),
                             ))
                             .when(self.section != SettingsSection::General, |view| view.when_some(self.integrations.clone(), |view, integrations| view.child(integrations)))
@@ -566,37 +536,19 @@ impl Render for SettingsView {
     }
 }
 
-fn settings_button(id: &'static str, label: &'static str, p: Palette, offset: f32) -> Button {
-    Button::new(id)
-        .min_h(px(37.))
-        .min_w_0()
-        .px(px(14.))
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(RADIUS_MD)
-        .text_size(px(12. + offset))
-        .line_height(px(16. + 2. * offset))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(p.text))
-        .cursor_pointer()
-        .accessibility_label(label)
-        .focus_visible(move |style| style.border_color(rgb(p.accent)))
-        .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_default()))
-        .child(
-            div()
-                .min_w_0()
-                .whitespace_normal()
-                .text_center()
-                .child(label),
-        )
-}
-
-fn brightened(color: u32) -> Rgba {
-    let mut color = rgb(color);
-    color.r = (color.r * 1.1).min(1.);
-    color.g = (color.g * 1.1).min(1.);
-    color.b = (color.b * 1.1).min(1.);
-    color
+/// A valid draft becomes the interval; an invalid one keeps the saved value.
+fn resolve_interval(draft: &str, saved: u32) -> Result<u32, String> {
+    parse_auto_fetch_interval(draft).ok_or_else(|| {
+        let kept = if saved == 0 {
+            "L’auto-fetch reste désactivé.".to_string()
+        } else {
+            format!(
+                "L’intervalle enregistré reste de {}.",
+                count_label(saved as usize, "minute", "minutes")
+            )
+        };
+        format!("Indiquez un nombre entier entre 0 et {MAX_AUTO_FETCH_INTERVAL}. {kept}")
+    })
 }
 
 fn step_interval(value: &str, action: StepAction) -> Option<String> {
@@ -630,8 +582,29 @@ fn step_interval(value: &str, action: StepAction) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::step_interval;
+    use super::{resolve_interval, step_interval};
     use gpui_kit::base::StepAction::{Decrement, Increment};
+
+    #[test]
+    fn valid_drafts_apply_and_invalid_drafts_explain_the_kept_interval() {
+        assert_eq!(resolve_interval("15", 1), Ok(15));
+        assert_eq!(resolve_interval(" 0 ", 5), Ok(0));
+        assert_eq!(resolve_interval("60", 5), Ok(60));
+        assert_eq!(
+            resolve_interval("61", 5),
+            Err("Indiquez un nombre entier entre 0 et 60. L’intervalle enregistré reste de 5 minutes.".into())
+        );
+        assert!(
+            resolve_interval("1.5", 1)
+                .unwrap_err()
+                .ends_with("reste de 1 minute.")
+        );
+        assert!(
+            resolve_interval("", 0)
+                .unwrap_err()
+                .ends_with("L’auto-fetch reste désactivé.")
+        );
+    }
 
     #[test]
     fn stepping_fractional_drafts_recovers_a_whole_minute_in_the_requested_direction() {
