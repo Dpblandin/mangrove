@@ -1619,6 +1619,13 @@ impl IntegrationsView {
         ]
         .into_iter()
         .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            // An open select hands its focus to the search field of its menu;
+            // leaving that field closes the menu.
+            || self
+                .repository_select
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
     }
 
     fn start_profile_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -2051,15 +2058,18 @@ fn clone_directory_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IntegrationsEvent, IntegrationsSection, IntegrationsView, ProviderEdition,
+        InputEscape, IntegrationsEvent, IntegrationsSection, IntegrationsView, ProviderEdition,
         accepts_response, bounded, configured_browser_client_id, disconnect_completion,
     };
     use crate::theme::{Palette, ThemeId};
     use gpui_kit::{
-        AnyWindowHandle, AppContext, Entity, TestAppContext, WindowOptions, test::TestWindowExt,
+        AnyWindowHandle, AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement,
+        ParentElement, Render, Styled, TestAppContext, Window, WindowOptions, div,
+        test::TestWindowExt,
     };
     use mangrove_remote::{
         Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
+        providers::Repository,
     };
     use std::{cell::RefCell, rc::Rc};
 
@@ -2359,7 +2369,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn an_added_home_favorite_is_stored_as_an_absolute_path(cx: &mut TestAppContext) {
-        let (window, view, events) = open_integrations(cx);
+        let (window, view, events, _) = open_integrations(cx);
         let path = dirs::home_dir()
             .unwrap()
             .join("code")
@@ -2391,18 +2401,21 @@ mod tests {
         assert!(!accepts_response(2, 4, "personal", "personal"));
     }
 
+    type EventLog = Rc<RefCell<Vec<IntegrationsEvent>>>;
+
     fn open_integrations(
         cx: &mut TestAppContext,
     ) -> (
         AnyWindowHandle,
         Entity<IntegrationsView>,
-        Rc<RefCell<Vec<IntegrationsEvent>>>,
+        EventLog,
+        Entity<EscapeProbe>,
     ) {
         cx.update(gpui_kit::init);
-        let (window, view) = cx
+        let (window, probe) = cx
             .update(|cx| {
                 gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                    cx.new(|cx| {
+                    let view = cx.new(|cx| {
                         let mut view = IntegrationsView::new(
                             Profile::new("personal", "Personnel"),
                             Palette::for_theme(ThemeId::Classic),
@@ -2420,12 +2433,14 @@ mod tests {
                         );
                         view.set_section(IntegrationsSection::Profiles, cx);
                         view
-                    })
+                    });
+                    cx.new(|_| EscapeProbe { view, escapes: 0 })
                 })
             })
             .unwrap();
         cx.update_window(window, |_, window, _| window.activate_window())
             .unwrap();
+        let view = probe.read_with(cx, |probe, _| probe.view.clone());
         let events = Rc::new(RefCell::new(Vec::new()));
         let captured = events.clone();
         cx.update(|cx| {
@@ -2434,7 +2449,23 @@ mod tests {
             })
             .detach()
         });
-        (window, view, events)
+        (window, view, events, probe)
+    }
+
+    /// Stands for the app root, which closes the clone screen when an input
+    /// lets Escape through.
+    struct EscapeProbe {
+        view: Entity<IntegrationsView>,
+        escapes: usize,
+    }
+
+    impl Render for EscapeProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .on_action(cx.listener(|probe, _: &InputEscape, _, _| probe.escapes += 1))
+                .child(self.view.clone())
+        }
     }
 
     fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
@@ -2444,8 +2475,60 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn escape_in_the_repository_search_leaves_the_field_not_the_clone_screen(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, view, _, probe) = open_integrations(cx);
+        let repository = |id: &str, full_name: &str| Repository {
+            id: id.into(),
+            name: full_name.rsplit('/').next().unwrap().into(),
+            full_name: full_name.into(),
+            web_url: None,
+            clone_url: None,
+            ssh_clone_url: None,
+        };
+        view.update(cx, |view, cx| {
+            view.set_section(IntegrationsSection::Repositories, cx);
+            let mut repositories = Vec::new();
+            view.repository_menu_data
+                .borrow_mut()
+                .append(
+                    &mut repositories,
+                    vec![repository("1", "team/api"), repository("2", "team/web")],
+                )
+                .unwrap();
+            view.repositories = repositories;
+            cx.notify();
+        });
+        click(cx, window, "repository-select");
+        let state = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                let view = view.read(cx);
+                (
+                    view.repository_select
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    view.focus_handle.is_focused(window),
+                    probe.read(cx).escapes,
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(state(cx), (true, false, 0));
+
+        cx.update_window(window, |_, window, cx| {
+            window.input("api", cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(state(cx), (false, true, 0));
+    }
+
+    #[gpui_kit::test]
     fn a_profile_cannot_be_selected_while_its_deletion_runs(cx: &mut TestAppContext) {
-        let (window, view, events) = open_integrations(cx);
+        let (window, view, events, _) = open_integrations(cx);
         view.update(cx, |view, cx| {
             view.deleting_profile = Some("work".into());
             cx.notify();
@@ -2468,7 +2551,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn a_refused_profile_name_keeps_the_editor_open_with_its_reason(cx: &mut TestAppContext) {
-        let (window, view, events) = open_integrations(cx);
+        let (window, view, events, _) = open_integrations(cx);
         let rename = |cx: &mut TestAppContext, name: String| {
             cx.update_window(window, |_, window, cx| {
                 view.update(cx, |view, cx| {
