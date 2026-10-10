@@ -536,7 +536,7 @@ fn commit_line_totals_match_file_patches_and_stay_unknown_past_the_size_guard() 
     assert_eq!(
         fixture
             .workspace
-            .commit_line_totals(&info.id, &sha)
+            .commit_line_totals(&info.id, &sha, 1_000, &|| false)
             .unwrap(),
         Some(expected)
     );
@@ -547,8 +547,20 @@ fn commit_line_totals_match_file_patches_and_stay_unknown_past_the_size_guard() 
     assert_eq!(
         fixture
             .workspace
-            .commit_line_totals(&info.id, &oversized.to_string())
+            .commit_line_totals(&info.id, &oversized.to_string(), 1_000, &|| false)
             .unwrap(),
         None
     );
+    // More files than allowed, or a read cancelled by a newer selection.
+    assert_eq!(
+        fixture
+            .workspace
+            .commit_line_totals(&info.id, &sha, 1, &|| false)
+            .unwrap(),
+        None
+    );
+    assert!(fixture
+        .workspace
+        .commit_line_totals(&info.id, &sha, 1_000, &|| true)
+        .is_err());
 }

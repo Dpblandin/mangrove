@@ -33,6 +33,8 @@ use std::{
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 256;
 const MAX_CACHE_TOKENS: usize = 200_000;
+/// Larger commits keep their totals hidden rather than hold the read lane.
+const MAX_TOTALS_FILES: usize = 1_000;
 pub enum InspectorEvent {
     ModeChanged(bool),
     NavigateCommit(String),
@@ -336,6 +338,11 @@ pub struct InspectorViewState {
     file_key: Option<String>,
     open: bool,
 }
+impl InspectorViewState {
+    pub fn sha(&self) -> Option<&str> {
+        self.sha.as_deref()
+    }
+}
 
 pub struct InspectorView {
     engine: Arc<Workspace>,
@@ -517,6 +524,8 @@ impl InspectorView {
         self.status = None;
         self.pending = None;
         self.pending_status = false;
+        self.pending_totals = None;
+        self.line_totals = None;
         self.cache.clear();
         self.preload_task = None;
         self.preload_cursor = 0;
@@ -561,6 +570,7 @@ impl InspectorView {
         self.last_keyboard_selection = None;
         self.pending = None;
         self.pending_status = true;
+        self.pending_totals = None;
         self.cache.clear();
         self.preload_task = None;
         self.preload_cursor = 0;
@@ -657,7 +667,21 @@ impl InspectorView {
     pub fn central_active(&self) -> bool {
         !self.compact && self.workspace_open
     }
+    /// Announces a central view change; only a visible file browser reads.
+    fn mode_changed(&mut self, active: bool, cx: &mut Context<Self>) {
+        let visible = self.central_active();
+        self.browser
+            .update(cx, |view, cx| view.set_visible(visible, cx));
+        cx.emit(InspectorEvent::ModeChanged(active));
+    }
+    pub fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser
+            .update(cx, |browser, cx| browser.focus(window, cx));
+    }
     pub fn view_state(&self) -> InspectorViewState {
+        if let Some(pending) = &self.pending_view {
+            return pending.clone();
+        }
         let Selection::Commit(sha) = &self.selection else {
             return InspectorViewState::default();
         };
@@ -1046,7 +1070,7 @@ impl InspectorView {
         // Selecting search results also closes the workspace. Only a real
         // view switch should return focus to history; otherwise keep typing.
         if was_active {
-            cx.emit(InspectorEvent::ModeChanged(false));
+            self.mode_changed(false, cx);
         }
         cx.notify();
     }
@@ -1059,7 +1083,7 @@ impl InspectorView {
         }
         self.viewer_dirty = true;
         if was_active != self.central_active() {
-            cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+            self.mode_changed(self.central_active(), cx);
         }
         cx.notify();
     }
@@ -1189,7 +1213,7 @@ impl InspectorView {
                 .update(cx, |view, cx| view.present(presentation, cx));
         }
         if !self.compact {
-            cx.emit(InspectorEvent::ModeChanged(true));
+            self.mode_changed(true, cx);
         }
         if !can_read {
             // The latest key wins even if the status is still being read. Keep
@@ -1250,7 +1274,7 @@ impl InspectorView {
             let was_active = self.central_active();
             self.workspace_open = open;
             if was_active != self.central_active() {
-                cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+                self.mode_changed(self.central_active(), cx);
             }
         }
         self.schedule_preload(cx);
@@ -1336,7 +1360,9 @@ impl InspectorView {
                                 .working_tree_status(&request.id)
                                 .map(|v| ReadResult::Status(Arc::new(v))),
                             ReadKind::Totals(sha) => engine
-                                .commit_line_totals(&request.id, sha)
+                                .commit_line_totals(&request.id, sha, MAX_TOTALS_FILES, &|| {
+                                    !request.current(current())
+                                })
                                 .map(ReadResult::Totals),
                             ReadKind::Diff {
                                 selection, file, ..
@@ -1577,7 +1603,13 @@ impl InspectorView {
                         ));
                         self.message_scroll.set_offset(point(px(0.), px(0.)));
                         self.reset_sha_feedback();
-                        self.pending_totals = (details.file_count > 0).then(|| details.sha.clone());
+                        let known = self
+                            .line_totals
+                            .as_ref()
+                            .is_some_and(|(sha, _)| *sha == details.sha);
+                        self.pending_totals = (!known
+                            && (1..=MAX_TOTALS_FILES).contains(&details.file_count))
+                        .then(|| details.sha.clone());
                         self.details = Some(details);
                         self.snapshot = None;
                         self.viewer_dirty = true;
@@ -1617,7 +1649,7 @@ impl InspectorView {
                                 let was_active = self.central_active();
                                 self.workspace_open = open;
                                 if was_active != self.central_active() {
-                                    cx.emit(InspectorEvent::ModeChanged(self.central_active()));
+                                    self.mode_changed(self.central_active(), cx);
                                 }
                             }
                         }

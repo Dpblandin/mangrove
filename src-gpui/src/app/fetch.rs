@@ -2,14 +2,15 @@
 //! their summary changes or a fetch succeeds. Git output is summarized in one
 //! French line; the raw text remains available as detail.
 use crate::chrome::Notice;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Default)]
 pub struct FetchFeedback {
     failures: u32,
-    dismissed: Option<String>,
+    /// Dismissed summary per repository path, so each tab keeps its own.
+    dismissed: HashMap<String, String>,
 }
 
 impl FetchFeedback {
@@ -24,10 +25,15 @@ impl FetchFeedback {
 
     /// Records a finished fetch and returns the message to display. A manual
     /// fetch always shows its failure and re-arms a dismissed message.
-    pub fn finish(&mut self, error: Option<String>, manual: bool) -> Option<Notice> {
+    pub fn finish(
+        &mut self,
+        repository: &str,
+        error: Option<String>,
+        manual: bool,
+    ) -> Option<Notice> {
         let Some(error) = error else {
             self.failures = 0;
-            self.dismissed = None;
+            self.dismissed.remove(repository);
             return None;
         };
         self.failures = self.failures.saturating_add(1);
@@ -36,15 +42,15 @@ impl FetchFeedback {
             detail: Some(error),
         };
         if manual {
-            self.dismissed = None;
-        } else if self.dismissed.as_ref() == Some(&notice.summary) {
+            self.dismissed.remove(repository);
+        } else if self.dismissed.get(repository) == Some(&notice.summary) {
             return None;
         }
         Some(notice)
     }
 
-    pub fn dismiss(&mut self, notice: Notice) {
-        self.dismissed = Some(notice.summary);
+    pub fn dismiss(&mut self, repository: &str, notice: Notice) {
+        self.dismissed.insert(repository.to_owned(), notice.summary);
     }
 
     /// Another repository starts with the configured interval.
@@ -241,6 +247,7 @@ fn first_line(text: &str) -> String {
 mod tests {
     use super::*;
 
+    const REPO: &str = "/repos/a";
     const UNREACHABLE: &str = "origin : fatal: unable to access 'https://example.com/r.git/': \
         Failed to connect to example.com port 443 after 12 ms: Couldn't connect to server";
 
@@ -301,7 +308,7 @@ mod tests {
             "Fetch impossible : Une récupération des références distantes est déjà en cours."
         );
         let notice = FetchFeedback::default()
-            .finish(Some(UNREACHABLE.into()), false)
+            .finish(REPO, Some(UNREACHABLE.into()), false)
             .unwrap();
         assert_eq!(notice.detail.as_deref(), Some(UNREACHABLE));
         assert_eq!(notice.summary, fetch_error_summary(UNREACHABLE));
@@ -310,38 +317,56 @@ mod tests {
     #[test]
     fn dismissed_error_stays_hidden_until_it_changes_or_a_fetch_succeeds() {
         let mut feedback = FetchFeedback::default();
-        let shown = feedback.finish(Some(UNREACHABLE.into()), false).unwrap();
-        feedback.dismiss(shown.clone());
+        let shown = feedback
+            .finish(REPO, Some(UNREACHABLE.into()), false)
+            .unwrap();
+        feedback.dismiss(REPO, shown.clone());
         // Git varies timings in its output; the summary stays the same.
         let retry = UNREACHABLE.replace("12 ms", "75003 ms");
-        assert_eq!(feedback.finish(Some(retry), false), None);
+        assert_eq!(feedback.finish(REPO, Some(retry), false), None);
         let changed = "origin : fatal: Authentication failed".to_owned();
         assert_eq!(
             feedback
-                .finish(Some(changed.clone()), false)
+                .finish(REPO, Some(changed.clone()), false)
                 .unwrap()
                 .detail,
             Some(changed)
         );
-        feedback.dismiss(shown.clone());
-        assert_eq!(feedback.finish(None, false), None);
+        feedback.dismiss(REPO, shown.clone());
+        assert_eq!(feedback.finish(REPO, None, false), None);
         assert_eq!(
-            feedback.finish(Some(UNREACHABLE.into()), false),
+            feedback.finish(REPO, Some(UNREACHABLE.into()), false),
             Some(shown)
         );
     }
 
     #[test]
+    fn a_dismissed_error_stays_hidden_only_in_its_repository() {
+        let mut feedback = FetchFeedback::default();
+        let shown = feedback
+            .finish(REPO, Some(UNREACHABLE.into()), false)
+            .unwrap();
+        feedback.dismiss(REPO, shown.clone());
+        assert_eq!(
+            feedback.finish("/repos/b", Some(UNREACHABLE.into()), false),
+            Some(shown)
+        );
+        assert_eq!(feedback.finish(REPO, Some(UNREACHABLE.into()), false), None);
+    }
+
+    #[test]
     fn manual_fetch_always_reports_and_rearms_the_message() {
         let mut feedback = FetchFeedback::default();
-        let shown = feedback.finish(Some(UNREACHABLE.into()), false).unwrap();
-        feedback.dismiss(shown.clone());
+        let shown = feedback
+            .finish(REPO, Some(UNREACHABLE.into()), false)
+            .unwrap();
+        feedback.dismiss(REPO, shown.clone());
         assert_eq!(
-            feedback.finish(Some(UNREACHABLE.into()), true),
+            feedback.finish(REPO, Some(UNREACHABLE.into()), true),
             Some(shown.clone())
         );
         assert_eq!(
-            feedback.finish(Some(UNREACHABLE.into()), false),
+            feedback.finish(REPO, Some(UNREACHABLE.into()), false),
             Some(shown)
         );
     }
@@ -353,7 +378,7 @@ mod tests {
         assert_eq!(feedback.delay(1), minutes(1));
         let mut delays = Vec::new();
         for _ in 0..6 {
-            feedback.finish(Some(UNREACHABLE.into()), false);
+            feedback.finish(REPO, Some(UNREACHABLE.into()), false);
             delays.push(feedback.delay(1));
         }
         assert_eq!(
@@ -362,9 +387,9 @@ mod tests {
             "auto-fetch backs off after consecutive failures"
         );
         assert_eq!(feedback.delay(30), minutes(30));
-        feedback.finish(None, false);
+        feedback.finish(REPO, None, false);
         assert_eq!(feedback.delay(1), minutes(1));
-        feedback.finish(Some(UNREACHABLE.into()), true);
+        feedback.finish(REPO, Some(UNREACHABLE.into()), true);
         feedback.reset_backoff();
         assert_eq!(feedback.delay(5), minutes(5));
     }

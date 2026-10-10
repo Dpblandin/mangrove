@@ -250,6 +250,8 @@ pub struct FileBrowser {
     pending: Option<ReadRequest>,
     pending_inspection: Option<ReadRequest>,
     active: bool,
+    /// Shown in the central view; a hidden browser starts no file reads.
+    visible: bool,
     task: Option<Task<()>>,
     viewer: Entity<CodeView>,
     image_preview: Entity<ImagePreview>,
@@ -312,6 +314,7 @@ impl FileBrowser {
             pending: None,
             pending_inspection: None,
             active: false,
+            visible: false,
             task: None,
             viewer,
             image_preview,
@@ -352,14 +355,27 @@ impl FileBrowser {
             self.viewer_dirty = true;
         }
         // A retained File, History or Blame view reads once its source is ready.
+        if (was_loading || change == PresentationChange::Replaced) && self.visible {
+            self.load_retained_view(cx);
+        }
+        cx.notify();
+    }
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            self.load_retained_view(cx);
+        }
+    }
+    fn load_retained_view(&mut self, cx: &mut Context<Self>) {
         if self.mode != FileView::Diff
             && !self.source.loading_source()
-            && (was_loading || change == PresentationChange::Replaced)
             && self.target == self.source.target
         {
             self.load(None, cx);
         }
-        cx.notify();
     }
     pub fn set_theme(&mut self, palette: Palette, cx: &mut Context<Self>) {
         if self.palette == palette {
@@ -1798,7 +1814,14 @@ mod tests {
             .1
         });
         browser.update(cx, |view, cx| {
+            // Hidden behind the inspector panel, a retained view waits to be shown.
+            view.preferred = FileView::Blame;
             view.present(FilePresentation::ready(1, target("a"), prepared()), cx);
+            assert_eq!(view.mode, FileView::Blame);
+            assert!(!view.loading);
+            view.set_visible(true, cx);
+            assert!(view.loading);
+            view.loading = false;
             view.show(FileView::Blame, cx);
             assert_eq!(view.mode, FileView::Blame);
             // A newly chosen file keeps Blame and reads it once its source is ready.

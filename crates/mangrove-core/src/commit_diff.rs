@@ -32,20 +32,33 @@ pub(crate) fn render_bounded(
     render_file_diff(diff, index)
 }
 
-/// Line totals of every file, or `None` when one patch would be skipped by
-/// the size guard and its per-file counts are therefore unknown.
+/// Line totals of every file, counted like their patches, or `None` when one
+/// patch would be skipped by the size guard. `cancelled` is checked per file.
 pub(crate) fn line_totals(
     repository: &Repository,
     diff: &Diff<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<(usize, usize)>> {
     let odb = repository.odb().map_err(|error| error.to_string())?;
-    for delta in diff.deltas() {
+    let (mut additions, mut deletions) = (0, 0);
+    for (index, delta) in diff.deltas().enumerate() {
+        if cancelled() {
+            return Err("Lecture annulée.".into());
+        }
         if oversized(&odb, &delta)? {
             return Ok(None);
         }
+        let Some(patch) = git2::Patch::from_diff(diff, index).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if patch.delta().flags().contains(git2::DiffFlags::BINARY) {
+            continue;
+        }
+        let (_, added, deleted) = patch.line_stats().map_err(|e| e.to_string())?;
+        additions += added;
+        deletions += deleted;
     }
-    let stats = diff.stats().map_err(|error| error.to_string())?;
-    Ok(Some((stats.insertions(), stats.deletions())))
+    Ok(Some((additions, deletions)))
 }
 
 fn oversized(odb: &git2::Odb<'_>, delta: &DiffDelta<'_>) -> Result<bool> {

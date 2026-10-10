@@ -547,18 +547,25 @@ impl Mangrove {
         self.run_command(entry.command.clone(), window, cx);
     }
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        let stays_in_view = matches!(
+        // These show the workspace over the clone screen or quit; the other
+        // commands keep that screen or confirm through the actions they call.
+        let leaves_clone = matches!(
             command,
-            Command::RemoveRecent(_)
-                | Command::Theme(_)
-                | Command::Zoom(_)
-                | Command::DiffZoom(_)
-                | Command::ResetPane(_)
-                | Command::ToggleImagePreviews
-                | Command::ToggleAutoFetch
-                | Command::DismissError
+            Command::History
+                | Command::CloseFile
+                | Command::WorkingTree
+                | Command::References
+                | Command::Worktrees
+                | Command::Stashes
+                | Command::InspectStash(_)
+                | Command::ToggleSolo(_)
+                | Command::ClearSolo
+                | Command::NavigateCommit(_)
+                | Command::FileView(_)
+                | Command::Compact(_)
+                | Command::Quit
         );
-        if !stays_in_view {
+        if leaves_clone {
             let retry = command.clone();
             if self.confirm_leave_clone(window, cx, move |view, window, cx| {
                 view.run_command(retry, window, cx)

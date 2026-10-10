@@ -784,15 +784,22 @@ impl Workspace {
     }
 
     /// Added and deleted lines of the whole commit, compared to its first
-    /// parent like the file list. `None` when a file exceeds the patch limit.
-    pub fn commit_line_totals(&self, id: &str, sha: &str) -> Result<Option<(usize, usize)>> {
+    /// parent like the file list. `None` when a file exceeds the patch limit
+    /// or the commit has more than `max_files`; `cancelled` stops the read.
+    pub fn commit_line_totals(
+        &self,
+        id: &str,
+        sha: &str,
+        max_files: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<(usize, usize)>> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
         let (_, diff, _) = commit_diff(&repository, sha)?;
-        if diff.deltas().len() > MAX_CHANGED_FILES {
+        if diff.deltas().len() > max_files.min(MAX_CHANGED_FILES) {
             return Ok(None);
         }
-        commit_diff::line_totals(&repository, &diff)
+        commit_diff::line_totals(&repository, &diff, cancelled)
     }
 
     pub fn list_worktrees(&self, id: &str) -> Result<WorktreeList> {

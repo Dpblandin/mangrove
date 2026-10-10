@@ -192,6 +192,14 @@ impl Mangrove {
         let inspector = cx.new(|cx| InspectorView::new(engine.clone(), window, cx));
         let chrome = cx.new(|cx| Chrome::new(preferences, window, cx));
         let command_palette = cx.new(|cx| CommandPalette::new(window, cx));
+        let this = cx.weak_entity();
+        // Closing the window during a clone asks first, like leaving its screen.
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |view, cx| {
+                !view.confirm_leave_clone(window, cx, |_, window, _| window.remove_window())
+            })
+            .unwrap_or(true)
+        });
         let subscriptions = vec![
             cx.subscribe_in(
                 &command_palette,
@@ -429,8 +437,29 @@ impl Mangrove {
         if !refresh || solo.is_some() {
             self.refresh_queued = false;
         }
+        let previous = self.tabs.active;
+        if !refresh {
+            self.remember_tab_state(cx);
+        }
         let attempt = self.tabs.begin_open(path.clone());
-        let solo = solo.unwrap_or_else(|| {
+        if !refresh {
+            // Opening a path already shown in another tab switches to it.
+            self.restoring = match self.tabs.active {
+                Some(id) if self.tabs.active != previous => {
+                    self.tab_states.remove(&id).map(|state| (id, state))
+                }
+                _ => None,
+            };
+            if let Some(id) = previous.filter(|id| self.tabs.active == Some(*id)) {
+                self.tab_states.remove(&id);
+            }
+        }
+        let restored_solo = self
+            .restoring
+            .as_ref()
+            .filter(|_| !refresh)
+            .map(|(_, state)| state.solo.clone());
+        let solo = solo.or(restored_solo).unwrap_or_else(|| {
             if refresh {
                 self.repository
                     .as_ref()
@@ -641,16 +670,30 @@ impl Mangrove {
     }
     /// Keeps the active tab's place before another tab replaces the views.
     fn remember_tab_state(&mut self, cx: &App) {
-        let (Some(id), Some(repository)) = (self.tabs.active, self.repository.as_ref()) else {
+        let Some(id) = self.tabs.active else {
+            return;
+        };
+        // A tab left before its reopening finished keeps the state it awaited.
+        if let Some((restoring, state)) = self.restoring.take()
+            && restoring == id
+        {
+            self.tab_states.insert(id, state);
+            return;
+        }
+        let Some(repository) = self.repository.as_ref() else {
             return;
         };
         let history = self.history.read(cx);
+        let inspector = self.inspector.read(cx).view_state();
         let state = TabState {
-            sha: Some(history.selected_sha().to_owned()).filter(|sha| !sha.is_empty()),
+            // The history forgets its commit while a restored one is looked up.
+            sha: Some(history.selected_sha().to_owned())
+                .filter(|sha| !sha.is_empty())
+                .or_else(|| inspector.sha().map(str::to_owned)),
             query: history.query().to_owned(),
             solo: repository.solo_refs.clone(),
             sidebar: self.sidebar.read(cx).view_state(),
-            inspector: self.inspector.read(cx).view_state(),
+            inspector,
         };
         self.tab_states.insert(id, state);
     }
@@ -670,11 +713,10 @@ impl Mangrove {
         self.inspector.update(cx, |inspector, _| {
             inspector.restore_view_state(state.inspector)
         });
-        if let Some(sha) = state.sha {
-            self.history.update(cx, |history, cx| {
-                history.restore_view(sha, state.query, window, cx)
-            });
-        }
+        self.history.update(cx, |history, cx| match state.sha {
+            Some(sha) => history.restore_view(sha, state.query, window, cx),
+            None => history.set_query(state.query, cx),
+        });
     }
     /// True when the center shows the history list, which may take the focus.
     fn history_visible(&self, cx: &App) -> bool {
@@ -892,6 +934,10 @@ impl Mangrove {
                 {
                     self.history
                         .update(cx, |history, cx| history.focus_list(window, cx));
+                } else if *active && self.focus.is_focused(window) {
+                    // A restored central view gets the keys nobody else holds.
+                    self.inspector
+                        .update(cx, |inspector, cx| inspector.focus_workspace(window, cx));
                 }
                 cx.notify();
             }
@@ -1032,9 +1078,15 @@ impl Mangrove {
                 cx.notify();
             }
             ChromeEvent::DismissError => {
+                // Only the banner shown is dismissed; a fetch error behind an
+                // open or history error appears next, as it was never seen.
+                let shown_fetch = self.error.is_none() && self.history.read(cx).error().is_none();
                 self.error = None;
-                if let Some(notice) = self.fetch_error.take() {
-                    self.fetch_feedback.dismiss(notice);
+                if shown_fetch
+                    && let (Some(notice), Some(repository)) =
+                        (self.fetch_error.take(), self.repository.as_ref())
+                {
+                    self.fetch_feedback.dismiss(&repository.path, notice);
                 }
                 self.history
                     .update(cx, |history, cx| history.clear_error(cx));
@@ -1100,7 +1152,7 @@ impl Mangrove {
                         .is_some_and(|current| current.id == repo.id)
                     {
                         let error = result.map_or_else(Some, |result| result.error);
-                        view.fetch_error = view.fetch_feedback.finish(error, manual);
+                        view.fetch_error = view.fetch_feedback.finish(&repo.path, error, manual);
                         view.refresh(window, cx);
                     }
                     view.sync_chrome(cx);
@@ -1299,6 +1351,11 @@ impl Render for Mangrove {
             .on_action(cx.listener(|view, action: &SelectTab, window, cx| {
                 if let Some(id) = view.tabs.by_shortcut(action.position) {
                     view.activate_tab(id, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|view, _: &Quit, window, cx| {
+                if !view.confirm_leave_clone(window, cx, |_, _, cx| cx.quit()) {
+                    cx.quit();
                 }
             }))
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
