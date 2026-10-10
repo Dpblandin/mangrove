@@ -54,17 +54,15 @@ enum ReferenceKind {
     Local,
     Remote,
     Tag,
-    Other,
 }
 
 impl ReferenceKind {
-    const ALL: [Self; 4] = [Self::Local, Self::Remote, Self::Tag, Self::Other];
+    const ALL: [Self; 3] = [Self::Local, Self::Remote, Self::Tag];
     fn name(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Remote => "remote",
             Self::Tag => "tag",
-            Self::Other => "other",
         }
     }
     fn title(self) -> &'static str {
@@ -72,7 +70,6 @@ impl ReferenceKind {
             Self::Local => "Branches locales",
             Self::Remote => "Branches distantes",
             Self::Tag => "Tags",
-            Self::Other => "Autres références",
         }
     }
     fn icon(self) -> IconName {
@@ -80,7 +77,6 @@ impl ReferenceKind {
             Self::Local => IconName::GitBranch,
             Self::Remote => IconName::Globe,
             Self::Tag => IconName::Tag,
-            Self::Other => IconName::Layers,
         }
     }
     fn can_solo(self) -> bool {
