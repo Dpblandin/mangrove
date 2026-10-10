@@ -329,27 +329,8 @@ impl Workspace {
         let mut references = Vec::new();
         for reference in repository.references().map_err(|e| e.to_string())? {
             let reference = reference.map_err(|e| e.to_string())?;
-            // Tool snapshots are operational refs, not history roots. Filtering
-            // here also keeps their updates out of the traversal fingerprint.
-            let raw_name = reference.name_bytes();
-            if raw_name == b"refs/stash"
-                || [
-                    b"refs/t3/checkpoints/".as_slice(),
-                    b"refs/codex/",
-                    b"refs/notes/",
-                    b"refs/prefetch/",
-                ]
-                .iter()
-                .any(|prefix| raw_name.starts_with(prefix))
-            {
-                continue;
-            }
-            if reference.symbolic_target_bytes().is_some() {
-                continue;
-            }
-            let Ok(commit) = reference.peel_to_commit() else {
-                continue;
-            };
+            // Only branches and tags are history roots. Internal refs stay out
+            // of navigation, search and the traversal fingerprint.
             let kind = if reference.is_branch() {
                 "local"
             } else if reference.is_remote() {
@@ -357,8 +338,15 @@ impl Workspace {
             } else if reference.is_tag() {
                 "tag"
             } else {
-                "other"
+                continue;
             };
+            if reference.symbolic_target_bytes().is_some() {
+                continue;
+            }
+            let Ok(commit) = reference.peel_to_commit() else {
+                continue;
+            };
+            let raw_name = reference.name_bytes();
             let name = reference.name().map(str::to_owned).unwrap_or_else(|_| {
                 let mut key = String::from("git-bytes:");
                 for byte in raw_name {
@@ -423,7 +411,7 @@ impl Workspace {
             "{:x}",
             Sha256::digest(
                 serde_json::to_vec(&(
-                    6u32,
+                    8u32,
                     &head_sha,
                     &head_name,
                     &references,

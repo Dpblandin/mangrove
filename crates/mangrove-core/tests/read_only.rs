@@ -970,6 +970,24 @@ fn removing_shallow_boundaries_rebuilds_history_and_effective_parents_without_re
 
 #[test]
 fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
+    assert_checkpoint_refs_are_hidden("refs/t3/checkpoints");
+}
+
+#[test]
+fn t3_orchestration_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
+    assert_checkpoint_refs_are_hidden("refs/t3/orchestration-v2/checkpoints");
+}
+
+fn assert_checkpoint_refs_are_hidden(namespace: &str) {
+    let prefix = format!("{namespace}/");
+    let first_ref = format!("{namespace}/session/turn/1");
+    let second_ref = format!("{namespace}/session/turn/2");
+    let shared_ref = format!("{namespace}/session/shared");
+    let backup_ref = format!("{namespace}-backup/session");
+    let branch_ref = format!(
+        "refs/heads/{}-feature",
+        namespace.strip_prefix("refs/").unwrap()
+    );
     let fixture = Fixture::new();
     let root = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
     let visible = commit(
@@ -984,22 +1002,22 @@ fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
         "technical-only-snapshot",
         &[root],
         &[],
-        Some("refs/t3/checkpoints/session/turn/1"),
+        Some(&first_ref),
     );
     fixture
         .repository
-        .reference("refs/t3/checkpoints/session/shared", visible, false, "test")
+        .reference(&shared_ref, visible, false, "test")
         .unwrap();
     fixture
         .repository
-        .reference("refs/heads/t3/checkpoints-feature", visible, false, "test")
+        .reference(&branch_ref, visible, false, "test")
         .unwrap();
     let backup = commit(
         &fixture.repository,
-        "neighboring backup commit",
+        "technical-only-backup",
         &[root],
         &[],
-        Some("refs/t3/checkpoints-backup/session"),
+        Some(&backup_ref),
     );
     let before = snapshot(&fixture.source);
     let workspace = fixture.workspace();
@@ -1008,35 +1026,25 @@ fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
     assert!(info
         .references
         .iter()
-        .all(|reference| !reference.name.starts_with("refs/t3/checkpoints/")));
+        .all(|reference| !reference.name.starts_with(&prefix)));
     assert!(info
         .references
         .iter()
-        .any(|reference| reference.name == "refs/heads/t3/checkpoints-feature"));
-    assert!(info
-        .references
-        .iter()
-        .any(|reference| reference.name == "refs/t3/checkpoints-backup/session"));
+        .any(|reference| reference.name == branch_ref));
+    assert_eq!(info.references.len(), 2);
     let page = workspace.list_commits(&info.id, 0, 100, "").unwrap();
-    assert_eq!(page.total, 3);
+    assert_eq!(page.total, 2);
     assert!(page
         .commits
         .iter()
         .any(|row| row.sha == visible.to_string()));
-    assert!(page.commits.iter().any(|row| row.sha == backup.to_string()));
-    assert!(page.commits.iter().all(|row| row.graph.width <= 2));
+    assert!(page.commits.iter().all(|row| row.graph.width == 1));
     for query in [
-        "neighboring backup commit",
-        "refs/t3/checkpoints-backup/session",
+        "technical-only-backup",
+        &backup_ref,
         &backup.to_string(),
-    ] {
-        let result = workspace.list_commits(&info.id, 0, 100, query).unwrap();
-        assert_eq!(result.total, 1, "{query}");
-        assert_eq!(result.commits[0].sha, backup.to_string(), "{query}");
-    }
-    for query in [
         "technical-only-snapshot",
-        "refs/t3/checkpoints/session/turn/1",
+        &first_ref,
         &hidden.to_string(),
     ] {
         assert_eq!(
@@ -1077,11 +1085,11 @@ fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
         "technical-only-new-snapshot",
         &[hidden],
         &[],
-        Some("refs/t3/checkpoints/session/turn/2"),
+        Some(&second_ref),
     );
     fixture
         .repository
-        .find_reference("refs/t3/checkpoints/session/turn/1")
+        .find_reference(&first_ref)
         .unwrap()
         .delete()
         .unwrap();
@@ -1089,7 +1097,7 @@ fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
     let same = fixture.open(&workspace);
     assert_eq!(same.id, info.id);
     assert!(same.index.complete);
-    assert_eq!(same.index.indexed, 3);
+    assert_eq!(same.index.indexed, 2);
     assert_eq!(
         run,
         connection
@@ -1105,6 +1113,22 @@ fn t3_checkpoint_refs_do_not_enter_history_search_or_trigger_refreshes() {
 
 #[test]
 fn legacy_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
+    assert_legacy_checkpoint_cache_is_rebuilt("refs/t3/checkpoints");
+}
+
+#[test]
+fn legacy_orchestration_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
+    assert_legacy_checkpoint_cache_is_rebuilt("refs/t3/orchestration-v2/checkpoints");
+}
+
+#[test]
+fn legacy_custom_ref_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
+    assert_legacy_checkpoint_cache_is_rebuilt("refs/custom/snapshots");
+}
+
+fn assert_legacy_checkpoint_cache_is_rebuilt(namespace: &str) {
+    let prefix = format!("{namespace}/");
+    let checkpoint_ref = format!("{namespace}/session/turn/1");
     let fixture = Fixture::new();
     let root = commit(&fixture.repository, "root", &[], &[], Some("HEAD"));
     let main = commit(
@@ -1141,12 +1165,7 @@ fn legacy_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
         .unwrap();
     let technical = fixture
         .repository
-        .reference(
-            "refs/t3/checkpoints/session/turn/1",
-            checkpoint,
-            false,
-            "test",
-        )
+        .reference(&checkpoint_ref, checkpoint, false, "test")
         .unwrap();
     let mut references: Vec<_> = legacy
         .references
@@ -1166,12 +1185,13 @@ fn legacy_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&(
-                3u32,
+                7u32,
                 &legacy.head,
                 &legacy.head_name,
                 &references,
                 &legacy.remotes,
-                vec![Vec::<u8>::new()]
+                vec![Vec::<u8>::new()],
+                Vec::<String>::new()
             ))
             .unwrap()
         )
@@ -1225,10 +1245,10 @@ fn legacy_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
     assert!(info
         .references
         .iter()
-        .all(|reference| !reference.name.starts_with("refs/t3/checkpoints/")));
+        .all(|reference| !reference.name.starts_with(&prefix)));
     for query in [
         "legacy-only-checkpoint",
-        "refs/t3/checkpoints/session/turn/1",
+        &checkpoint_ref,
         &checkpoint.to_string(),
     ] {
         assert_eq!(
@@ -1259,8 +1279,8 @@ fn legacy_checkpoint_cache_is_rebuilt_without_exposing_retained_fts_metadata() {
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM refs WHERE name LIKE 'refs/t3/checkpoints/%'",
-                [],
+                "SELECT COUNT(*) FROM refs WHERE name LIKE ?1",
+                [format!("{prefix}%")],
                 |row| row.get(0)
             )
             .unwrap(),
@@ -2142,7 +2162,7 @@ fn separate_git_directory_keeps_the_selected_worktree_and_cache_guards() {
 }
 
 #[test]
-fn operational_refs_are_not_history_roots_or_refresh_triggers() {
+fn only_branches_and_tags_are_history_roots_or_refresh_triggers() {
     let fixture = Fixture::new();
     let root = commit(&fixture.repository, "visible", &[], &[], Some("HEAD"));
     let operational_refs = [
@@ -2151,6 +2171,14 @@ fn operational_refs_are_not_history_roots_or_refresh_triggers() {
         "refs/prefetch/remotes/origin/main",
         "refs/codex/snapshots/0bf5219b1ee9b260ad4c836df8d3e80d78f27c26",
         "refs/codex/backups/vite-plus-960cd2127e",
+        "refs/t3/checkpoints/session/turn/1",
+        "refs/t3/orchestration-v2/checkpoints/session/ordinal/0",
+        "refs/t3/checkpoints-backup/session",
+        "refs/codex-backup/session",
+        "refs/custom/snapshots/session",
+        "refs/heads-backup/topic",
+        "refs/remotes-backup/origin/main",
+        "refs/tags-backup/release",
     ];
     for name in operational_refs {
         commit(
@@ -2166,13 +2194,11 @@ fn operational_refs_are_not_history_roots_or_refresh_triggers() {
         "refs/heads/codex/snapshots/feature",
         "refs/remotes/origin/codex/backups/feature",
         "refs/tags/codex/snapshots/release",
-        "refs/codex-backup/session",
     ];
+    let mut visible_commits = vec![("refs/heads/main", root)];
     for name in &visible_refs[1..] {
-        fixture
-            .repository
-            .reference(name, root, false, "test")
-            .unwrap();
+        let oid = commit(&fixture.repository, name, &[root], &[], Some(name));
+        visible_commits.push((name, oid));
     }
     let before = snapshot(&fixture.source);
     let workspace = fixture.workspace();
@@ -2187,8 +2213,15 @@ fn operational_refs_are_not_history_roots_or_refresh_triggers() {
     }
     assert_eq!(
         workspace.list_commits(&info.id, 0, 100, "").unwrap().total,
-        1
+        visible_refs.len()
     );
+    for (name, oid) in visible_commits {
+        for query in [name, &oid.to_string()] {
+            let result = workspace.list_commits(&info.id, 0, 100, query).unwrap();
+            assert_eq!(result.total, 1, "{query}");
+            assert_eq!(result.commits[0].sha, oid.to_string(), "{query}");
+        }
+    }
     assert_eq!(
         workspace
             .list_commits(&info.id, 0, 100, "operational-only")

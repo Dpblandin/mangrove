@@ -442,7 +442,7 @@ impl Mangrove {
                                 }
                             });
                             view.history
-                                .update(cx, |history, cx| history.set_repository(info, cx));
+                                .update(cx, |history, cx| history.set_repository(info, window, cx));
                             if let Some(sha) = navigate_to {
                                 view.history
                                     .update(cx, |history, cx| history.jump_to(sha, window, cx));

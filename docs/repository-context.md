@@ -10,6 +10,8 @@ Le champ de filtre de l'espace de travail s'applique aux références et aux wor
 
 Ouvrir une entrée disponible utilise son dossier de travail dans le parcours d'onglets existant. Une entrée déjà ouverte active cet onglet. Chaque worktree conserve son identité de session et son index Git local ; les gardes existantes interdisent un cache applicatif dans le worktree, ses dossiers Git ou le worktree principal. Un dépôt bare indique explicitement qu'il ne possède pas de répertoire de travail.
 
+À l'ouverture d'un dépôt ou à l'activation d'un onglet, l'historique sélectionne le commit de HEAD du worktree et défile jusqu'à lui, même s'il se trouve au-delà de la première page ou doit encore être indexé. Le graphe complet reste partagé entre les branches. L'actualisation conserve le commit choisi ; en Solo, elle reste dans le parcours des branches isolées.
+
 La réponse contient au plus 256 entrées, principal compris, et annonce sa troncature. Les lectures de noms et inscriptions sont natives ; elles ne lancent aucun processus Git ou shell.
 
 ## Onglets et dépôts récents
