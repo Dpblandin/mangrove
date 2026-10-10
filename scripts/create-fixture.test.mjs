@@ -95,6 +95,13 @@ test('the optional large commit exposes mixed statuses and difficult diff cases'
   assert.equal(git(fixture, 'show', 'HEAD:tests/fixtures/empty.txt'), '')
   assert.match(git(fixture, 'show', 'HEAD:docs/échantillons/résumé.md'), /Résumé des changements/)
   assert.match(git(fixture, 'show', 'HEAD:src/generated/catalog.ts'), /entry2399/)
+  // Edited pairs for changed words and the side-by-side layout.
+  assert.equal(
+    git(fixture, 'diff', '--numstat', 'HEAD~', 'HEAD', '--', 'packages/core/src/search.ts'),
+    '962\t961\tpackages/core/src/search.ts',
+  )
+  const patch = git(fixture, 'diff', 'HEAD~', 'HEAD', '--', 'packages/core/src/search.ts')
+  assert.ok(patch.split('\n').length < 2_000, 'the patch fits the display budget')
   assert.match(git(fixture, 'ls-tree', 'HEAD', 'scripts/inspect.sh'), /^100755/)
   assert.match(git(fixture, 'ls-tree', 'HEAD', 'docs/current-guide'), /^120000/)
   assert.equal(git(fixture, 'status', '--porcelain'), '')
