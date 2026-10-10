@@ -2,6 +2,7 @@
 //! different repository or file. Only visible rows are rendered.
 use crate::{
     file_browser::FileView,
+    format::shortcut_label,
     preferences::Pane,
     settings::SettingsSection,
     theme::{Palette, RADIUS_LG, RADIUS_SM, icon, scrollbar_theme},
@@ -148,14 +149,6 @@ fn fold(text: &str) -> String {
         .filter(|character| combining.get_u8(*character) == 0)
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-pub fn shortcut_label(key: &str) -> String {
-    if cfg!(target_os = "macos") {
-        format!("⌘{key}")
-    } else {
-        format!("Ctrl+{key}")
-    }
 }
 
 #[derive(Default)]
