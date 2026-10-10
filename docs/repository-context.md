@@ -32,7 +32,7 @@ La sélection charge ses listes de fichiers ; le patch et sa coloration se charg
 
 Le panneau indique le sens de la comparaison et conserve ses identifiants de révision. Un fichier modifié avant et après indexation peut apparaître dans les deux premières zones, avec deux diffs différents. Les renommages sont détectés ; les clés opaques des chemins conservent les noms Git non UTF-8. Le backend vérifie que le SHA demandé appartient encore à la liste consultable du reflog avant de lire détails ou diff : un stash supprimé extérieurement ne reste pas accessible par une ancienne sélection.
 
-Les listes de fichiers, patches, blobs et couleurs utilisent les mêmes limites que les autres diffs : 5 000 fichiers par zone, fichiers de 2 Mio, 2 000 lignes ou 512 Kio par patch, cache et coloration bornés. Les limites de réponses ne bornent pas toutes les allocations internes de libgit2 : la lecture du reflog, la comparaison des arbres et la détection des renommages restent à mesurer sur des cas extrêmes.
+Les listes de fichiers, patches, blobs et couleurs utilisent les mêmes limites que les autres diffs : 5 000 fichiers par zone, fichiers jusqu’à la limite d’aperçu (8 Mio par défaut, réglable de 2 à 64 Mio), 2 000 lignes ou 512 Kio par patch, cache et coloration bornés. Les limites de réponses ne bornent pas toutes les allocations internes de libgit2 : la lecture du reflog, la comparaison des arbres et la détection des renommages restent à mesurer sur des cas extrêmes.
 
 Les commits techniques de stash restent exclus des racines de l'historique général et de la recherche. Consulter les stashes n'indexe pas leurs instantanés dans le graphe normal.
 
