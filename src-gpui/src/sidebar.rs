@@ -31,6 +31,7 @@ use std::{
 
 use crate::{
     app::Escape,
+    branch_tracking::{Badge, Status, TrackingState, text_width},
     format::{commit_date, compact_date, count_label, display_path, format_count, short_sha},
     repository_context::RepositoryContextState,
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
@@ -201,6 +202,36 @@ fn reference_order(a: &str, b: &str) -> Ordering {
             Collator::try_new(preferences, options).expect("compiled French collation data")
         })
         .compare(a, b)
+}
+
+/// Positions of local branches in the expanded tree, by full name. The tree
+/// is built like the sidebar's, so collation ties keep its order too.
+/// `names` must be in reference order.
+pub(crate) fn tree_positions<'a>(names: impl Iterator<Item = &'a str>) -> HashMap<String, usize> {
+    let references = names.map(|name| {
+        Arc::new(Reference {
+            name: name.into(),
+            label: name.strip_prefix("refs/heads/").unwrap_or(name).into(),
+            kind: ReferenceKind::Local.name().into(),
+            sha: String::new(),
+        })
+    });
+    let mut rows = Vec::new();
+    flatten_tree(
+        &reference_tree(references, ""),
+        ReferenceKind::Local,
+        0,
+        &ReferenceTreeState::default(),
+        &mut rows,
+    );
+    rows.into_iter()
+        .filter_map(|row| match row {
+            SidebarRow::Reference { reference, .. } => Some(reference.name.clone()),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(position, name)| (name, position))
+        .collect()
 }
 
 fn worktree_label(item: &WorktreeInfo) -> String {
@@ -427,6 +458,15 @@ enum SidebarRow {
 
 /// Matches the history rows.
 const ROW_HEIGHT: f32 = 28.;
+/// The narrowest label beside a full ahead/behind badge. Below it, the
+/// badge keeps a single arrow and its values move to the tooltip.
+const MIN_BADGE_LABEL_WIDTH: f32 = 56.;
+
+/// Whether the badge `text` would leave less than the narrowest label in a
+/// row `width` wide, whose padding and other children take `taken` pixels.
+fn compact_badge(width: f32, taken: f32, text: &str, font_size: f32) -> bool {
+    width - taken - text_width(text, font_size) - 9. < MIN_BADGE_LABEL_WIDTH
+}
 
 fn section_height(font_offset: f32) -> f32 {
     (11. + font_offset) * 1.5 + 10.
@@ -563,6 +603,7 @@ pub struct SidebarView {
     pub(crate) engine: Arc<Workspace>,
     pub(crate) repository: Option<Arc<RepositoryInfo>>,
     pub(crate) context: RepositoryContextState,
+    tracking: Entity<TrackingState>,
     pub(crate) selected_stash: String,
     selected_sha: Option<String>,
     solo_refs: HashSet<String>,
@@ -676,6 +717,15 @@ impl SidebarView {
         });
         let list_state = ListState::new(0, ListAlignment::Top, px(200.));
         let view = cx.weak_entity();
+        let tracking = cx.new(|_| {
+            let view = view.clone();
+            TrackingState::new(engine.clone(), move |cx| {
+                view.upgrade()
+                    .map(|view| view.read(cx).branches_in_view())
+                    .unwrap_or_default()
+            })
+        });
+        let tracking_subscription = cx.observe(&tracking, |_, _, cx| cx.notify());
         list_state.set_scroll_handler(move |_, _, cx| {
             let _ = view.update(cx, |view, cx| view.close_menu(cx));
         });
@@ -684,6 +734,7 @@ impl SidebarView {
             engine,
             repository: None,
             context: RepositoryContextState::default(),
+            tracking,
             selected_stash: String::new(),
             selected_sha: None,
             solo_refs: HashSet::new(),
@@ -706,8 +757,44 @@ impl SidebarView {
             active_row: None,
             scroll_epoch: 0,
             restored_scroll_top: None,
-            _subscriptions: vec![subscription, bounds_subscription, focus_subscription],
+            _subscriptions: vec![
+                subscription,
+                bounds_subscription,
+                focus_subscription,
+                tracking_subscription,
+            ],
         }
+    }
+
+    /// Ahead/behind badges of the local branches, shared with the history.
+    pub fn tracking(&self) -> Entity<TrackingState> {
+        self.tracking.clone()
+    }
+
+    /// Local branches in view, top to bottom: their counts come first.
+    pub(crate) fn branches_in_view(&self) -> Vec<String> {
+        let top = self.list_state.logical_scroll_top();
+        let height = self.list_state.viewport_bounds().size.height;
+        let mut bottom = -top.offset_in_item;
+        let mut names = Vec::new();
+        for (index, row) in self.rows.iter().enumerate().skip(top.item_ix) {
+            if bottom >= height {
+                break;
+            }
+            bottom += self
+                .scroll_handle
+                .row_height(index)
+                .unwrap_or(px(ROW_HEIGHT));
+            if let SidebarRow::Reference {
+                kind: ReferenceKind::Local,
+                reference,
+                ..
+            } = row
+            {
+                names.push(reference.name.clone());
+            }
+        }
+        names
     }
 
     /// Tabbing or clicking into the tree starts on the first row in view.
@@ -1328,6 +1415,28 @@ impl SidebarView {
         self.tree_item(row, index, window)
     }
 
+    /// Ahead/behind values of a local branch, before its Solo button: that
+    /// button already takes its width while hidden, so hovering never moves it.
+    fn render_badge(&self, name: &str, badge: &Badge, compact: bool) -> Option<Stateful<Div>> {
+        let content = match badge.status {
+            Status::Gone { .. } if compact => {
+                let color = if badge.stale {
+                    self.palette.dimmed(self.palette.warning)
+                } else {
+                    self.palette.warning
+                };
+                icon(IconName::TriangleAlert, 12., color).into_any_element()
+            }
+            _ => badge.text(compact)?.into_any_element(),
+        };
+        Some(
+            badge
+                .element(&self.palette)
+                .id(SharedString::from(format!("tracking-{name}")))
+                .child(content),
+        )
+    }
+
     fn highlighted_label(&self, label: String, ranges: Vec<Range<usize>>) -> StyledText {
         let style = HighlightStyle {
             color: Some(rgb(self.palette.on_accent).into()),
@@ -1457,11 +1566,32 @@ impl SidebarView {
                 let name = reference.name.clone();
                 let click_name = name.clone();
                 let menu_name = name.clone();
-                let tooltip_label = reference.label.clone();
                 let show_solo =
                     self.active_row == Some(index) && self.tree_focus.is_focused(window);
                 let button_width = self.width - 1. - if kind.can_solo() { 24. } else { 0. };
                 let padding = (26. + depth as f32 * 14.).min(button_width * 0.35);
+                let badge = (kind == ReferenceKind::Local)
+                    .then(|| self.tracking.read(cx).badge(&name))
+                    .flatten();
+                let tracking = badge.as_ref().map(Badge::description);
+                let tooltip_label = match &tracking {
+                    Some(tracking) => format!("{}\n{tracking}", reference.label),
+                    None => reference.label.clone(),
+                };
+                let description = current
+                    .then(|| "Branche courante".to_owned())
+                    .into_iter()
+                    .chain(tracking)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Padding, the 13 px icon, the check and the 9 px gaps.
+                let taken = padding + 17. + 13. + 9. + if current { 21. } else { 0. };
+                let badge = badge.as_ref().and_then(|badge| {
+                    let compact = badge.text(false).is_some_and(|text| {
+                        compact_badge(button_width, taken, &text, 11. + font_offset)
+                    });
+                    self.render_badge(&name, badge, compact)
+                });
                 let label = self.highlighted_label(label, highlights);
                 let row = div()
                     .id(SharedString::from(format!("reference-{name}")))
@@ -1495,6 +1625,7 @@ impl SidebarView {
                     })
                     .child(Icon::new(kind.icon()).with_size(px(13.)).opacity(0.8))
                     .child(div().min_w_0().flex_1().truncate().child(label))
+                    .children(badge)
                     .when(current, |this| {
                         this.child(Icon::new(IconName::Check).with_size(px(12.)).opacity(0.8))
                     })
@@ -1522,7 +1653,9 @@ impl SidebarView {
                     .id(SharedString::from(format!("reference-leaf-{name}")))
                     .aria_label(reference.label.clone())
                     .aria_selected(highlighted)
-                    .when(current, |this| this.aria_description("Branche courante"))
+                    .when(!description.is_empty(), |this| {
+                        this.aria_description(description)
+                    })
                     .group("reference-leaf")
                     .flex()
                     .items_center()
@@ -2025,12 +2158,13 @@ fn follow_row(
 mod tests {
     use super::{
         ROW_HEIGHT, ReferenceKind, ReferenceNode, ReferenceTreeState, SidebarEvent, SidebarRow,
-        SidebarView, SidebarViewState, TreeKey, TreeMove, filtered_worktree_indices, flatten_tree,
-        follow_row, reference_order, reference_tree, search_highlight_ranges, stash_details,
-        stash_name, stash_summary, tree_move,
+        SidebarView, SidebarViewState, TreeKey, TreeMove, compact_badge, filtered_worktree_indices,
+        flatten_tree, follow_row, reference_order, reference_tree, search_highlight_ranges,
+        stash_details, stash_name, stash_summary, tree_move, tree_positions,
     };
     use crate::{
         app::Escape,
+        branch_tracking::Status,
         virtual_scroll::{RowGeometry, VirtualScrollHandle},
     };
     use gpui_kit::{
@@ -3017,5 +3151,137 @@ mod tests {
         handle.scroll_wheel(ScrollDelta::Pixels(point(px(0.), px(1_000_000.))), false);
         assert_eq!(list.logical_scroll_top().item_ix, 0);
         assert_eq!(list.logical_scroll_top().offset_in_item, px(0.));
+    }
+
+    #[test]
+    fn tree_positions_keep_the_tree_order_of_collation_ties() {
+        // Reference order: `Feat/b`, `Main/x`, `Release2`, `feat/a`, `main`.
+        let mut names: Vec<_> = [
+            "feat/a",
+            "Feat/b",
+            "main",
+            "Main/x",
+            "release10",
+            "Release2",
+        ]
+        .into_iter()
+        .map(|label| format!("refs/heads/{label}"))
+        .collect();
+        names.sort();
+        let positions = tree_positions(names.iter().map(String::as_str));
+        names.sort_by_key(|name| positions[name]);
+        // Equal folders keep their first appearance; a folder precedes an
+        // equal leaf, as in the sidebar.
+        assert_eq!(
+            names,
+            [
+                "Feat/b",
+                "feat/a",
+                "Main/x",
+                "main",
+                "Release2",
+                "release10"
+            ]
+            .map(|label| format!("refs/heads/{label}"))
+        );
+    }
+
+    #[test]
+    fn badges_keep_one_arrow_when_the_label_would_get_too_narrow() {
+        // A top-level branch of the default 226 px sidebar: 201 px beside
+        // Solo, of which padding, icon and gaps take 65 px.
+        assert!(!compact_badge(201., 65., "↑3 ↓12", 12.));
+        assert!(compact_badge(201., 65., "↑999+ ↓999+", 12.));
+        // The narrowest 180 px sidebar keeps a single short side.
+        assert!(!compact_badge(155., 65., "↓1", 12.));
+        assert!(compact_badge(155., 65., "↑3 ↓12", 12.));
+    }
+
+    /// Forty local branches, each one commit behind its upstream on origin.
+    fn tracked_repository() -> (TempDir, Arc<Workspace>, RepositoryInfo) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("repository");
+        let repository = git2::Repository::init(&path).unwrap();
+        let tree = repository
+            .find_tree(repository.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let base = repository
+            .commit(Some("HEAD"), &signature(), &signature(), "base", &tree, &[])
+            .unwrap();
+        let parent = repository.find_commit(base).unwrap();
+        let upstream = repository
+            .commit(None, &signature(), &signature(), "next", &tree, &[&parent])
+            .unwrap();
+        repository.remote("origin", "../origin.git").unwrap();
+        let mut config = repository.config().unwrap();
+        for index in 0..40 {
+            let name = format!("b{index:02}");
+            repository
+                .reference(&format!("refs/heads/{name}"), base, true, "test")
+                .unwrap();
+            repository
+                .reference(
+                    &format!("refs/remotes/origin/{name}"),
+                    upstream,
+                    true,
+                    "test",
+                )
+                .unwrap();
+            config
+                .set_str(&format!("branch.{name}.remote"), "origin")
+                .unwrap();
+            config
+                .set_str(
+                    &format!("branch.{name}.merge"),
+                    &format!("refs/heads/{name}"),
+                )
+                .unwrap();
+        }
+        let engine = Arc::new(Workspace::new(root.path().join("cache")).unwrap());
+        let info = engine.open_repository(path.to_str().unwrap()).unwrap();
+        (root, engine, info)
+    }
+
+    #[gpui_kit::test]
+    fn arriving_badges_change_neither_row_heights_nor_the_scroll_position(cx: &mut TestAppContext) {
+        let (_root, engine, info) = tracked_repository();
+        let (window, view) = sidebar_window(cx, engine);
+        view.update(cx, |view, cx| {
+            view.set_repository(Arc::new(info.clone()), cx)
+        });
+        render(cx, window);
+        view.update(cx, |view, _| {
+            view.scroll_handle.scroll_vertical_to(px(300.))
+        });
+        render(cx, window);
+        let layout = |cx: &mut TestAppContext| {
+            view.read_with(cx, |view, _| {
+                let heights: Vec<_> = (0..view.rows.len())
+                    .filter_map(|index| view.list_state.bounds_for_item(index))
+                    .map(|bounds| bounds.size.height)
+                    .collect();
+                (view.scroll_handle.vertical_offset(), heights)
+            })
+        };
+        let before = layout(cx);
+        let in_view = view.read_with(cx, |view, _| view.branches_in_view());
+        assert!(in_view.len() > 10, "{in_view:?}");
+        assert_ne!(in_view[0], "refs/heads/b00");
+
+        let tracking = view.read_with(cx, |view, _| view.tracking());
+        tracking.update(cx, |tracking, cx| {
+            tracking.set_repository(Arc::new(info), cx)
+        });
+        cx.run_until_parked();
+        render(cx, window);
+        assert_eq!(layout(cx), before);
+        let badge = tracking.read_with(cx, |tracking, _| tracking.badge(&in_view[0]));
+        assert_eq!(
+            badge.map(|badge| badge.status),
+            Some(Status::Counts {
+                ahead: 0,
+                behind: 1
+            })
+        );
     }
 }

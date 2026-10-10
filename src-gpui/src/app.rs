@@ -2,6 +2,7 @@
 #[cfg(feature = "app-benchmark")]
 use crate::perf::{Configuration, PerfAction, PerfSession, PerfSnapshot};
 use crate::{
+    branch_tracking::TrackingState,
     chrome::{Chrome, ChromeEvent, Notice},
     command_palette::{CommandPalette, PaletteEvent},
     history_view::{HistoryEvent, HistoryView},
@@ -162,6 +163,7 @@ pub struct Mangrove {
     repository: Option<Arc<RepositoryInfo>>,
     history: Entity<HistoryView>,
     sidebar: Entity<SidebarView>,
+    tracking: Entity<TrackingState>,
     inspector: Entity<InspectorView>,
     chrome: Entity<Chrome>,
     tabs: Tabs,
@@ -204,16 +206,18 @@ impl Mangrove {
         cx: &mut Context<Self>,
     ) -> Self {
         let palette = preferences.palette();
+        let sidebar = cx.new(|cx| SidebarView::new(engine.clone(), window, cx));
+        let tracking = sidebar.read(cx).tracking();
         let history = cx.new(|cx| {
             HistoryView::new(
                 engine.clone(),
                 palette,
                 preferences.font_size_offset,
+                tracking.clone(),
                 window,
                 cx,
             )
         });
-        let sidebar = cx.new(|cx| SidebarView::new(engine.clone(), window, cx));
         let inspector = cx.new(|cx| InspectorView::new(engine.clone(), window, cx));
         let chrome = cx.new(|cx| Chrome::new(preferences, window, cx));
         let command_palette = cx.new(|cx| CommandPalette::new(window, cx));
@@ -270,6 +274,7 @@ impl Mangrove {
             repository: None,
             history,
             sidebar,
+            tracking,
             inspector,
             chrome,
             tabs: Tabs::default(),
@@ -397,6 +402,7 @@ impl Mangrove {
         self.history.update(cx, |view, cx| view.clear(cx));
         self.sidebar
             .update(cx, |view, cx| view.clear_repository(cx));
+        self.tracking.update(cx, |tracking, cx| tracking.clear(cx));
         self.inspector
             .update(cx, |view, cx| view.clear_repository(cx));
         self.sync_chrome(cx);
@@ -541,6 +547,7 @@ impl Mangrove {
             self.history.update(cx, |view, cx| view.clear(cx));
             self.sidebar
                 .update(cx, |view, cx| view.prepare_repository_open(&path, cx));
+            self.tracking.update(cx, |tracking, cx| tracking.clear(cx));
             self.inspector
                 .update(cx, |view, cx| view.clear_repository(cx));
         }
@@ -599,6 +606,9 @@ impl Mangrove {
                             view.repository = Some(info.clone());
                             view.sidebar
                                 .update(cx, |sidebar, cx| sidebar.set_repository(info.clone(), cx));
+                            view.tracking.update(cx, |tracking, cx| {
+                                tracking.set_repository(info.clone(), cx)
+                            });
                             view.inspector.update(cx, |inspector, cx| {
                                 inspector.set_repository(info.clone(), cx);
                                 if refresh && same_session {
@@ -630,6 +640,7 @@ impl Mangrove {
                             if view.repository.is_none() {
                                 view.sidebar
                                     .update(cx, |sidebar, cx| sidebar.clear_repository(cx));
+                                view.tracking.update(cx, |tracking, cx| tracking.clear(cx));
                             }
                             if !refresh {
                                 view.tabs.reject_open(attempt);

@@ -1,5 +1,6 @@
 use super::{HistoryEvent, HistoryView};
 use crate::{
+    branch_tracking::{Status, TrackingState},
     history::{PAGE_SIZE, PositionRead},
     theme::Palette,
 };
@@ -104,7 +105,8 @@ fn open_view(cx: &mut TestAppContext, engine: Arc<Workspace>) -> Entity<HistoryV
     cx.update(gpui_kit::init);
     cx.update(|cx| {
         gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-            cx.new(|cx| HistoryView::new(engine, Palette::default(), 0., window, cx))
+            let tracking = cx.new(|_| TrackingState::new(engine.clone(), |_| Vec::new()));
+            cx.new(|cx| HistoryView::new(engine, Palette::default(), 0., tracking, window, cx))
         })
         .unwrap()
         .1
@@ -634,4 +636,47 @@ fn search_pages_arrive_with_the_highlights_of_their_query(cx: &mut TestAppContex
     assert_eq!(highlights(cx), [vec!["older", "chan"], vec!["Te"]]);
     search(cx, &view, "");
     assert!(highlights(cx).iter().all(Vec::is_empty));
+}
+
+#[gpui_kit::test]
+fn the_head_chip_shows_the_counts_of_the_current_branch_only(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let repository = Repository::open(&fixture.main).unwrap();
+    let behind = repository.revparse_single("HEAD~4").unwrap().id();
+    repository
+        .reference("refs/remotes/origin/main", behind, true, "test")
+        .unwrap();
+    repository.remote("origin", "../origin.git").unwrap();
+    let mut config = repository.config().unwrap();
+    config.set_str("branch.main.remote", "origin").unwrap();
+    config
+        .set_str("branch.main.merge", "refs/heads/main")
+        .unwrap();
+    let engine = fixture.workspace();
+    let view = open_view(cx, engine.clone());
+    let tracking = view.read_with(cx, |view, _| view.tracking.clone());
+    let head_badge = |cx: &mut TestAppContext, path: &PathBuf| {
+        let info = engine.open_repository(path.to_str().unwrap()).unwrap();
+        set_repository(cx, &view, info.clone());
+        tracking.update(cx, |tracking, cx| {
+            tracking.set_repository(Arc::new(info), cx)
+        });
+        cx.run_until_parked();
+        cx.update_window(cx.windows()[0], |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        view.read_with(cx, |view, _| {
+            view.head_badge.as_ref().map(|badge| badge.status.clone())
+        })
+    };
+    assert_eq!(
+        head_badge(cx, &fixture.main),
+        Some(Status::Counts {
+            ahead: 4,
+            behind: 0
+        })
+    );
+    // The worktree's branch has no upstream; a detached HEAD has no branch.
+    assert_eq!(head_badge(cx, &fixture.linked), None);
+    repository.set_head_detached(behind).unwrap();
+    assert_eq!(head_badge(cx, &fixture.main), None);
 }
