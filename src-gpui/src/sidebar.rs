@@ -23,11 +23,9 @@ use mangrove_core::{
     model::{Reference, RepositoryInfo, WorktreeInfo, WorktreeList},
 };
 use std::{
-    cell::RefCell,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     ops::Range,
-    rc::Rc,
     sync::{Arc, OnceLock},
 };
 
@@ -311,7 +309,7 @@ fn merged_highlight_ranges(mut matches: Vec<Range<usize>>) -> Vec<Range<usize>> 
     ranges
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct ReferenceTreeState {
     filter: String,
     collapsed_groups: HashSet<ReferenceKind>,
@@ -407,12 +405,20 @@ enum SidebarRow {
         count: Option<usize>,
         expanded: bool,
     },
-    Worktree(usize),
+    /// Context entries keep their list index for rendering and their path or
+    /// SHA as identity, since a refresh can shift the indices.
+    Worktree {
+        index: usize,
+        path: String,
+    },
     Stashes {
         count: Option<usize>,
         expanded: bool,
     },
-    Stash(usize),
+    Stash {
+        index: usize,
+        sha: String,
+    },
     Notice {
         text: String,
         error: bool,
@@ -441,7 +447,7 @@ impl SidebarRow {
             Self::Spacer(height) => *height,
             Self::NoReferences => (11. + font_offset) * 1.5 + 40.,
             Self::ContextSeparator { margin_top } => margin_top + 8.,
-            Self::Worktree(_) | Self::Stash(_) => context_item_height(font_offset),
+            Self::Worktree { .. } | Self::Stash { .. } => context_item_height(font_offset),
             Self::Notice { .. } => (11. + font_offset) * 1.5 + 16.,
         })
     }
@@ -452,7 +458,7 @@ impl SidebarRow {
         match self {
             Self::Group { .. } | Self::Worktrees { .. } | Self::Stashes { .. } => Some(0),
             Self::Folder { depth, .. } | Self::Reference { depth, .. } => Some(depth + 1),
-            Self::Worktree(_) | Self::Stash(_) => Some(1),
+            Self::Worktree { .. } | Self::Stash { .. } => Some(1),
             Self::Spacer(_)
             | Self::NoReferences
             | Self::ContextSeparator { .. }
@@ -542,13 +548,13 @@ fn tree_move(rows: &[SidebarRow], active: Option<usize>, key: TreeKey) -> Option
     }
 }
 
-/// Scroll position and collapsed sections and folders of the navigation tree.
-/// Opaque, so a tab can keep it and give it back to `restore_view_state`.
+/// Scroll position, filter and collapsed sections and folders of the
+/// navigation tree. Opaque, so a tab can keep it and give it back to
+/// `restore_view_state`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SidebarViewState {
     scroll_top: Pixels,
-    collapsed_groups: HashSet<ReferenceKind>,
-    collapsed_folders: HashSet<(ReferenceKind, String)>,
+    references: ReferenceTreeState,
     worktrees_expanded: bool,
     stashes_expanded: bool,
 }
@@ -568,13 +574,13 @@ pub struct SidebarView {
     list_state: ListState,
     scroll_handle: VirtualScrollHandle,
     filter_input: Entity<InputState>,
-    reset_filter_input: bool,
+    sync_filter_input: bool,
     palette: Palette,
     font_size_offset: f32,
     width: f32,
     menu: Option<(Entity<PopupMenu>, Point<Pixels>)>,
     menu_subscription: Option<Subscription>,
-    row_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    window: AnyWindowHandle,
     /// The tree is one tab stop; its active row is announced as the focused
     /// descendant, so virtualised rows never own the keyboard focus.
     tree_focus: FocusHandle,
@@ -582,6 +588,9 @@ pub struct SidebarView {
     /// Tooltips keep the bounds of the row they were opened on. A new row
     /// identity after each wheel scroll drops them.
     scroll_epoch: usize,
+    /// A restored offset waits for the expanded worktree and stash lists that
+    /// complete the tree height. Any input in the sidebar drops it.
+    restored_scroll_top: Option<Pixels>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -590,9 +599,10 @@ impl EventEmitter<SidebarEvent> for SidebarView {}
 impl SidebarView {
     pub fn view_state(&self) -> SidebarViewState {
         SidebarViewState {
-            scroll_top: self.scroll_handle.vertical_offset(),
-            collapsed_groups: self.reference_state.collapsed_groups.clone(),
-            collapsed_folders: self.reference_state.collapsed_folders.clone(),
+            scroll_top: self
+                .restored_scroll_top
+                .unwrap_or_else(|| self.scroll_handle.vertical_offset()),
+            references: self.reference_state.clone(),
             worktrees_expanded: self.context.worktrees_expanded,
             stashes_expanded: self.context.stashes_expanded,
         }
@@ -600,13 +610,21 @@ impl SidebarView {
 
     /// Call after `set_repository`, so the restored offset applies to its rows.
     pub fn restore_view_state(&mut self, state: SidebarViewState, cx: &mut Context<Self>) {
-        self.reference_state.collapsed_groups = state.collapsed_groups;
-        self.reference_state.collapsed_folders = state.collapsed_folders;
+        let filter_changed = self.reference_state.filter != state.references.filter;
+        self.set_reference_state(state.references);
+        if filter_changed {
+            self.rebuild_reference_groups();
+        }
         self.context.worktrees_expanded = state.worktrees_expanded;
         self.context.stashes_expanded = state.stashes_expanded;
+        self.restored_scroll_top = Some(state.scroll_top);
         self.load_expanded_context(cx);
         self.rebuild_rows(cx);
-        self.scroll_handle.scroll_vertical_to(state.scroll_top);
+    }
+
+    fn set_reference_state(&mut self, state: ReferenceTreeState) {
+        self.reference_state = state;
+        self.sync_filter_input = true;
     }
 }
 
@@ -677,16 +695,17 @@ impl SidebarView {
             list_state,
             scroll_handle,
             filter_input,
-            reset_filter_input: false,
+            sync_filter_input: false,
             palette: Palette::default(),
             font_size_offset: 1.,
             width: 226.,
             menu: None,
             menu_subscription: None,
-            row_bounds: Rc::default(),
+            window: window.window_handle(),
             tree_focus,
             active_row: None,
             scroll_epoch: 0,
+            restored_scroll_top: None,
             _subscriptions: vec![subscription, bounds_subscription, focus_subscription],
         }
     }
@@ -711,6 +730,7 @@ impl SidebarView {
 
     fn set_active_row(&mut self, index: usize, cx: &mut Context<Self>) {
         self.active_row = Some(index);
+        self.restored_scroll_top = None;
         self.scroll_handle.reveal_row(index);
         cx.notify();
     }
@@ -743,18 +763,23 @@ impl SidebarView {
                 }
             }
             "contextmenu" | "f10" if keystroke.key == "contextmenu" || modifiers.shift => {
-                if let Some(SidebarRow::Reference {
-                    kind, reference, ..
-                }) = self.active_row.and_then(|index| self.rows.get(index))
+                if let Some(index) = self.active_row
+                    && let Some(SidebarRow::Reference {
+                        kind, reference, ..
+                    }) = self.rows.get(index)
                     && kind.can_solo()
                 {
                     let name = reference.name.clone();
-                    let position = self
-                        .row_bounds
-                        .borrow()
-                        .get(&name)
-                        .map(|bounds| point(bounds.left(), bounds.bottom()))
-                        .unwrap_or_else(|| window.mouse_position());
+                    // The row may have scrolled away since it was painted.
+                    self.set_active_row(index, cx);
+                    let bottom: Pixels = (0..=index)
+                        .filter_map(|row| self.scroll_handle.row_height(row))
+                        .sum();
+                    let viewport = self.list_state.viewport_bounds();
+                    let position = point(
+                        viewport.left(),
+                        viewport.top() + bottom - self.scroll_handle.vertical_offset(),
+                    );
                     self.open_branch_menu(name, position, window, cx);
                 }
             }
@@ -801,31 +826,20 @@ impl SidebarView {
             Some(SidebarRow::Reference { reference, .. }) => {
                 SidebarEvent::NavigateReference(reference.name.clone())
             }
-            Some(SidebarRow::Worktree(item)) => {
+            Some(SidebarRow::Worktree { index, .. }) => {
                 let Some(item) = self
                     .context
                     .worktrees
                     .data
                     .as_ref()
-                    .and_then(|list| list.worktrees.get(*item))
+                    .and_then(|list| list.worktrees.get(*index))
                     .filter(|item| item.available)
                 else {
                     return;
                 };
                 SidebarEvent::OpenWorktree(item.path.clone())
             }
-            Some(SidebarRow::Stash(item)) => {
-                let Some(item) = self
-                    .context
-                    .stashes
-                    .data
-                    .as_ref()
-                    .and_then(|list| list.stashes.get(*item))
-                else {
-                    return;
-                };
-                SidebarEvent::SelectStash(item.sha.clone())
-            }
+            Some(SidebarRow::Stash { sha, .. }) => SidebarEvent::SelectStash(sha.clone()),
             _ => return self.toggle_row(index, cx),
         };
         cx.emit(event);
@@ -899,9 +913,9 @@ impl SidebarView {
         self.context.invalidate(changed && !shared_worktrees);
         if different_path {
             if !shared_worktrees {
-                self.reference_state.set_filter(String::new());
-                self.reset_filter_input = true;
+                self.set_reference_state(ReferenceTreeState::default());
             }
+            self.restored_scroll_top = None;
             self.selected_sha = None;
             self.selected_stash.clear();
         }
@@ -920,8 +934,7 @@ impl SidebarView {
         self.selected_sha = None;
         self.selected_stash.clear();
         self.solo_refs.clear();
-        self.reference_state.set_filter(String::new());
-        self.reset_filter_input = true;
+        self.set_reference_state(ReferenceTreeState::default());
         self.rebuild_rows(cx);
     }
 
@@ -987,7 +1000,6 @@ impl SidebarView {
 
     pub(crate) fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         self.close_menu(cx);
-        self.row_bounds.borrow_mut().clear();
         let previous_rows = std::mem::take(&mut self.rows);
         if self.repository.is_none() {
             self.active_row = None;
@@ -1019,14 +1031,17 @@ impl SidebarView {
                 0.
             },
         });
-        let worktree_indices = self
-            .context
-            .worktrees
-            .data
-            .as_ref()
-            .map(|list| filtered_worktree_indices(list, &self.reference_state.filter));
+        let worktree_rows = self.context.worktrees.data.as_ref().map(|list| {
+            filtered_worktree_indices(list, &self.reference_state.filter)
+                .into_iter()
+                .map(|index| SidebarRow::Worktree {
+                    index,
+                    path: list.worktrees[index].path.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
         self.rows.push(SidebarRow::Worktrees {
-            count: worktree_indices.as_ref().map(Vec::len),
+            count: worktree_rows.as_ref().map(Vec::len),
             expanded: self.context.worktrees_expanded,
         });
         if self.context.worktrees_expanded {
@@ -1041,15 +1056,14 @@ impl SidebarView {
                     error: false,
                 });
             }
-            if let Some(indices) = worktree_indices {
-                if indices.is_empty() && self.reference_state.searching() {
+            if let Some(rows) = worktree_rows {
+                if rows.is_empty() && self.reference_state.searching() {
                     self.rows.push(SidebarRow::Notice {
                         text: "Aucun worktree trouvé.".into(),
                         error: false,
                     });
                 }
-                self.rows
-                    .extend(indices.into_iter().map(SidebarRow::Worktree));
+                self.rows.extend(rows);
                 if self
                     .context
                     .worktrees
@@ -1098,7 +1112,12 @@ impl SidebarView {
             }
             if let Some(list) = &self.context.stashes.data {
                 self.rows
-                    .extend((0..list.stashes.len()).map(SidebarRow::Stash));
+                    .extend(list.stashes.iter().enumerate().map(|(index, stash)| {
+                        SidebarRow::Stash {
+                            index,
+                            sha: stash.sha.clone(),
+                        }
+                    }));
                 if list.truncated {
                     self.rows.push(SidebarRow::Notice {
                         text: "Les 128 stashes les plus récents sont affichés.".into(),
@@ -1134,14 +1153,33 @@ impl SidebarView {
         self.active_row = self
             .active_row
             .and_then(|index| follow_row(&previous_rows, &self.rows, index, prefix, suffix));
+        if let Some(top) = self.restored_scroll_top {
+            self.scroll_handle.scroll_vertical_to(top);
+            if !self.context.expanded_lists_loading() {
+                self.restored_scroll_top = None;
+            }
+        }
         cx.notify();
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
-            cx.notify();
-        }
         self.menu_subscription = None;
+        let Some((menu, _)) = self.menu.take() else {
+            return;
+        };
+        // Most callers have no window or run inside its update. Before the
+        // next frame drops a focused menu, give the keyboard back to the tree.
+        let menu_focus = menu.focus_handle(cx);
+        let tree_focus = self.tree_focus.clone();
+        let window = self.window;
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if menu_focus.contains_focused(window, cx) {
+                    tree_focus.focus(window, cx);
+                }
+            });
+        });
+        cx.notify();
     }
 
     fn open_branch_menu(
@@ -1418,8 +1456,6 @@ impl SidebarView {
                 let name = reference.name.clone();
                 let click_name = name.clone();
                 let menu_name = name.clone();
-                let row_bounds = self.row_bounds.clone();
-                let bounds_key = name.clone();
                 let tooltip_label = reference.label.clone();
                 let show_solo =
                     self.active_row == Some(index) && self.tree_focus.is_focused(window);
@@ -1456,16 +1492,6 @@ impl SidebarView {
                             })
                             .text_color(rgb(if current { p.accent } else { p.text }))
                     })
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                row_bounds.borrow_mut().insert(bounds_key.clone(), bounds);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
                     .child(Icon::new(kind.icon()).with_size(px(13.)).opacity(0.8))
                     .child(div().min_w_0().flex_1().truncate().child(label))
                     .when(current, |this| {
@@ -1600,7 +1626,9 @@ impl SidebarView {
                     view.toggle_stashes(cx);
                 }))
                 .into_any_element(),
-            SidebarRow::Worktree(item_index) => {
+            SidebarRow::Worktree {
+                index: item_index, ..
+            } => {
                 let Some(item) = self
                     .context
                     .worktrees
@@ -1703,7 +1731,9 @@ impl SidebarView {
                     }));
                 self.tree_item(row, index, window).into_any_element()
             }
-            SidebarRow::Stash(item_index) => {
+            SidebarRow::Stash {
+                index: item_index, ..
+            } => {
                 let Some(item) = self
                     .context
                     .stashes
@@ -1783,10 +1813,11 @@ impl SidebarView {
 
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.reset_filter_input {
+        if self.sync_filter_input {
+            let filter = self.reference_state.filter.clone();
             self.filter_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            self.reset_filter_input = false;
+                .update(cx, |input, cx| input.set_value(filter, window, cx));
+            self.sync_filter_input = false;
         }
         let p = self.palette;
         let font_offset = self.font_size_offset;
@@ -1809,6 +1840,7 @@ impl Render for SidebarView {
         let wheel_view = cx.weak_entity();
         let wheel_capture = self.scroll_handle.wheel_capture(move |changed, _, cx| {
             let _ = wheel_view.update(cx, |view, cx| {
+                view.restored_scroll_top = None;
                 view.close_menu(cx);
                 if changed {
                     view.scroll_epoch = view.scroll_epoch.wrapping_add(1);
@@ -1817,6 +1849,8 @@ impl Render for SidebarView {
             });
         });
         div().id("sidebar").relative().size_full().min_w_0().flex().flex_col()
+            .capture_any_mouse_down(cx.listener(|view, _, _, _| view.restored_scroll_top = None))
+            .capture_key_down(cx.listener(|view, _, _, _| view.restored_scroll_top = None))
             .font_family(SANS).line_height(relative(1.5)).bg(rgb(p.panel)).text_color(rgb(p.text))
             .border_r_1().border_color(rgb(p.border))
             .child(div().id("sidebar-heading").aria_label("ESPACE DE TRAVAIL")
@@ -1950,8 +1984,8 @@ fn same_row_identity(left: &SidebarRow, right: &SidebarRow) -> bool {
         (SidebarRow::NoReferences, SidebarRow::NoReferences)
         | (SidebarRow::Worktrees { .. }, SidebarRow::Worktrees { .. })
         | (SidebarRow::Stashes { .. }, SidebarRow::Stashes { .. }) => true,
-        (SidebarRow::Worktree(a), SidebarRow::Worktree(b))
-        | (SidebarRow::Stash(a), SidebarRow::Stash(b)) => a == b,
+        (SidebarRow::Worktree { path: a, .. }, SidebarRow::Worktree { path: b, .. })
+        | (SidebarRow::Stash { sha: a, .. }, SidebarRow::Stash { sha: b, .. }) => a == b,
         (SidebarRow::Notice { text: a, .. }, SidebarRow::Notice { text: b, .. }) => a == b,
         _ => false,
     }
@@ -1990,24 +2024,25 @@ fn follow_row(
 mod tests {
     use super::{
         ROW_HEIGHT, ReferenceKind, ReferenceNode, ReferenceTreeState, SidebarEvent, SidebarRow,
-        SidebarView, TreeKey, TreeMove, filtered_worktree_indices, flatten_tree, follow_row,
-        reference_order, reference_tree, search_highlight_ranges, stash_details, stash_name,
-        stash_summary, tree_move,
+        SidebarView, SidebarViewState, TreeKey, TreeMove, filtered_worktree_indices, flatten_tree,
+        follow_row, reference_order, reference_tree, search_highlight_ranges, stash_details,
+        stash_name, stash_summary, tree_move,
     };
     use crate::{
         app::Escape,
         virtual_scroll::{RowGeometry, VirtualScrollHandle},
     };
     use gpui_kit::{
-        AnyWindowHandle, AppContext, Entity, Focusable, KeyBinding, ListAlignment, ListState,
-        ScrollDelta, TestAppContext, WindowOptions, component::scroll::ScrollbarHandle, point, px,
+        AnyWindowHandle, AppContext, Bounds, Entity, Focusable, InputEvent as _, KeyBinding,
+        ListAlignment, ListState, MouseMoveEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        WindowBounds, WindowOptions, component::scroll::ScrollbarHandle, point, px, size,
         test::TestWindowExt,
     };
     use mangrove_core::{
         Workspace,
         model::{IndexProgress, Reference, RepositoryInfo, WorktreeInfo, WorktreeList},
     };
-    use std::{cell::RefCell, cmp::Ordering, rc::Rc, sync::Arc};
+    use std::{cell::RefCell, cmp::Ordering, path::Path, rc::Rc, sync::Arc};
     use tempfile::TempDir;
 
     fn reference(label: &str) -> Arc<Reference> {
@@ -2067,7 +2102,10 @@ mod tests {
                 expanded: true,
             },
             notice("Lecture des worktrees…"),
-            SidebarRow::Worktree(0),
+            SidebarRow::Worktree {
+                index: 0,
+                path: "/main".into(),
+            },
             SidebarRow::Stashes {
                 count: Some(0),
                 expanded: true,
@@ -2192,7 +2230,7 @@ mod tests {
                         assert_eq!(height, ROW_HEIGHT);
                         assert!(line <= height);
                     }
-                    SidebarRow::Worktree(_) | SidebarRow::Stash(_) => {
+                    SidebarRow::Worktree { .. } | SidebarRow::Stash { .. } => {
                         assert!(2. * line <= height)
                     }
                     SidebarRow::Group { .. }
@@ -2204,32 +2242,33 @@ mod tests {
         }
     }
 
-    fn open_sidebar(cx: &mut TestAppContext) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+    /// A sidebar-sized window, so long trees scroll.
+    fn sidebar_window(
+        cx: &mut TestAppContext,
+        engine: Arc<Workspace>,
+    ) -> (AnyWindowHandle, Entity<SidebarView>) {
         cx.update(gpui_kit::init);
         cx.update(|cx| cx.bind_keys([KeyBinding::new("escape", Escape, None)]));
-        let cache = tempfile::tempdir().unwrap();
-        let engine = Arc::new(Workspace::new(cache.path().join("cache")).unwrap());
-        let (window, view) = cx
-            .update(|cx| {
-                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                    cx.new(|cx| SidebarView::new(engine, window, cx))
-                })
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                point(px(0.), px(0.)),
+                size(px(260.), px(600.)),
+            ))),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| SidebarView::new(engine, window, cx))
             })
-            .unwrap();
-        let references = ["feature/a", "feature/b", "main"]
-            .into_iter()
-            .map(|label| (*reference(label)).clone())
-            .chain([Reference {
-                name: "refs/tags/v1".into(),
-                label: "v1".into(),
-                kind: "tag".into(),
-                sha: "b".repeat(40),
-            }])
-            .collect();
-        let info = RepositoryInfo {
-            id: "repository".into(),
-            name: "repository".into(),
-            path: "/repository".into(),
+        })
+        .unwrap()
+    }
+
+    fn repository_info(path: &str, references: Vec<Reference>) -> RepositoryInfo {
+        RepositoryInfo {
+            id: path.into(),
+            name: path.into(),
+            path: path.into(),
             head: None,
             head_name: "main".into(),
             references,
@@ -2241,9 +2280,33 @@ mod tests {
                 complete: true,
                 error: None,
             },
-        };
+        }
+    }
+
+    fn open_sidebar_with(
+        cx: &mut TestAppContext,
+        references: Vec<Reference>,
+    ) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+        let cache = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Workspace::new(cache.path().join("cache")).unwrap());
+        let (window, view) = sidebar_window(cx, engine);
+        let info = repository_info("/repository", references);
         view.update(cx, |view, cx| view.set_repository(Arc::new(info), cx));
         (cache, window, view)
+    }
+
+    fn open_sidebar(cx: &mut TestAppContext) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+        let references = ["feature/a", "feature/b", "main"]
+            .into_iter()
+            .map(|label| (*reference(label)).clone())
+            .chain([Reference {
+                name: "refs/tags/v1".into(),
+                label: "v1".into(),
+                kind: "tag".into(),
+                sha: "b".repeat(40),
+            }])
+            .collect();
+        open_sidebar_with(cx, references)
     }
 
     fn press(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
@@ -2251,17 +2314,28 @@ mod tests {
             .unwrap();
     }
 
+    fn row_label(row: Option<&SidebarRow>) -> String {
+        match row {
+            Some(SidebarRow::Group { kind, .. }) => kind.title().into(),
+            Some(SidebarRow::Folder { path, .. }) => format!("{path}/"),
+            Some(SidebarRow::Reference { reference, .. }) => reference.label.clone(),
+            Some(SidebarRow::Worktrees { .. }) => "Worktrees".into(),
+            Some(SidebarRow::Stashes { .. }) => "Stashes".into(),
+            Some(SidebarRow::Worktree { path, .. }) => path.clone(),
+            Some(SidebarRow::Stash { sha, .. }) => sha.clone(),
+            other => format!("{:?}", other.map(SidebarRow::level)),
+        }
+    }
+
     fn active_label(cx: &mut TestAppContext, view: &Entity<SidebarView>) -> String {
         view.read_with(cx, |view, _| {
-            match view.active_row.map(|index| &view.rows[index]) {
-                Some(SidebarRow::Group { kind, .. }) => kind.title().into(),
-                Some(SidebarRow::Folder { path, .. }) => format!("{path}/"),
-                Some(SidebarRow::Reference { reference, .. }) => reference.label.clone(),
-                Some(SidebarRow::Worktrees { .. }) => "Worktrees".into(),
-                Some(SidebarRow::Stashes { .. }) => "Stashes".into(),
-                other => format!("{:?}", other.map(SidebarRow::level)),
-            }
+            row_label(view.active_row.and_then(|index| view.rows.get(index)))
         })
+    }
+
+    fn render(cx: &mut TestAppContext, window: AnyWindowHandle) {
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .unwrap();
     }
 
     #[gpui_kit::test]
@@ -2336,6 +2410,93 @@ mod tests {
         assert_eq!(focus(cx), (false, true));
     }
 
+    fn signature() -> git2::Signature<'static> {
+        git2::Signature::new(
+            "Test",
+            "test@example.test",
+            &git2::Time::new(1_700_000_000, 0),
+        )
+        .unwrap()
+    }
+
+    /// Stashes `text` as a change of the committed file and returns its SHA.
+    fn stash(path: &Path, text: &str) -> String {
+        let mut repository = git2::Repository::open(path).unwrap();
+        std::fs::write(path.join("file.txt"), text).unwrap();
+        repository
+            .stash_save(&signature(), text, None)
+            .unwrap()
+            .to_string()
+    }
+
+    /// A one-commit repository with `count` stashes, the newest last.
+    fn stash_repository(count: usize) -> (TempDir, Arc<Workspace>, RepositoryInfo, Vec<String>) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("repository");
+        let repository = git2::Repository::init(&path).unwrap();
+        std::fs::write(path.join("file.txt"), "base").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        repository
+            .commit(Some("HEAD"), &signature(), &signature(), "base", &tree, &[])
+            .unwrap();
+        let shas = (0..count)
+            .map(|index| stash(&path, &format!("change {index}")))
+            .collect();
+        let engine = Arc::new(Workspace::new(root.path().join("cache")).unwrap());
+        let info = engine.open_repository(path.to_str().unwrap()).unwrap();
+        (root, engine, info, shas)
+    }
+
+    #[gpui_kit::test]
+    fn active_stash_keeps_its_sha_when_a_new_stash_shifts_the_list(cx: &mut TestAppContext) {
+        let (_root, engine, info, shas) = stash_repository(2);
+        let (window, view) = sidebar_window(cx, engine.clone());
+        view.update(cx, |view, cx| {
+            view.set_repository(Arc::new(info.clone()), cx)
+        });
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.show_context(false, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        press(cx, window, "down");
+        press(cx, window, "down");
+        // stash@{1} is the older of the two.
+        assert_eq!(active_label(cx, &view), shas[0]);
+
+        stash(Path::new(&info.path), "change 2");
+        let info = engine.open_repository(&info.path).unwrap();
+        view.update(cx, |view, cx| view.set_repository(Arc::new(info), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .context
+                .stashes
+                .data
+                .as_ref()
+                .unwrap()
+                .stashes
+                .len()),
+            3
+        );
+        assert_eq!(active_label(cx, &view), shas[0]);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(format!("{event:?}"));
+            })
+        });
+        press(cx, window, "enter");
+        assert_eq!(
+            events.borrow().as_slice(),
+            [format!("{:?}", SidebarEvent::SelectStash(shas[0].clone()))]
+        );
+    }
+
     #[gpui_kit::test]
     fn view_state_restores_collapsed_sections_and_scroll(cx: &mut TestAppContext) {
         let (_cache, window, view) = open_sidebar(cx);
@@ -2360,6 +2521,218 @@ mod tests {
                     .folder_closed(ReferenceKind::Local, "feature")
             );
         });
+    }
+
+    #[gpui_kit::test]
+    fn view_state_restores_the_filter_its_scroll_offset_belongs_to(cx: &mut TestAppContext) {
+        let references = (0..40)
+            .flat_map(|index| [format!("feature/f{index:02}"), format!("zeta/z{index:02}")])
+            .map(|label| (*reference(&label)).clone())
+            .collect();
+        let (_cache, window, view) = open_sidebar_with(cx, references);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.focus_references(window, cx));
+            window.input("zeta/", cx);
+        })
+        .unwrap();
+        view.update(cx, |view, _| {
+            view.scroll_handle.scroll_vertical_to(px(500.))
+        });
+        render(cx, window);
+        let top_label = |cx: &mut TestAppContext| {
+            view.read_with(cx, |view, _| {
+                row_label(view.rows.get(view.list_state.logical_scroll_top().item_ix))
+            })
+        };
+        let top = top_label(cx);
+        assert!(top.starts_with("zeta/"), "{top}");
+        let saved = view.read_with(cx, |view, _| view.view_state());
+
+        // Leave the tab, then come back to it.
+        view.update(cx, |view, cx| {
+            let info = view.repository.clone().unwrap();
+            view.clear_repository(cx);
+            view.prepare_repository_open(&info.path, cx);
+            view.set_repository(info, cx);
+            view.restore_view_state(saved, cx);
+        });
+        render(cx, window);
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.filter_input.read(cx).value(), "zeta/");
+            assert_eq!(view.scroll_handle.vertical_offset(), px(500.));
+        });
+        assert_eq!(top_label(cx), top);
+    }
+
+    #[gpui_kit::test]
+    fn another_repository_starts_with_open_groups_and_folders(cx: &mut TestAppContext) {
+        let (_cache, _window, view) = open_sidebar(cx);
+        view.update(cx, |view, cx| {
+            let closed = |view: &SidebarView| {
+                (
+                    view.reference_state.group_closed(ReferenceKind::Tag),
+                    view.reference_state
+                        .folder_closed(ReferenceKind::Local, "feature"),
+                )
+            };
+            view.reference_state.toggle_group(ReferenceKind::Tag);
+            view.reference_state
+                .toggle_folder(ReferenceKind::Local, "feature".into());
+            let info = view.repository.clone().unwrap();
+            view.set_repository(info.clone(), cx);
+            assert_eq!(closed(view), (true, true), "a refresh keeps them");
+
+            // A new tab opens another repository.
+            view.clear_repository(cx);
+            let other = repository_info("/other", info.references.clone());
+            view.prepare_repository_open(&other.path, cx);
+            view.set_repository(Arc::new(other), cx);
+            assert_eq!(closed(view), (false, false));
+        });
+    }
+
+    /// Restores an offset beyond the tree height while the expanded stash
+    /// list is still being read.
+    fn restore_while_stashes_load(
+        cx: &mut TestAppContext,
+    ) -> (
+        TempDir,
+        AnyWindowHandle,
+        Entity<SidebarView>,
+        SidebarViewState,
+    ) {
+        let (root, engine, info, _) = stash_repository(40);
+        let (window, view) = sidebar_window(cx, engine);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.set_repository(Arc::new(info), cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let state = SidebarViewState {
+            scroll_top: px(900.),
+            stashes_expanded: true,
+            ..Default::default()
+        };
+        view.update(cx, |view, cx| {
+            view.restore_view_state(state.clone(), cx);
+            assert!(view.context.stashes.loading);
+            assert_eq!(view.scroll_handle.vertical_offset(), px(0.));
+        });
+        (root, window, view, state)
+    }
+
+    #[gpui_kit::test]
+    fn restored_scroll_waits_for_the_expanded_stash_list(cx: &mut TestAppContext) {
+        let (_root, window, view, state) = restore_while_stashes_load(cx);
+        // Leaving the tab again meanwhile keeps the offset to restore.
+        assert_eq!(view.read_with(cx, |view, _| view.view_state()), state);
+        cx.run_until_parked();
+        render(cx, window);
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.context.stashes.data.as_ref().unwrap().stashes.len(),
+                40
+            );
+            assert_eq!(view.scroll_handle.vertical_offset(), px(900.));
+            assert_eq!(view.restored_scroll_top, None);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn scrolling_before_the_lists_are_read_drops_the_restored_offset(cx: &mut TestAppContext) {
+        let (_root, window, view, _) = restore_while_stashes_load(cx);
+        let position = view.read_with(cx, |view, _| view.list_state.viewport_bounds().center());
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.render_frame(cx);
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(view.read_with(cx, |view, _| view.restored_scroll_top), None);
+        cx.run_until_parked();
+        render(cx, window);
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.context.stashes.data.as_ref().unwrap().stashes.len(),
+                40
+            );
+            assert_eq!(view.scroll_handle.vertical_offset(), px(0.));
+        });
+    }
+
+    /// Leaves the keyboard on branch b02, scrolled out of view, then opens its
+    /// menu with Shift+F10.
+    fn open_menu_of_scrolled_away_row(
+        cx: &mut TestAppContext,
+    ) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+        let references = (0..40)
+            .map(|index| (*reference(&format!("b{index:02}"))).clone())
+            .collect();
+        let (cache, window, view) = open_sidebar_with(cx, references);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.focus_tree(window, cx));
+        })
+        .unwrap();
+        for _ in 0..3 {
+            press(cx, window, "down");
+        }
+        assert_eq!(active_label(cx, &view), "b02");
+        view.update(cx, |view, _| {
+            view.scroll_handle.scroll_vertical_to(px(800.))
+        });
+        render(cx, window);
+        press(cx, window, "shift-f10");
+        let menu_focused = cx
+            .update_window(window, |_, window, cx| {
+                let (menu, _) = view.read(cx).menu.clone().unwrap();
+                menu.focus_handle(cx).is_focused(window)
+            })
+            .unwrap();
+        assert!(menu_focused);
+        (cache, window, view)
+    }
+
+    #[gpui_kit::test]
+    fn keyboard_branch_menu_opens_below_the_active_row_where_it_is_now(cx: &mut TestAppContext) {
+        let (_cache, window, view) = open_menu_of_scrolled_away_row(cx);
+        render(cx, window);
+        view.read_with(cx, |view, _| {
+            let index = view.active_row.unwrap();
+            let bounds = view.list_state.bounds_for_item(index).unwrap();
+            assert!(view.list_state.viewport_bounds().contains(&bounds.origin));
+            assert_eq!(view.menu.as_ref().unwrap().1, bounds.bottom_left());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn closing_the_branch_menu_from_outside_returns_focus_to_the_tree(cx: &mut TestAppContext) {
+        let (_cache, window, view) = open_menu_of_scrolled_away_row(cx);
+        view.update(cx, |view, cx| view.set_width(300., cx));
+        render(cx, window);
+        let tree_focused = cx
+            .update_window(window, |_, window, cx| {
+                let view = view.read(cx);
+                view.menu.is_none() && view.tree_focus.is_focused(window)
+            })
+            .unwrap();
+        assert!(tree_focused);
+        assert_eq!(active_label(cx, &view), "b02");
     }
 
     #[test]
@@ -2555,12 +2928,18 @@ mod tests {
                 count: Some(1),
                 expanded: true,
             },
-            SidebarRow::Worktree(0),
+            SidebarRow::Worktree {
+                index: 0,
+                path: "/main".into(),
+            },
             SidebarRow::Stashes {
                 count: Some(1),
                 expanded: true,
             },
-            SidebarRow::Stash(0),
+            SidebarRow::Stash {
+                index: 0,
+                sha: "a".repeat(40),
+            },
             SidebarRow::Spacer(24.),
         ]);
         let list = ListState::new(rows.len(), ListAlignment::Top, px(200.));
