@@ -127,6 +127,13 @@ impl DerefMut for ReadLease<'_> {
 }
 
 impl Drop for ReadLease<'_> {
+    #[cfg_attr(
+        not(unix),
+        allow(
+            clippy::absurd_extreme_comparisons,
+            reason = "no idle reader is kept outside Unix"
+        )
+    )]
     fn drop(&mut self) {
         let mut available = self.pool.available.lock().unwrap();
         // Parallel callers borrow independently; only idle connections are
