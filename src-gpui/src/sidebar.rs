@@ -5,7 +5,7 @@ use gpui_kit::{
     base::Button as NativeButton,
     component::{
         Icon, Sizable,
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, MoveDown},
         menu::{PopupMenu, PopupMenuItem},
         scroll::Scrollbar,
         tooltip::Tooltip,
@@ -32,7 +32,8 @@ use std::{
 };
 
 use crate::{
-    format::{commit_date, format_count, short_sha},
+    app::Escape,
+    format::{commit_date, compact_date, count_label, display_path, format_count, short_sha},
     repository_context::RepositoryContextState,
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::VirtualScrollHandle,
@@ -81,6 +82,12 @@ impl ReferenceKind {
     }
     fn can_solo(self) -> bool {
         matches!(self, Self::Local | Self::Remote)
+    }
+    fn count_label(self, count: usize) -> String {
+        match self {
+            Self::Local | Self::Remote => count_label(count, "branche", "branches"),
+            Self::Tag => count_label(count, "tag", "tags"),
+        }
     }
 }
 
@@ -219,6 +226,29 @@ fn filtered_worktree_indices(list: &WorktreeList, filter: &str) -> Vec<usize> {
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+/// Splits Git's « WIP on main: » or « On main: » prefix from a stash message.
+/// Reference names cannot contain a colon, so the first one ends the branch.
+fn stash_summary(message: &str) -> (Option<&str>, &str) {
+    let line = message.lines().next().unwrap_or("").trim();
+    line.strip_prefix("WIP on ")
+        .or_else(|| line.strip_prefix("On "))
+        .and_then(|rest| rest.split_once(':'))
+        .map_or((None, line), |(branch, text)| (Some(branch), text.trim()))
+}
+
+fn stash_name(index: usize) -> String {
+    format!("stash@{{{index}}}")
+}
+
+/// The date precedes the author, whose name is truncated first.
+fn stash_details(branch: Option<&str>, date: &str, author: &str) -> String {
+    branch
+        .into_iter()
+        .chain([date, author])
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn search_highlight_ranges(text: &str, filter: &str) -> Vec<Range<usize>> {
@@ -389,21 +419,138 @@ enum SidebarRow {
     },
 }
 
+/// Matches the history rows.
+const ROW_HEIGHT: f32 = 28.;
+
+fn section_height(font_offset: f32) -> f32 {
+    (11. + font_offset) * 1.5 + 10.
+}
+
+/// Worktrees and stashes show a second, muted line.
+fn context_item_height(font_offset: f32) -> f32 {
+    (11. + font_offset) * 3. + 8.
+}
+
 impl SidebarRow {
     fn height_hint(&self, font_offset: f32) -> Pixels {
         px(match self {
             Self::Group { .. } | Self::Worktrees { .. } | Self::Stashes { .. } => {
-                (10. + font_offset) * 1.5 + 10.
+                section_height(font_offset)
             }
-            Self::Folder { .. } | Self::Reference { .. } => 32.,
+            Self::Folder { .. } | Self::Reference { .. } => ROW_HEIGHT,
             Self::Spacer(height) => *height,
             Self::NoReferences => (11. + font_offset) * 1.5 + 40.,
             Self::ContextSeparator { margin_top } => margin_top + 8.,
-            Self::Worktree(_) => 28.,
-            Self::Stash(_) => (29. + 3. * font_offset) * 1.5 + 24.,
-            Self::Notice { .. } => (9. + font_offset) * 1.5 + 16.,
+            Self::Worktree(_) | Self::Stash(_) => context_item_height(font_offset),
+            Self::Notice { .. } => (11. + font_offset) * 1.5 + 16.,
         })
     }
+
+    /// Tree depth of a keyboard-navigable row. Spacers, separators and
+    /// notices are skipped.
+    fn level(&self) -> Option<usize> {
+        match self {
+            Self::Group { .. } | Self::Worktrees { .. } | Self::Stashes { .. } => Some(0),
+            Self::Folder { depth, .. } | Self::Reference { depth, .. } => Some(depth + 1),
+            Self::Worktree(_) | Self::Stash(_) => Some(1),
+            Self::Spacer(_)
+            | Self::NoReferences
+            | Self::ContextSeparator { .. }
+            | Self::Notice { .. } => None,
+        }
+    }
+
+    fn navigable(&self) -> bool {
+        self.level().is_some()
+    }
+
+    fn expanded(&self) -> Option<bool> {
+        match self {
+            Self::Group { closed, .. } | Self::Folder { closed, .. } => Some(!closed),
+            Self::Worktrees { expanded, .. } | Self::Stashes { expanded, .. } => Some(*expanded),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TreeKey {
+    Previous,
+    Next,
+    Collapse,
+    Expand,
+    First,
+    Last,
+}
+
+impl TreeKey {
+    fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "up" => Self::Previous,
+            "down" => Self::Next,
+            "left" => Self::Collapse,
+            "right" => Self::Expand,
+            "home" => Self::First,
+            "end" => Self::Last,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TreeMove {
+    Focus(usize),
+    Toggle(usize),
+}
+
+/// Keyboard movement over the flattened tree: arrows move between visible
+/// rows, ← collapses or reaches the parent, → expands or reaches the first child.
+fn tree_move(rows: &[SidebarRow], active: Option<usize>, key: TreeKey) -> Option<TreeMove> {
+    let navigable = |index: &usize| rows[*index].navigable();
+    let first = || (0..rows.len()).find(navigable);
+    let last = || (0..rows.len()).rev().find(navigable);
+    let Some((active, level)) = active.and_then(|index| Some((index, rows.get(index)?.level()?)))
+    else {
+        return if key == TreeKey::Last {
+            last()
+        } else {
+            first()
+        }
+        .map(TreeMove::Focus);
+    };
+    match key {
+        TreeKey::Previous => (0..active).rev().find(navigable).map(TreeMove::Focus),
+        TreeKey::Next => (active + 1..rows.len())
+            .find(navigable)
+            .map(TreeMove::Focus),
+        TreeKey::First => first().map(TreeMove::Focus),
+        TreeKey::Last => last().map(TreeMove::Focus),
+        TreeKey::Collapse if rows[active].expanded() == Some(true) => {
+            Some(TreeMove::Toggle(active))
+        }
+        TreeKey::Collapse => (0..active)
+            .rev()
+            .find(|index| rows[*index].level().is_some_and(|parent| parent < level))
+            .map(TreeMove::Focus),
+        TreeKey::Expand => match rows[active].expanded()? {
+            false => Some(TreeMove::Toggle(active)),
+            true => (active + 1..rows.len())
+                .find(navigable)
+                .filter(|index| rows[*index].level() > Some(level))
+                .map(TreeMove::Focus),
+        },
+    }
+}
+
+/// Scroll position and collapsed sections and folders of the navigation tree.
+/// Opaque, so a tab can keep it and give it back to `restore_view_state`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SidebarViewState {
+    scroll_top: Pixels,
+    collapsed_groups: HashSet<ReferenceKind>,
+    collapsed_folders: HashSet<(ReferenceKind, String)>,
+    worktrees_expanded: bool,
+    stashes_expanded: bool,
 }
 
 pub struct SidebarView {
@@ -428,11 +575,44 @@ pub struct SidebarView {
     menu: Option<(Entity<PopupMenu>, Point<Pixels>)>,
     menu_subscription: Option<Subscription>,
     row_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
-    reference_focus: HashMap<String, FocusHandle>,
+    /// The tree is one tab stop; its active row is announced as the focused
+    /// descendant, so virtualised rows never own the keyboard focus.
+    tree_focus: FocusHandle,
+    active_row: Option<usize>,
+    /// Tooltips keep the bounds of the row they were opened on. A new row
+    /// identity after each wheel scroll drops them.
+    scroll_epoch: usize,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the shell will restore this state per tab")
+)]
+impl SidebarView {
+    pub fn view_state(&self) -> SidebarViewState {
+        SidebarViewState {
+            scroll_top: self.scroll_handle.vertical_offset(),
+            collapsed_groups: self.reference_state.collapsed_groups.clone(),
+            collapsed_folders: self.reference_state.collapsed_folders.clone(),
+            worktrees_expanded: self.context.worktrees_expanded,
+            stashes_expanded: self.context.stashes_expanded,
+        }
+    }
+
+    /// Call after `set_repository`, so the restored offset applies to its rows.
+    pub fn restore_view_state(&mut self, state: SidebarViewState, cx: &mut Context<Self>) {
+        self.reference_state.collapsed_groups = state.collapsed_groups;
+        self.reference_state.collapsed_folders = state.collapsed_folders;
+        self.context.worktrees_expanded = state.worktrees_expanded;
+        self.context.stashes_expanded = state.stashes_expanded;
+        self.load_expanded_context(cx);
+        self.rebuild_rows(cx);
+        self.scroll_handle.scroll_vertical_to(state.scroll_top);
+    }
+}
 
 impl SidebarView {
     pub fn focus_references(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -455,10 +635,9 @@ impl SidebarView {
             }
         });
         if let Some(index) = index {
-            self.list_state.scroll_to_reveal_item(index);
+            self.set_active_row(index, cx);
         }
-        self.filter_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.tree_focus.focus(window, cx);
         cx.notify();
     }
     pub fn new(engine: Arc<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -469,12 +648,18 @@ impl SidebarView {
             if matches!(event, InputEvent::Change) {
                 view.reference_state
                     .set_filter(input.read(cx).value().to_string());
+                // ↓ from the filter then starts at the first result.
+                view.active_row = None;
                 view.rebuild_reference_groups();
                 view.rebuild_rows(cx);
             }
         });
         let bounds_subscription =
             cx.observe_window_bounds(window, |view, _, cx| view.close_menu(cx));
+        let tree_focus = cx.focus_handle();
+        let focus_subscription = cx.on_focus(&tree_focus, window, |view, _, cx| {
+            view.ensure_active_row(cx)
+        });
         let list_state = ListState::new(0, ListAlignment::Top, px(200.));
         let view = cx.weak_entity();
         list_state.set_scroll_handler(move |_, _, cx| {
@@ -503,9 +688,151 @@ impl SidebarView {
             menu: None,
             menu_subscription: None,
             row_bounds: Rc::default(),
-            reference_focus: HashMap::new(),
-            _subscriptions: vec![subscription, bounds_subscription],
+            tree_focus,
+            active_row: None,
+            scroll_epoch: 0,
+            _subscriptions: vec![subscription, bounds_subscription, focus_subscription],
         }
+    }
+
+    /// Tabbing or clicking into the tree starts on the first row in view.
+    fn ensure_active_row(&mut self, cx: &mut Context<Self>) {
+        if self
+            .active_row
+            .and_then(|index| self.rows.get(index))
+            .is_some_and(SidebarRow::navigable)
+        {
+            return;
+        }
+        let top = self.list_state.logical_scroll_top().item_ix;
+        self.active_row = (top..self.rows.len())
+            .chain(0..top.min(self.rows.len()))
+            .find(|&index| self.rows[index].navigable());
+        if self.active_row.is_some() {
+            cx.notify();
+        }
+    }
+
+    fn set_active_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active_row = Some(index);
+        self.scroll_handle.reveal_row(index);
+        cx.notify();
+    }
+
+    fn focus_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        if let Some(index) = self
+            .active_row
+            .or_else(|| self.rows.iter().position(SidebarRow::navigable))
+        {
+            self.set_active_row(index, cx);
+        }
+        self.tree_focus.focus(window, cx);
+    }
+
+    fn tree_focus_visible(&self, window: &Window) -> bool {
+        self.tree_focus.is_focused(window) && window.last_input_was_keyboard()
+    }
+
+    fn tree_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        if modifiers.platform || modifiers.control || modifiers.alt {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "enter" | "space" => {
+                if let Some(index) = self.active_row {
+                    self.activate_row(index, cx);
+                }
+            }
+            "contextmenu" | "f10" if keystroke.key == "contextmenu" || modifiers.shift => {
+                if let Some(SidebarRow::Reference {
+                    kind, reference, ..
+                }) = self.active_row.and_then(|index| self.rows.get(index))
+                    && kind.can_solo()
+                {
+                    let name = reference.name.clone();
+                    let position = self
+                        .row_bounds
+                        .borrow()
+                        .get(&name)
+                        .map(|bounds| point(bounds.left(), bounds.bottom()))
+                        .unwrap_or_else(|| window.mouse_position());
+                    self.open_branch_menu(name, position, window, cx);
+                }
+            }
+            key => {
+                let Some(key) = TreeKey::from_key(key) else {
+                    return;
+                };
+                match tree_move(&self.rows, self.active_row, key) {
+                    Some(TreeMove::Focus(index)) => self.set_active_row(index, cx),
+                    Some(TreeMove::Toggle(index)) => {
+                        self.active_row = Some(index);
+                        self.toggle_row(index, cx);
+                        if let Some(index) = self.active_row {
+                            self.scroll_handle.reveal_row(index);
+                        }
+                    }
+                    None if key == TreeKey::Previous => self.focus_references(window, cx),
+                    None => {}
+                }
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn toggle_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        match self.rows.get(index) {
+            Some(SidebarRow::Group { kind, .. }) => {
+                self.reference_state.toggle_group(*kind);
+                self.rebuild_rows(cx);
+            }
+            Some(SidebarRow::Folder { kind, path, .. }) => {
+                self.reference_state.toggle_folder(*kind, path.clone());
+                self.rebuild_rows(cx);
+            }
+            Some(SidebarRow::Worktrees { .. }) => self.toggle_worktrees(cx),
+            Some(SidebarRow::Stashes { .. }) => self.toggle_stashes(cx),
+            _ => {}
+        }
+    }
+
+    /// Enter and Space do what a click on the row does.
+    fn activate_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let event = match self.rows.get(index) {
+            Some(SidebarRow::Reference { reference, .. }) => {
+                SidebarEvent::NavigateReference(reference.name.clone())
+            }
+            Some(SidebarRow::Worktree(item)) => {
+                let Some(item) = self
+                    .context
+                    .worktrees
+                    .data
+                    .as_ref()
+                    .and_then(|list| list.worktrees.get(*item))
+                    .filter(|item| item.available)
+                else {
+                    return;
+                };
+                SidebarEvent::OpenWorktree(item.path.clone())
+            }
+            Some(SidebarRow::Stash(item)) => {
+                let Some(item) = self
+                    .context
+                    .stashes
+                    .data
+                    .as_ref()
+                    .and_then(|list| list.stashes.get(*item))
+                else {
+                    return;
+                };
+                SidebarEvent::SelectStash(item.sha.clone())
+            }
+            _ => return self.toggle_row(index, cx),
+        };
+        cx.emit(event);
     }
 
     pub fn set_theme(&mut self, palette: Palette, font_size_offset: f32, cx: &mut Context<Self>) {
@@ -572,13 +899,6 @@ impl SidebarView {
             .iter()
             .map(|reference| reference.sha.clone())
             .collect();
-        let names: HashSet<_> = self
-            .references
-            .iter()
-            .map(|reference| reference.name.as_str())
-            .collect();
-        self.reference_focus
-            .retain(|name, _| names.contains(name.as_str()));
         self.repository = Some(repository);
         self.context.invalidate(changed && !shared_worktrees);
         if different_path {
@@ -599,7 +919,6 @@ impl SidebarView {
         self.repository = None;
         self.references.clear();
         self.reference_shas.clear();
-        self.reference_focus.clear();
         self.reference_groups.clear();
         self.context.invalidate(true);
         self.selected_sha = None;
@@ -675,6 +994,7 @@ impl SidebarView {
         self.row_bounds.borrow_mut().clear();
         let previous_rows = std::mem::take(&mut self.rows);
         if self.repository.is_none() {
+            self.active_row = None;
             self.list_state.reset(0);
             self.scroll_handle.set_heights([]);
             cx.notify();
@@ -815,6 +1135,9 @@ impl SidebarView {
                     .map(|row| row.height_hint(self.font_size_offset)),
             );
         }
+        self.active_row = self
+            .active_row
+            .and_then(|index| follow_row(&previous_rows, &self.rows, index, prefix, suffix));
         cx.notify();
     }
 
@@ -849,45 +1172,39 @@ impl SidebarView {
         } else {
             "Ajouter au Solo"
         };
-        let original_focus = self
-            .reference_focus
-            .get(&name)
-            .cloned()
-            .or_else(|| window.focused(cx));
+        let tree_focus = self.tree_focus.clone();
         let view = cx.weak_entity();
         let color = self.palette.text;
         let font_size = 11. + self.font_size_offset;
         let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-            menu.min_w(px(210.))
-                .when_some(original_focus, |menu, focus| menu.action_context(focus))
-                .item(
-                    PopupMenuItem::element(move |_, _| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .px(px(2.))
-                            .py(px(8.))
-                            .text_size(px(font_size))
-                            .line_height(relative(1.5))
-                            .font_weight(FontWeight::NORMAL)
-                            .child(icon(IconName::Focus, 14., color))
-                            .child(label)
-                    })
-                    .on_click(move |_, _, cx| {
-                        let _ = view.update(cx, |view, cx| {
-                            // A refreshed reference cannot retain a stale popup action.
-                            if view
-                                .references
-                                .iter()
-                                .any(|reference| reference.name == name)
-                            {
-                                cx.emit(SidebarEvent::ToggleSolo(name.clone()));
-                            }
-                            view.close_menu(cx);
-                        });
-                    }),
-                )
+            menu.min_w(px(210.)).action_context(tree_focus).item(
+                PopupMenuItem::element(move |_, _| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(2.))
+                        .py(px(8.))
+                        .text_size(px(font_size))
+                        .line_height(relative(1.5))
+                        .font_weight(FontWeight::NORMAL)
+                        .child(icon(IconName::Focus, 14., color))
+                        .child(label)
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| {
+                        // A refreshed reference cannot retain a stale popup action.
+                        if view
+                            .references
+                            .iter()
+                            .any(|reference| reference.name == name)
+                        {
+                            cx.emit(SidebarEvent::ToggleSolo(name.clone()));
+                        }
+                        view.close_menu(cx);
+                    });
+                }),
+            )
         });
         window.focus(&menu.focus_handle(cx), cx);
         self.menu_subscription =
@@ -896,34 +1213,69 @@ impl SidebarView {
         cx.notify();
     }
 
-    fn render_group(
-        &self,
-        id: String,
-        title: &'static str,
-        count: Option<usize>,
-        expanded: bool,
-        icon_name: Option<IconName>,
-    ) -> Stateful<Div> {
-        let p = self.palette;
+    /// Tree semantics and the keyboard focus ring shared by navigable rows.
+    fn tree_item(&self, row: Stateful<Div>, index: usize, window: &Window) -> Stateful<Div> {
+        let active = self.active_row == Some(index);
+        let level = self.rows.get(index).and_then(SidebarRow::level);
+        let accent = self.palette.accent;
+        row.role(Role::TreeItem)
+            .when_some(level, |row, level| row.aria_level(level + 1))
+            .when(active, |row| row.aria_active_descendant())
+            .when(active && self.tree_focus_visible(window), |row| {
+                row.relative().child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(rgb(accent)),
+                )
+            })
+    }
+
+    /// Two-line worktree and stash entries.
+    fn context_item(&self, id: String) -> Stateful<Div> {
         div()
             .id(SharedString::from(id))
-            .role(Role::Button)
-            .focusable()
-            .tab_index(0)
+            .flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap(px(8.))
+            .h(px(context_item_height(self.font_size_offset)))
+            .pl(px(26.))
+            .pr(px(15.))
+            .text_size(px(11. + self.font_size_offset))
+    }
+
+    /// Section titles are unique and double as element ids.
+    fn render_group(
+        &self,
+        index: usize,
+        title: &'static str,
+        count: Option<(usize, String)>,
+        expanded: bool,
+        icon_name: Option<IconName>,
+        window: &Window,
+    ) -> Stateful<Div> {
+        let p = self.palette;
+        let font_offset = self.font_size_offset;
+        let row = div()
+            .id(title)
             .aria_label(title)
+            .when_some(count.as_ref(), |this, (_, label)| {
+                this.aria_description(label.clone())
+            })
             .aria_expanded(expanded)
             .flex()
             .items_center()
             .gap(px(7.))
             .w_full()
-            .h(px((10. + self.font_size_offset) * 1.5 + 10.))
+            .h(px(section_height(font_offset)))
             .px(px(15.))
-            .pb(px(10.))
-            .text_size(px(10. + self.font_size_offset))
+            .text_size(px(11. + font_offset))
             .text_color(rgb(p.muted))
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
-            .focus_visible(|style| style.border_1().border_color(rgb(p.accent)))
             .child(icon(
                 if expanded {
                     IconName::ChevronDown
@@ -935,14 +1287,10 @@ impl SidebarView {
             ))
             .when_some(icon_name, |this, name| this.child(icon(name, 13., p.muted)))
             .child(div().flex_1().child(title))
-            .when_some(count, |this, count| {
-                this.child(
-                    div()
-                        .font_family(MONO)
-                        .text_size(px(9. + self.font_size_offset))
-                        .child(format_count(count)),
-                )
-            })
+            .when_some(count, |this, (count, _)| {
+                this.child(div().font_family(MONO).child(format_count(count)))
+            });
+        self.tree_item(row, index, window)
     }
 
     fn highlighted_label(&self, label: String, ranges: Vec<Range<usize>>) -> StyledText {
@@ -972,13 +1320,15 @@ impl SidebarView {
                 closed,
             } => self
                 .render_group(
-                    format!("reference-group-{}", kind.name()),
+                    index,
                     kind.title(),
-                    Some(count),
+                    Some((count, kind.count_label(count))),
                     !closed,
                     None,
+                    window,
                 )
                 .on_click(cx.listener(move |view, _, _, cx| {
+                    view.active_row = Some(index);
                     view.reference_state.toggle_group(kind);
                     view.rebuild_rows(cx);
                 }))
@@ -995,15 +1345,13 @@ impl SidebarView {
                 let tooltip_path = path.clone();
                 let padding = (12. + depth as f32 * 14.).min((self.width * 0.35 - 14.).max(0.));
                 let label = self.highlighted_label(label, highlights);
-                div()
+                let row = div()
                     .id(SharedString::from(format!(
                         "reference-folder-{}-{path}",
                         kind.name()
                     )))
-                    .role(Role::Button)
-                    .focusable()
-                    .tab_index(0)
                     .aria_label(format!("Dossier {path}"))
+                    .aria_description(kind.count_label(count))
                     .aria_expanded(!closed)
                     .tooltip(move |window, cx| Tooltip::new(tooltip_path.clone()).build(window, cx))
                     .flex()
@@ -1011,14 +1359,13 @@ impl SidebarView {
                     .gap(px(7.))
                     .w_full()
                     .min_w_0()
-                    .h(px(32.))
+                    .h(px(ROW_HEIGHT))
                     .pl(px(padding))
                     .pr(px(17.))
                     .text_size(px(11. + font_offset))
                     .text_color(rgb(p.text))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(p.accent).opacity(0.1)))
-                    .focus_visible(|style| style.border_1().border_color(rgb(p.accent)))
                     .child(
                         Icon::new(if closed {
                             IconName::ChevronRight
@@ -1042,15 +1389,15 @@ impl SidebarView {
                         div()
                             .flex_shrink_0()
                             .font_family(MONO)
-                            .text_size(px(9. + font_offset))
                             .text_color(rgb(p.muted))
                             .child(format_count(count)),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| {
+                        view.active_row = Some(index);
                         view.reference_state.toggle_folder(kind, path.clone());
                         view.rebuild_rows(cx);
-                    }))
-                    .into_any_element()
+                    }));
+                self.tree_item(row, index, window).into_any_element()
             }
             SidebarRow::Reference {
                 kind,
@@ -1074,25 +1421,17 @@ impl SidebarView {
                 };
                 let name = reference.name.clone();
                 let click_name = name.clone();
-                let key_name = name.clone();
                 let menu_name = name.clone();
                 let row_bounds = self.row_bounds.clone();
                 let bounds_key = name.clone();
                 let tooltip_label = reference.label.clone();
-                let reference_focus = self
-                    .reference_focus
-                    .entry(name.clone())
-                    .or_insert_with(|| cx.focus_handle())
-                    .clone();
+                let show_solo =
+                    self.active_row == Some(index) && self.tree_focus.is_focused(window);
                 let button_width = self.width - 1. - if kind.can_solo() { 24. } else { 0. };
                 let padding = (26. + depth as f32 * 14.).min(button_width * 0.35);
                 let label = self.highlighted_label(label, highlights);
                 let row = div()
                     .id(SharedString::from(format!("reference-{name}")))
-                    .role(Role::Button)
-                    .track_focus(&reference_focus)
-                    .tab_index(0)
-                    .aria_label(reference.label.clone())
                     .tooltip(move |window, cx| {
                         Tooltip::new(tooltip_label.clone()).build(window, cx)
                     })
@@ -1100,7 +1439,7 @@ impl SidebarView {
                     .flex()
                     .items_center()
                     .gap(px(9.))
-                    .h(px(32.))
+                    .h(px(ROW_HEIGHT))
                     .min_w_0()
                     .flex_1()
                     .pl(px(padding))
@@ -1121,7 +1460,6 @@ impl SidebarView {
                             })
                             .text_color(rgb(if current { p.accent } else { p.text }))
                     })
-                    .focus_visible(|style| style.border_1().border_color(rgb(p.accent)))
                     .child(
                         canvas(
                             move |bounds, _, _| {
@@ -1137,13 +1475,16 @@ impl SidebarView {
                     .when(current, |this| {
                         this.child(Icon::new(IconName::Check).with_size(px(12.)).opacity(0.8))
                     })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(SidebarEvent::NavigateReference(click_name.clone()))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.active_row = Some(index);
+                        cx.emit(SidebarEvent::NavigateReference(click_name.clone()));
+                        cx.notify();
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                             if kind.can_solo() {
+                                view.active_row = Some(index);
                                 view.open_branch_menu(
                                     menu_name.clone(),
                                     event.position,
@@ -1153,24 +1494,12 @@ impl SidebarView {
                                 cx.stop_propagation();
                             }
                         }),
-                    )
-                    .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
-                        if kind.can_solo()
-                            && ((event.keystroke.key == "f10" && event.keystroke.modifiers.shift)
-                                || event.keystroke.key == "contextmenu")
-                        {
-                            let position = view
-                                .row_bounds
-                                .borrow()
-                                .get(&key_name)
-                                .map(|bounds| point(bounds.left(), bounds.bottom()))
-                                .unwrap_or_else(|| window.mouse_position());
-                            view.open_branch_menu(key_name.clone(), position, window, cx);
-                            cx.stop_propagation();
-                        }
-                    }));
-                div()
+                    );
+                let leaf = div()
                     .id(SharedString::from(format!("reference-leaf-{name}")))
+                    .aria_label(reference.label.clone())
+                    .aria_selected(highlighted)
+                    .when(current, |this| this.aria_description("Branche courante"))
                     .group("reference-leaf")
                     .flex()
                     .items_center()
@@ -1178,12 +1507,11 @@ impl SidebarView {
                     .min_w_0()
                     .child(row)
                     .when(kind.can_solo(), |this| {
+                        // Shift+F10 or the Menu key reach Solo from the keyboard.
                         this.child(
                             div()
                                 .id(SharedString::from(format!("solo-{name}")))
                                 .role(Role::Button)
-                                .focusable()
-                                .tab_index(0)
                                 .aria_label(format!(
                                     "{} : {}",
                                     if soloed { "Retirer du Solo" } else { "Solo" },
@@ -1211,9 +1539,8 @@ impl SidebarView {
                                 .cursor_pointer()
                                 .text_color(rgb(p.muted))
                                 .opacity(0.)
-                                .when(reference_focus.is_focused(window), |this| this.opacity(1.))
+                                .when(show_solo, |this| this.opacity(1.))
                                 .group_hover("reference-leaf", |style| style.opacity(1.))
-                                .focus(|style| style.opacity(1.))
                                 .when(soloed, |this| {
                                     this.text_color(rgb(p.warning))
                                         .bg(rgb(p.warning).opacity(0.12))
@@ -1226,13 +1553,14 @@ impl SidebarView {
                                 .child(Icon::new(IconName::Focus).with_size(px(13.)))
                                 .on_click(cx.listener({
                                     let name = name.clone();
-                                    move |_, _, _, cx| {
+                                    move |view, _, _, cx| {
+                                        view.active_row = Some(index);
                                         cx.emit(SidebarEvent::ToggleSolo(name.clone()))
                                     }
                                 })),
                         )
-                    })
-                    .into_any_element()
+                    });
+                self.tree_item(leaf, index, window).into_any_element()
             }
             SidebarRow::Spacer(height) => div().h(px(height)).into_any_element(),
             SidebarRow::NoReferences => div()
@@ -1250,25 +1578,39 @@ impl SidebarView {
                 .into_any_element(),
             SidebarRow::Worktrees { count, expanded } => self
                 .render_group(
-                    "worktrees-group".into(),
+                    index,
                     "Worktrees",
-                    count,
+                    count.map(|count| (count, count_label(count, "worktree", "worktrees"))),
                     expanded,
                     Some(IconName::FolderGit2),
+                    window,
                 )
-                .on_click(cx.listener(|view, _, _, cx| view.toggle_worktrees(cx)))
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.active_row = Some(index);
+                    view.toggle_worktrees(cx);
+                }))
                 .into_any_element(),
             SidebarRow::Stashes { count, expanded } => self
-                .render_group("stashes-group".into(), "Stashes", count, expanded, None)
-                .on_click(cx.listener(|view, _, _, cx| view.toggle_stashes(cx)))
+                .render_group(
+                    index,
+                    "Stashes",
+                    count.map(|count| (count, count_label(count, "stash", "stashes"))),
+                    expanded,
+                    None,
+                    window,
+                )
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.active_row = Some(index);
+                    view.toggle_stashes(cx);
+                }))
                 .into_any_element(),
-            SidebarRow::Worktree(index) => {
+            SidebarRow::Worktree(item_index) => {
                 let Some(item) = self
                     .context
                     .worktrees
                     .data
                     .as_ref()
-                    .and_then(|list| list.worktrees.get(index))
+                    .and_then(|list| list.worktrees.get(item_index))
                 else {
                     return div().into_any_element();
                 };
@@ -1299,33 +1641,19 @@ impl SidebarView {
                         .unwrap_or_default()
                 );
                 let tooltip_text = format!("{label}\n{description}");
-                let color = if current { p.success } else { p.text };
-                NativeButton::new(SharedString::from(format!("worktree-{path}")))
-                    .disabled(!available)
-                    .role(Role::Button)
-                    .when(available, |this| this.cursor_pointer())
+                // The current worktree shares the current branch's accent.
+                let color = if current { p.accent } else { p.text };
+                let row = self
+                    .context_item(format!("worktree-{path}"))
                     .aria_label(label.clone())
                     .aria_description(description)
                     .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
-                    .flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(28.))
-                    .pl(px(26.))
-                    .pr(px(15.))
-                    .text_size(px(11. + font_offset))
                     .text_color(rgb(color))
                     .opacity(if available { 1. } else { 0.7 })
-                    .when(current, |this| this.bg(rgb(p.success).opacity(0.18)))
-                    .hover(|style| {
-                        style.bg(if current {
-                            rgb(p.success).opacity(0.18)
-                        } else {
-                            rgb(p.accent).opacity(0.1)
-                        })
+                    .when(available, |this| {
+                        this.cursor_pointer()
+                            .hover(|style| style.bg(rgb(p.accent).opacity(0.1)))
                     })
-                    .focus_visible(|style| style.border_1().border_color(rgb(p.accent)))
                     .child(icon(
                         if item.primary {
                             IconName::House
@@ -1339,13 +1667,27 @@ impl SidebarView {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .truncate()
-                            .font_weight(if current {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .child(self.highlighted_label(label, highlights)),
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(if current {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .child(self.highlighted_label(label, highlights)),
+                            )
+                            .child(
+                                // The end of the path names the worktree.
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis_start()
+                                    .text_color(rgb(p.muted))
+                                    .child(display_path(&item.path)),
+                            ),
                     )
                     .when(!item.available, |this| {
                         this.child(icon(IconName::TriangleAlert, 12., p.warning))
@@ -1356,54 +1698,53 @@ impl SidebarView {
                     .when(current, |this| {
                         this.child(icon(IconName::Check, 12., color))
                     })
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.active_row = Some(index);
                         if available {
                             cx.emit(SidebarEvent::OpenWorktree(path.clone()));
                         }
-                    }))
-                    .into_any_element()
+                        cx.notify();
+                    }));
+                self.tree_item(row, index, window).into_any_element()
             }
-            SidebarRow::Stash(index) => {
+            SidebarRow::Stash(item_index) => {
                 let Some(item) = self
                     .context
                     .stashes
                     .data
                     .as_ref()
-                    .and_then(|list| list.stashes.get(index))
+                    .and_then(|list| list.stashes.get(item_index))
                 else {
                     return div().into_any_element();
                 };
                 let sha = item.sha.clone();
-                let title = format!(
-                    "stash@{{ {} }} · {}",
-                    item.index,
-                    item.message.lines().next().unwrap_or("")
+                let selected = sha == self.selected_stash;
+                let name = stash_name(item.index);
+                let (branch, message) = stash_summary(&item.message);
+                let details = stash_details(branch, &compact_date(item.time), &item.author);
+                let description = format!(
+                    "{}\nBase {}",
+                    stash_details(branch, &commit_date(item.time), &item.author),
+                    short_sha(&item.base_sha)
                 );
-                let subtitle = format!("{} · {}", item.author, commit_date(item.time));
-                let base = format!("Base {}", short_sha(&item.base_sha));
-                let tooltip_message = item.message.clone();
-                div()
-                    .id(SharedString::from(format!("stash-{sha}")))
-                    .role(Role::Button)
-                    .focusable()
-                    .tab_index(0)
-                    .aria_label(item.message.clone())
-                    .flex()
-                    .items_start()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(tooltip_message.clone()).build(window, cx)
-                    })
-                    .rounded(RADIUS_MD)
-                    .cursor_pointer()
+                let tooltip_text = format!("{name} · {message}\n{description}");
+                let message = message.to_owned();
+                let row = self
+                    .context_item(format!("stash-{sha}"))
+                    .aria_label(format!("{name} : {message}"))
+                    .aria_description(description)
+                    .aria_selected(selected)
+                    .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
                     .text_color(rgb(p.text))
-                    .when(sha == self.selected_stash, |this| {
-                        this.bg(rgb(p.accent).opacity(0.1))
+                    .cursor_pointer()
+                    .when(selected, |this| this.bg(rgb(p.selection)))
+                    .hover(|style| {
+                        style.bg(if selected {
+                            rgb(p.selection)
+                        } else {
+                            rgb(p.accent).opacity(0.1)
+                        })
                     })
-                    .hover(|style| style.bg(rgb(p.accent).opacity(0.1)))
-                    .focus_visible(|style| style.border_1().border_color(rgb(p.accent)))
                     .child(icon(IconName::Archive, 13., p.text))
                     .child(
                         div()
@@ -1411,38 +1752,32 @@ impl SidebarView {
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
                             .child(
                                 div()
-                                    .truncate()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_size(px(11. + font_offset))
-                                    .child(title),
+                                    .flex()
+                                    .min_w_0()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(name),
+                                    )
+                                    .child(div().min_w_0().flex_1().truncate().child(message)),
                             )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(9. + font_offset))
-                                    .text_color(rgb(p.muted))
-                                    .child(subtitle),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(9. + font_offset))
-                                    .text_color(rgb(p.muted))
-                                    .child(base),
-                            ),
+                            .child(div().truncate().text_color(rgb(p.muted)).child(details)),
                     )
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(SidebarEvent::SelectStash(sha.clone()))
-                    }))
-                    .into_any_element()
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.active_row = Some(index);
+                        cx.emit(SidebarEvent::SelectStash(sha.clone()));
+                        cx.notify();
+                    }));
+                self.tree_item(row, index, window).into_any_element()
             }
             SidebarRow::Notice { text, error } => div()
                 .px(px(12.))
                 .py(px(8.))
-                .text_size(px(9. + font_offset))
+                .text_size(px(11. + font_offset))
                 .text_color(rgb(if error { p.danger } else { p.muted }))
                 .child(text)
                 .into_any_element(),
@@ -1470,9 +1805,9 @@ impl Render for SidebarView {
                 .p_0()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(10. + font_offset))
+                .text_size(px(11. + font_offset))
                 .line_height(relative(1.5)),
-            px((10. + font_offset) * 1.5),
+            px((11. + font_offset) * 1.5),
         );
         let menu = self.menu.clone();
         let wheel_view = cx.weak_entity();
@@ -1480,6 +1815,7 @@ impl Render for SidebarView {
             let _ = wheel_view.update(cx, |view, cx| {
                 view.close_menu(cx);
                 if changed {
+                    view.scroll_epoch = view.scroll_epoch.wrapping_add(1);
                     cx.notify();
                 }
             });
@@ -1489,14 +1825,18 @@ impl Render for SidebarView {
             .border_r_1().border_color(rgb(p.border))
             .child(div().id("sidebar-heading").aria_label("ESPACE DE TRAVAIL")
                 .pt(px(16.)).pb(px(12.)).px(px(if self.width < 210. { 14. } else { 22. }))
-                .text_size(px(9. + font_offset)).text_color(rgb(p.muted))
+                .text_size(px(11. + font_offset)).text_color(rgb(p.muted))
                 // GPUI has no letter-spacing property. Individual glyphs
                 // reproduce the source's 0.1em uppercase heading tracking.
-                .flex().gap(px((9. + font_offset) * 0.1))
+                .flex().gap(px((11. + font_offset) * 0.1))
                 .children("ESPACE DE TRAVAIL".chars().map(|character|div().child(character.to_string()))))
             .when(self.repository.is_some(), |this| this
                 .child(div().mx(px(15.)).mb(px(18.)).px(px(8.)).py(px(7.))
                     .flex().items_center().gap(px(7.)).border_1().border_color(rgb(p.border)).rounded(RADIUS_MD)
+                    .capture_action(cx.listener(|view, _: &MoveDown, window, cx| {
+                        view.focus_tree(window, cx);
+                        cx.stop_propagation();
+                    }))
                     .child(icon(IconName::Search,13.,p.muted)).child(filter_input)
                     .when(!self.reference_state.filter.is_empty(), |this| this.child(
                         NativeButton::new("clear-reference-filter")
@@ -1518,11 +1858,16 @@ impl Render for SidebarView {
                                 view.rebuild_reference_groups();
                                 view.rebuild_rows(cx);
                             })))))
-                .child(div().relative().flex_1().min_h_0().w_full().flex().flex_col()
+                .child(div().id("sidebar-tree").role(Role::Tree).aria_label("Références, worktrees et stashes")
+                    .track_focus(&self.tree_focus).tab_index(0)
+                    .on_key_down(cx.listener(Self::tree_key_down))
+                    .on_action(cx.listener(|view, _: &Escape, window, cx| view.focus_references(window, cx)))
+                    .relative().flex_1().min_h_0().w_full().flex().flex_col()
                     .child(wheel_capture)
-                    .child(list(self.list_state.clone(), move |index, window, cx| {
-                        entity.update(cx, |view,cx| view.render_row(index,window,cx))
-                    }).flex_1().min_h_0().w_full())
+                    .child(div().id(("sidebar-rows", self.scroll_epoch)).flex_1().min_h_0().w_full().flex().flex_col()
+                        .child(list(self.list_state.clone(), move |index, window, cx| {
+                            entity.update(cx, |view,cx| view.render_row(index,window,cx))
+                        }).flex_1().min_h_0().w_full()))
                     .child(scrollbar_theme(Scrollbar::vertical(&self.scroll_handle)
                         .id("sidebar-scrollbar")))))
             .when(self.repository.is_none(), |this| this.child(div().flex_1().min_h_0()
@@ -1616,18 +1961,58 @@ fn same_row_identity(left: &SidebarRow, right: &SidebarRow) -> bool {
     }
 }
 
+/// Follows a row across a rebuild that changed only the rows between the
+/// shared `prefix` and `suffix`. A vanished row hands over to the nearest
+/// navigable row above it, usually its parent.
+fn follow_row(
+    previous: &[SidebarRow],
+    rows: &[SidebarRow],
+    index: usize,
+    prefix: usize,
+    suffix: usize,
+) -> Option<usize> {
+    let row = previous.get(index)?;
+    if index < prefix {
+        return Some(index);
+    }
+    if index >= previous.len() - suffix {
+        return Some(rows.len() - (previous.len() - index));
+    }
+    rows[prefix..rows.len() - suffix]
+        .iter()
+        .position(|candidate| same_row_identity(row, candidate))
+        .map(|offset| prefix + offset)
+        .or_else(|| {
+            (0..index.min(rows.len()))
+                .rev()
+                .find(|&candidate| rows[candidate].navigable())
+        })
+        .or_else(|| rows.iter().position(SidebarRow::navigable))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ReferenceKind, ReferenceNode, ReferenceTreeState, SidebarRow, filtered_worktree_indices,
-        flatten_tree, reference_order, reference_tree, search_highlight_ranges,
+        ROW_HEIGHT, ReferenceKind, ReferenceNode, ReferenceTreeState, SidebarEvent, SidebarRow,
+        SidebarView, TreeKey, TreeMove, filtered_worktree_indices, flatten_tree, follow_row,
+        reference_order, reference_tree, search_highlight_ranges, stash_details, stash_name,
+        stash_summary, tree_move,
     };
-    use crate::virtual_scroll::{RowGeometry, VirtualScrollHandle};
+    use crate::{
+        app::Escape,
+        virtual_scroll::{RowGeometry, VirtualScrollHandle},
+    };
     use gpui_kit::{
-        ListAlignment, ListState, ScrollDelta, component::scroll::ScrollbarHandle, point, px,
+        AnyWindowHandle, AppContext, Entity, Focusable, KeyBinding, ListAlignment, ListState,
+        ScrollDelta, TestAppContext, WindowOptions, component::scroll::ScrollbarHandle, point, px,
+        test::TestWindowExt,
     };
-    use mangrove_core::model::{Reference, WorktreeInfo, WorktreeList};
-    use std::{cmp::Ordering, sync::Arc};
+    use mangrove_core::{
+        Workspace,
+        model::{IndexProgress, Reference, RepositoryInfo, WorktreeInfo, WorktreeList},
+    };
+    use std::{cell::RefCell, cmp::Ordering, rc::Rc, sync::Arc};
+    use tempfile::TempDir;
 
     fn reference(label: &str) -> Arc<Reference> {
         Arc::new(Reference {
@@ -1636,6 +2021,349 @@ mod tests {
             kind: "local".into(),
             sha: "a".repeat(40),
         })
+    }
+
+    fn reference_row(label: &str, depth: usize) -> SidebarRow {
+        SidebarRow::Reference {
+            kind: ReferenceKind::Local,
+            label: label.rsplit('/').next().unwrap().into(),
+            highlights: Vec::new(),
+            reference: reference(label),
+            depth,
+        }
+    }
+
+    fn folder_row(path: &str, depth: usize, closed: bool) -> SidebarRow {
+        SidebarRow::Folder {
+            kind: ReferenceKind::Local,
+            path: path.into(),
+            label: path.rsplit('/').next().unwrap().into(),
+            highlights: Vec::new(),
+            count: 1,
+            depth,
+            closed,
+        }
+    }
+
+    fn notice(text: &str) -> SidebarRow {
+        SidebarRow::Notice {
+            text: text.into(),
+            error: false,
+        }
+    }
+
+    /// Indices: 0 group, 1 folder, 2 feature/a, 3 main, 6 worktrees,
+    /// 8 worktree, 9 stashes; the others are not navigable.
+    fn navigation_rows() -> Vec<SidebarRow> {
+        vec![
+            SidebarRow::Group {
+                kind: ReferenceKind::Local,
+                count: 2,
+                closed: false,
+            },
+            folder_row("feature", 0, false),
+            reference_row("feature/a", 1),
+            reference_row("main", 0),
+            SidebarRow::Spacer(19.),
+            SidebarRow::ContextSeparator { margin_top: 0. },
+            SidebarRow::Worktrees {
+                count: Some(1),
+                expanded: true,
+            },
+            notice("Lecture des worktrees…"),
+            SidebarRow::Worktree(0),
+            SidebarRow::Stashes {
+                count: Some(0),
+                expanded: true,
+            },
+            notice("Aucun stash dans ce dépôt."),
+            SidebarRow::Spacer(24.),
+        ]
+    }
+
+    #[test]
+    fn arrows_visit_only_visible_navigable_rows_in_order() {
+        let rows = navigation_rows();
+        let step = |active, key| tree_move(&rows, active, key);
+        assert_eq!(step(None, TreeKey::Next), Some(TreeMove::Focus(0)));
+        assert_eq!(step(None, TreeKey::Previous), Some(TreeMove::Focus(0)));
+        assert_eq!(step(None, TreeKey::Last), Some(TreeMove::Focus(9)));
+        // A stale index beyond the rows behaves as no active row.
+        assert_eq!(step(Some(40), TreeKey::Next), Some(TreeMove::Focus(0)));
+        assert_eq!(step(Some(4), TreeKey::Next), Some(TreeMove::Focus(0)));
+        for (from, to) in [(0, 1), (1, 2), (2, 3), (3, 6), (6, 8), (8, 9)] {
+            assert_eq!(step(Some(from), TreeKey::Next), Some(TreeMove::Focus(to)));
+            assert_eq!(
+                step(Some(to), TreeKey::Previous),
+                Some(TreeMove::Focus(from))
+            );
+        }
+        assert_eq!(step(Some(9), TreeKey::Next), None);
+        assert_eq!(step(Some(0), TreeKey::Previous), None);
+        assert_eq!(step(Some(8), TreeKey::First), Some(TreeMove::Focus(0)));
+        assert_eq!(step(Some(0), TreeKey::Last), Some(TreeMove::Focus(9)));
+    }
+
+    #[test]
+    fn left_collapses_or_reaches_the_parent_and_right_expands_or_descends() {
+        let mut rows = navigation_rows();
+        let step = |rows: &[SidebarRow], active, key| tree_move(rows, Some(active), key);
+        assert_eq!(step(&rows, 0, TreeKey::Collapse), Some(TreeMove::Toggle(0)));
+        assert_eq!(step(&rows, 1, TreeKey::Collapse), Some(TreeMove::Toggle(1)));
+        assert_eq!(step(&rows, 2, TreeKey::Collapse), Some(TreeMove::Focus(1)));
+        assert_eq!(step(&rows, 3, TreeKey::Collapse), Some(TreeMove::Focus(0)));
+        assert_eq!(step(&rows, 8, TreeKey::Collapse), Some(TreeMove::Focus(6)));
+        assert_eq!(step(&rows, 0, TreeKey::Expand), Some(TreeMove::Focus(1)));
+        assert_eq!(step(&rows, 1, TreeKey::Expand), Some(TreeMove::Focus(2)));
+        // Notices are skipped; an open section without entries has no child.
+        assert_eq!(step(&rows, 6, TreeKey::Expand), Some(TreeMove::Focus(8)));
+        assert_eq!(step(&rows, 9, TreeKey::Expand), None);
+        assert_eq!(step(&rows, 2, TreeKey::Expand), None);
+        assert_eq!(step(&rows, 8, TreeKey::Expand), None);
+
+        rows[1] = folder_row("feature", 0, true);
+        rows.remove(2);
+        assert_eq!(step(&rows, 1, TreeKey::Expand), Some(TreeMove::Toggle(1)));
+        assert_eq!(step(&rows, 1, TreeKey::Collapse), Some(TreeMove::Focus(0)));
+        rows[8] = SidebarRow::Stashes {
+            count: None,
+            expanded: false,
+        };
+        assert_eq!(step(&rows, 8, TreeKey::Expand), Some(TreeMove::Toggle(8)));
+        // A collapsed top-level section has no parent to reach.
+        assert_eq!(step(&rows, 8, TreeKey::Collapse), None);
+    }
+
+    #[test]
+    fn active_row_follows_its_identity_or_falls_back_to_its_parent() {
+        let previous = navigation_rows();
+        let mut rows = previous.clone();
+        rows[1] = folder_row("feature", 0, true);
+        rows.remove(2);
+        // Rows 0..2 are shared, as are the last nine.
+        assert_eq!(follow_row(&previous, &rows, 1, 2, 9), Some(1));
+        assert_eq!(follow_row(&previous, &rows, 8, 2, 9), Some(7));
+        assert_eq!(follow_row(&previous, &rows, 2, 2, 9), Some(1));
+
+        let mut reordered = previous.clone();
+        reordered.swap(2, 3);
+        assert_eq!(follow_row(&previous, &reordered, 2, 2, 8), Some(3));
+        assert_eq!(follow_row(&previous, &[], 2, 0, 0), None);
+        assert_eq!(follow_row(&previous, &rows, 40, 2, 9), None);
+    }
+
+    #[test]
+    fn stash_rows_separate_git_prefixes_from_messages() {
+        assert_eq!(
+            stash_summary("On main: WIP essai de graphe compact"),
+            (Some("main"), "WIP essai de graphe compact")
+        );
+        assert_eq!(
+            stash_summary("WIP on feature/ui: 1a2b3c4 Fix layout\n\nBody"),
+            (Some("feature/ui"), "1a2b3c4 Fix layout")
+        );
+        assert_eq!(
+            stash_summary("WIP on (no branch): 1a2b3c4 Detached"),
+            (Some("(no branch)"), "1a2b3c4 Detached")
+        );
+        assert_eq!(stash_summary("On main:"), (Some("main"), ""));
+        assert_eq!(stash_summary("autostash"), (None, "autostash"));
+        assert_eq!(
+            stash_summary("Once upon a time"),
+            (None, "Once upon a time")
+        );
+        assert_eq!(stash_summary(""), (None, ""));
+        assert_eq!(stash_name(0), "stash@{0}");
+        assert_eq!(stash_name(12), "stash@{12}");
+        assert_eq!(
+            stash_details(Some("main"), "9 oct. 14:32", "Ada"),
+            "main · 9 oct. 14:32 · Ada"
+        );
+        assert_eq!(
+            stash_details(None, "9 oct. 14:32", "Ada"),
+            "9 oct. 14:32 · Ada"
+        );
+    }
+
+    #[test]
+    fn dense_rows_keep_text_inside_their_height_at_every_zoom() {
+        for offset in [0., 1., 5.] {
+            let line = (11. + offset) * 1.5;
+            for row in navigation_rows() {
+                let height = f32::from(row.height_hint(offset));
+                match row {
+                    SidebarRow::Folder { .. } | SidebarRow::Reference { .. } => {
+                        assert_eq!(height, ROW_HEIGHT);
+                        assert!(line <= height);
+                    }
+                    SidebarRow::Worktree(_) | SidebarRow::Stash(_) => {
+                        assert!(2. * line <= height)
+                    }
+                    SidebarRow::Group { .. }
+                    | SidebarRow::Worktrees { .. }
+                    | SidebarRow::Stashes { .. } => assert!(line <= height),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn open_sidebar(cx: &mut TestAppContext) -> (TempDir, AnyWindowHandle, Entity<SidebarView>) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.bind_keys([KeyBinding::new("escape", Escape, None)]));
+        let cache = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Workspace::new(cache.path().join("cache")).unwrap());
+        let (window, view) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    cx.new(|cx| SidebarView::new(engine, window, cx))
+                })
+            })
+            .unwrap();
+        let references = ["feature/a", "feature/b", "main"]
+            .into_iter()
+            .map(|label| (*reference(label)).clone())
+            .chain([Reference {
+                name: "refs/tags/v1".into(),
+                label: "v1".into(),
+                kind: "tag".into(),
+                sha: "b".repeat(40),
+            }])
+            .collect();
+        let info = RepositoryInfo {
+            id: "repository".into(),
+            name: "repository".into(),
+            path: "/repository".into(),
+            head: None,
+            head_name: "main".into(),
+            references,
+            solo_refs: Vec::new(),
+            remotes: Vec::new(),
+            index: IndexProgress {
+                index_run: String::new(),
+                indexed: 0,
+                complete: true,
+                error: None,
+            },
+        };
+        view.update(cx, |view, cx| view.set_repository(Arc::new(info), cx));
+        (cache, window, view)
+    }
+
+    fn press(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .unwrap();
+    }
+
+    fn active_label(cx: &mut TestAppContext, view: &Entity<SidebarView>) -> String {
+        view.read_with(cx, |view, _| {
+            match view.active_row.map(|index| &view.rows[index]) {
+                Some(SidebarRow::Group { kind, .. }) => kind.title().into(),
+                Some(SidebarRow::Folder { path, .. }) => format!("{path}/"),
+                Some(SidebarRow::Reference { reference, .. }) => reference.label.clone(),
+                Some(SidebarRow::Worktrees { .. }) => "Worktrees".into(),
+                Some(SidebarRow::Stashes { .. }) => "Stashes".into(),
+                other => format!("{:?}", other.map(SidebarRow::level)),
+            }
+        })
+    }
+
+    #[gpui_kit::test]
+    fn keyboard_walks_the_tree_from_the_filter_and_back(cx: &mut TestAppContext) {
+        let (_cache, window, view) = open_sidebar(cx);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(format!("{event:?}"));
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.focus_references(window, cx));
+        })
+        .unwrap();
+        let focus = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                let view = view.read(cx);
+                (
+                    view.tree_focus.is_focused(window),
+                    view.filter_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(focus(cx), (false, true));
+
+        press(cx, window, "down");
+        assert_eq!(focus(cx), (true, false));
+        assert_eq!(active_label(cx, &view), "Branches locales");
+        press(cx, window, "down");
+        assert_eq!(active_label(cx, &view), "feature/");
+        press(cx, window, "left");
+        assert!(view.read_with(cx, |view, _| {
+            view.reference_state
+                .folder_closed(ReferenceKind::Local, "feature")
+        }));
+        assert_eq!(active_label(cx, &view), "feature/");
+        press(cx, window, "down");
+        assert_eq!(active_label(cx, &view), "main");
+        press(cx, window, "up");
+        press(cx, window, "right");
+        press(cx, window, "right");
+        assert_eq!(active_label(cx, &view), "feature/a");
+        press(cx, window, "enter");
+        press(cx, window, "left");
+        assert_eq!(active_label(cx, &view), "feature/");
+        press(cx, window, "end");
+        assert_eq!(active_label(cx, &view), "Stashes");
+        press(cx, window, "up");
+        assert_eq!(active_label(cx, &view), "Worktrees");
+        press(cx, window, "home");
+        assert_eq!(active_label(cx, &view), "Branches locales");
+        assert_eq!(
+            events.borrow().as_slice(),
+            [format!(
+                "{:?}",
+                SidebarEvent::NavigateReference("refs/heads/feature/a".into())
+            )]
+        );
+
+        press(cx, window, "escape");
+        assert_eq!(focus(cx), (false, true));
+        // Leaving and re-entering the tree keeps its place.
+        press(cx, window, "down");
+        assert_eq!(active_label(cx, &view), "Branches locales");
+        press(cx, window, "up");
+        assert_eq!(focus(cx), (false, true));
+    }
+
+    #[gpui_kit::test]
+    fn view_state_restores_collapsed_sections_and_scroll(cx: &mut TestAppContext) {
+        let (_cache, window, view) = open_sidebar(cx);
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        let saved = view.update(cx, |view, cx| {
+            view.reference_state.toggle_group(ReferenceKind::Tag);
+            view.reference_state
+                .toggle_folder(ReferenceKind::Local, "feature".into());
+            view.rebuild_rows(cx);
+            view.view_state()
+        });
+        view.update(cx, |view, cx| {
+            view.reference_state.toggle_group(ReferenceKind::Tag);
+            view.rebuild_rows(cx);
+            assert_ne!(view.view_state(), saved);
+            view.restore_view_state(saved.clone(), cx);
+            assert_eq!(view.view_state(), saved);
+            assert!(view.reference_state.group_closed(ReferenceKind::Tag));
+            assert!(
+                view.reference_state
+                    .folder_closed(ReferenceKind::Local, "feature")
+            );
+        });
     }
 
     #[test]
@@ -1843,7 +2571,9 @@ mod tests {
         let handle = VirtualScrollHandle::measured(list.clone());
         handle.set_heights(rows.iter().map(|row| row.height_hint(1.)));
         // No window or rendered item is required to know the complete extent.
-        assert_eq!(handle.content_size().height, px(320_230.5));
+        // 28 px sections, 10 000 × 28 px references, spacers, separator and
+        // two 44 px context items.
+        assert_eq!(handle.content_size().height, px(280_223.));
         handle.set_offset(point(px(0.), -handle.content_size().height));
         assert_eq!(list.logical_scroll_top().item_ix, rows.len());
 
@@ -1861,20 +2591,20 @@ mod tests {
     fn wheel_after_drag_into_unmeasured_rows_moves_only_the_requested_pixels() {
         let list = ListState::new(10_000, ListAlignment::Top, px(200.));
         let handle = VirtualScrollHandle::measured(list.clone());
-        handle.set_heights((0..10_000).map(|_| px(32.)));
-        handle.set_offset(point(px(0.), px(-160_003.)));
+        handle.set_heights((0..10_000).map(|_| px(ROW_HEIGHT)));
+        handle.set_offset(point(px(0.), px(-140_003.)));
         assert_eq!(list.logical_scroll_top().item_ix, 5_000);
         for _ in 0..6 {
             assert!(handle.scroll_wheel(ScrollDelta::Pixels(point(px(0.), px(-40.))), false));
         }
-        assert_eq!(handle.offset().y, px(-160_243.));
-        assert_eq!(list.logical_scroll_top().item_ix, 5_007);
+        assert_eq!(handle.offset().y, px(-140_243.));
+        assert_eq!(list.logical_scroll_top().item_ix, 5_008);
         assert_eq!(list.logical_scroll_top().offset_in_item, px(19.));
 
         assert!(handle.scroll_wheel(ScrollDelta::Lines(point(0., 3.)), false));
-        assert_eq!(handle.offset().y, px(-160_183.));
+        assert_eq!(handle.offset().y, px(-140_183.));
         assert!(!handle.scroll_wheel(ScrollDelta::Pixels(point(px(40.), px(0.))), false));
-        assert_eq!(handle.offset().y, px(-160_183.));
+        assert_eq!(handle.offset().y, px(-140_183.));
         handle.scroll_wheel(ScrollDelta::Pixels(point(px(0.), px(1_000_000.))), false);
         assert_eq!(list.logical_scroll_top().item_ix, 0);
         assert_eq!(list.logical_scroll_top().offset_in_item, px(0.));
