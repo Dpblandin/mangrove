@@ -57,7 +57,7 @@ Les jetons des intégrations sont dans le coffre de l’OS, sous le service `dev
 
 La version est commune à l’application et aux crates du moteur. Pendant la série 0.x, une version avec des nouveautés incrémente le deuxième chiffre (0.2.0) ; une version de corrections seules incrémente le troisième (0.2.1).
 
-1. Installer [git-cliff](https://git-cliff.org/) : `brew install git-cliff` ou `cargo install git-cliff`.
+1. Le script génère le changelog avec [git-cliff](https://git-cliff.org/). S’il n’est pas installé, il lance la version 2.14.2 via `npx`, qui demande seulement Node.js.
 2. Depuis `main`, à jour et sans modification locale :
 
    ```sh

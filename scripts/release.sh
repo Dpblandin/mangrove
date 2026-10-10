@@ -23,8 +23,13 @@ if ! printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|
 fi
 tag="v$version"
 cd -- "$(dirname -- "$0")/.."
-if ! command -v git-cliff >/dev/null 2>&1; then
-  echo 'git-cliff est requis : brew install git-cliff (ou cargo install git-cliff).' >&2
+# An installed git-cliff wins; otherwise npx runs a pinned release without installing it.
+if command -v git-cliff >/dev/null 2>&1; then
+  cliff() { git-cliff "$@"; }
+elif command -v npx >/dev/null 2>&1; then
+  cliff() { npx --yes git-cliff@2.14.2 "$@"; }
+else
+  echo 'git-cliff ou Node.js est requis : brew install git-cliff (ou brew install node).' >&2
   exit 1
 fi
 if [ "$(git branch --show-current)" != main ]; then
@@ -51,7 +56,7 @@ if [ -n "$previous" ] && ! printf '%s\n' "${previous#v}" "$version" | awk -F. '
   printf 'La version %s doit suivre la dernière release %s.\n' "$version" "$previous" >&2
   exit 1
 fi
-if ! git-cliff --unreleased --tag "$tag" --strip all 2>/dev/null | grep -q '^### '; then
+if ! cliff --unreleased --tag "$tag" --strip all 2>/dev/null | grep -q '^### '; then
   echo 'Aucun commit feat, fix ou perf depuis la dernière release : rien à publier.' >&2
   exit 1
 fi
@@ -68,9 +73,9 @@ cargo metadata --format-version 1 >/dev/null
 cargo metadata --format-version 1 --manifest-path src-gpui/Cargo.toml >/dev/null
 
 if [ -f CHANGELOG.md ]; then
-  git-cliff --unreleased --tag "$tag" --prepend CHANGELOG.md
+  cliff --unreleased --tag "$tag" --prepend CHANGELOG.md
 else
-  git-cliff --unreleased --tag "$tag" --output CHANGELOG.md
+  cliff --unreleased --tag "$tag" --output CHANGELOG.md
 fi
 sh scripts/release-notes.sh "$version" >/dev/null
 
