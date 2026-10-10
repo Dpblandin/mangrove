@@ -2665,11 +2665,13 @@ impl InspectorView {
                     Scrollbar::vertical(&self.message_scroll).id("commit-message-scrollbar"),
                 )),
         );
+        // A single parent sits beside the author; a merge's parents get their
+        // own line so the author block keeps its height.
+        let inline_parent = details.parents.len() == 1;
         let parents = (!details.parents.is_empty()).then(|| {
             div()
                 .flex_shrink_0()
-                .max_w(px(120. + o * 4.))
-                .justify_end()
+                .when(inline_parent, |s| s.max_w(px(120. + o * 4.)).justify_end())
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -2716,6 +2718,11 @@ impl InspectorView {
                 }))
                 .into_any_element()
         });
+        let (parents_inline, merge_parents) = if inline_parent {
+            (parents, None)
+        } else {
+            (None, parents)
+        };
         panel = panel.child(
             div()
                 .flex_shrink_0()
@@ -2730,7 +2737,7 @@ impl InspectorView {
                     &details.email,
                     details.author_time,
                     "Auteur",
-                    parents,
+                    parents_inline,
                 ))
                 .when(
                     details.author != details.committer
@@ -2754,6 +2761,7 @@ impl InspectorView {
                             .child("Premier commit du dépôt"),
                     )
                 })
+                .children(merge_parents)
                 .when(details.parents.len() > 1, |s| {
                     s.child(
                         div()
