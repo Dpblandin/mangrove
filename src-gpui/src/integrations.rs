@@ -1668,6 +1668,13 @@ impl IntegrationsView {
         }
     }
 
+    /// A profile whose credentials are leaving the vault cannot become active.
+    fn select_profile(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.deleting_profile.as_ref() != Some(&id) {
+            cx.emit(IntegrationsEvent::ProfileSelected(id));
+        }
+    }
+
     fn can_delete_profile(&self, id: &str) -> bool {
         id != self.profile.id && self.profiles.len() > 1 && self.deleting_profile.is_none()
     }
@@ -2018,12 +2025,17 @@ fn clone_directory_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IntegrationsEvent, ProviderEdition, accepts_response, bounded,
-        configured_browser_client_id, disconnect_completion,
+        IntegrationsEvent, IntegrationsSection, IntegrationsView, ProviderEdition,
+        accepts_response, bounded, configured_browser_client_id, disconnect_completion,
+    };
+    use crate::theme::{Palette, ThemeId};
+    use gpui_kit::{
+        AnyWindowHandle, AppContext, Entity, TestAppContext, WindowOptions, test::TestWindowExt,
     };
     use mangrove_remote::{
         Account, Authentication, Profile, ProfileSession, Provider, RemoteError,
     };
+    use std::{cell::RefCell, rc::Rc};
 
     #[test]
     fn repository_options_keep_full_names_and_stable_ids_in_namespace_groups() {
@@ -2307,6 +2319,81 @@ mod tests {
         assert!(!accepts_response(2, 2, "personal", "professional"));
         // Switching away and back still changes the generation.
         assert!(!accepts_response(2, 4, "personal", "personal"));
+    }
+
+    fn open_integrations(
+        cx: &mut TestAppContext,
+    ) -> (
+        AnyWindowHandle,
+        Entity<IntegrationsView>,
+        Rc<RefCell<Vec<IntegrationsEvent>>>,
+    ) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    cx.new(|cx| {
+                        let mut view = IntegrationsView::new(
+                            Profile::new("personal", "Personnel"),
+                            Palette::for_theme(ThemeId::Classic),
+                            0.,
+                            window,
+                            cx,
+                        );
+                        view.set_profiles(
+                            vec![
+                                Profile::new("personal", "Personnel"),
+                                Profile::new("work", "Travail"),
+                            ],
+                            window,
+                            cx,
+                        );
+                        view.set_section(IntegrationsSection::Profiles, cx);
+                        view
+                    })
+                })
+            })
+            .unwrap();
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &IntegrationsEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach()
+        });
+        (window, view, events)
+    }
+
+    fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
+        cx.update_window(window, |_, window, cx| window.click(id, cx))
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn a_profile_cannot_be_selected_while_its_deletion_runs(cx: &mut TestAppContext) {
+        let (window, view, events) = open_integrations(cx);
+        view.update(cx, |view, cx| {
+            view.deleting_profile = Some("work".into());
+            cx.notify();
+        });
+        click(cx, window, "profile-work");
+        view.update(cx, |view, cx| view.select_profile("work".into(), cx));
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty());
+
+        view.update(cx, |view, cx| {
+            view.deleting_profile = None;
+            cx.notify();
+        });
+        click(cx, window, "profile-work");
+        assert!(matches!(
+            &events.borrow()[..],
+            [IntegrationsEvent::ProfileSelected(id)] if id == "work"
+        ));
     }
 
     #[test]
