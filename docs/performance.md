@@ -69,6 +69,38 @@ target/release/examples/large_diff_benchmark fixture /tmp/large-rewrite 64 text 
 /usr/bin/time -l target/release/examples/large_diff_benchmark case /tmp/large-rewrite
 ```
 
+## Avance et retard des branches suivies
+
+Mesure du 10 octobre 2026, Apple M4 Pro, 48 Gio de RAM, macOS ARM, Rust release avec ThinLTO. `scripts/create-tracking-fixture.mjs` crée un dépôt de 121 227 commits, dont 104 799 accessibles depuis main, et 5 000 branches locales suivies. Le générateur place 80 % des branches près de leur upstream (jusqu’à 10 commits en avance et 40 commits de main en retard), 15 % de 1 000 à 10 000 commits en retard, 2,5 % à environ 50 000 et 2,5 % sur un historique sans ancêtre commun. Des merges octopus élargissent les 20 000 derniers commits et gonflent les retards : 3 715 paires (74 %) comptent 50 commits au plus, 876 de 51 à 10 000 et 409 davantage. Le pack est réécrit comme par `git gc`. `tracking_benchmark` attend la fin de l’indexation, puis mesure dans un même processus, avec le cache de l’OS chaud : 30 résolutions des upstreams, chaque paire seule avec `graph_ahead_behind` sur un même dépôt libgit2, puis toutes les paires par appels de 100 ms comme l’interface, à froid, à chaud et après le déplacement d’un upstream sur cinquante. Ces chiffres concernent le moteur seul.
+
+| Opération                                        |             Sans commit-graph |             Avec commit-graph |
+| ------------------------------------------------ | ----------------------------: | ----------------------------: |
+| Résolution des 5 000 upstreams, p50 / p95        |                40,4 / 41,6 ms |                41,2 / 50,3 ms |
+| Paire de 50 commits au plus, p50 / p95           |              0,014 / 0,038 ms |              0,014 / 0,038 ms |
+| Paire de 51 à 10 000 commits, p50 / p95          |                  1,1 / 3,5 ms |                  1,1 / 3,5 ms |
+| Paire de plus de 10 000 commits, p50 / p95 / max |              20 / 45 / 169 ms |              20 / 45 / 181 ms |
+| Comptage à froid par appels de 100 ms            | 10,2 s, 87 appels, max 232 ms | 10,4 s, 91 appels, max 226 ms |
+| Comptage à chaud                                 |              0,64 ms, 1 appel |              0,65 ms, 1 appel |
+| Après le déplacement de 100 upstreams            |              0,57 s, 4 appels |              0,58 s, 4 appels |
+
+Sur cette fixture, aucune paire n’atteint une seconde : un parcours interruptible propre à Mangrove ou un commit-graph écrit par l’application ne sont pas nécessaires à cette échelle. La paire la plus lente, entre 169 et 212 ms selon les exécutions, est la première paire longue du processus, avant que libgit2 garde les commits lus dans son cache d’objets. Les 409 paires de plus de 10 000 commits représentent 88 % du comptage à froid. Un appel dépasse sa deadline de la durée d’une paire, hors du thread d’interface.
+
+Sur une copie agrandie à 471 228 commits, une paire distante d’environ 350 000 commits prend environ 1,37 s. Elle est comptée en arrière-plan, sans bloquer l’interface ni les autres badges, mais dépasse la seconde : un parcours interruptible ou un commit-graph écrit par l’application restent des suites possibles. Sur cette copie, l’indexation complète prend de 180 à 200 s, avec ou sans comptage en parallèle.
+
+Le commit-graph ne change pas ces temps. libgit2 y lit les parents sans décompresser les commits, mais son comptage visite de toute façon chaque commit entre les deux pointes et leur base commune, et le cache d’objets rend la lecture des commits suivants peu coûteuse. Le fetch de Mangrove, qui n’écrit pas de commit-graph, ne perd donc rien ici. Rouvrir le dépôt à chaque appel perdait ce cache : une première version comptait la même fixture en 76 s, avant réécriture du pack ; le dépôt reste désormais ouvert jusqu’à la fin d’un comptage.
+
+Le pic RSS du processus atteint 254 Mio, indexation de 121 000 commits et deux dépôts libgit2 compris ; le cache d’objets de libgit2 est borné à 256 Mio par défaut pour tout le processus. Les machines plus lentes, le cache de l’OS froid et les dépôts réels restent à mesurer. Les sorties agrégées sont dans [performance-tracking.json](performance-tracking.json).
+
+```sh
+node scripts/create-tracking-fixture.mjs .mangrove-dev/tracking
+node scripts/create-tracking-fixture.mjs .mangrove-dev/tracking-graph --commit-graph
+cargo build --release --locked -p mangrove-core --example tracking_benchmark
+/usr/bin/time -l target/release/examples/tracking_benchmark .mangrove-dev/tracking
+/usr/bin/time -l target/release/examples/tracking_benchmark .mangrove-dev/tracking-graph
+```
+
+Le générateur refuse un dossier existant. Le benchmark lit aussi un dépôt local existant sans le modifier ; il ne publie ni chemin, ni nom de branche, ni SHA.
+
 ## Contenu, historique de fichier et blame
 
 Mesure du 30 septembre 2026, Apple M4 Pro, 48 Gio de RAM, macOS ARM, Rust release avec ThinLTO. Le benchmark `file_benchmark` attend la fin de l’indexation avant de mesurer. Chaque opération utilise un processus distinct et un cache applicatif temporaire hors du dépôt source : une première lecture, puis 30 lectures, cache filesystem chaud. Les chiffres concernent le moteur natif ; ils excluent le transport vers l'interface, son rendu et sa coloration. La QA historique du bundle de l'époque est décrite dans [qa-file-browser.md](qa-file-browser.md) ; la QA GPUI est décrite dans le [README natif](../src-gpui/README.md).
