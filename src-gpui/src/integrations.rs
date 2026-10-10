@@ -354,7 +354,6 @@ impl IntegrationsView {
             });
         }
         let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
-        let oauth_config_open = client_id.is_empty();
         let repository_menu_data = Rc::new(RefCell::new(RepositoryMenuData::default()));
         let options = RepositoryMenu::new(
             repository_menu_data.clone(),
@@ -442,7 +441,7 @@ impl IntegrationsView {
                     .masked(true)
             }),
             browser_connection: true,
-            oauth_config_open,
+            oauth_config_open: oauth_config_required(ProviderEdition::GitLab),
             github_private_repos: false,
             github_authorization: None,
             key_path,
@@ -636,7 +635,7 @@ impl IntegrationsView {
             self.browser_connection = true;
             self.github_private_repos = false;
             let client_id = configured_browser_client_id(&profile, ProviderEdition::GitLab);
-            self.oauth_config_open = client_id.is_empty();
+            self.oauth_config_open = oauth_config_required(ProviderEdition::GitLab);
             self.client_id
                 .update(cx, |input, cx| input.set_value(client_id, window, cx));
             self.server.update(cx, |input, cx| {
@@ -735,7 +734,7 @@ impl IntegrationsView {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         let client_id = configured_browser_client_id(&self.profile, edition);
-        self.oauth_config_open = client_id.is_empty();
+        self.oauth_config_open = oauth_config_required(edition);
         self.client_id
             .update(cx, |input, cx| input.set_value(client_id, window, cx));
         self.message = None;
@@ -798,7 +797,7 @@ impl IntegrationsView {
             if client_id.is_empty() {
                 self.oauth_config_open = true;
                 self.error = Some(format!(
-                    "Créez une application {} puis saisissez son ID public.",
+                    "Créez une application {} puis saisissez son ID public dans la configuration avancée.",
                     provider_label(provider)
                 ));
                 cx.notify();
@@ -819,7 +818,8 @@ impl IntegrationsView {
                 if secret.is_empty() {
                     self.oauth_config_open = true;
                     self.error = Some(
-                        "Saisissez le Secret du consumer OAuth Bitbucket dans Mangrove.".into(),
+                        "Saisissez le Secret du consumer OAuth Bitbucket dans la configuration avancée."
+                            .into(),
                     );
                     cx.notify();
                     return;
@@ -1895,6 +1895,12 @@ fn expand_home(value: &str) -> PathBuf {
         Some(home) => home.join(rest),
         None => PathBuf::from(value),
     }
+}
+
+/// Bitbucket always needs its consumer secret. GitHub and GitLab keep their
+/// application settings folded until a connection attempt requires them.
+fn oauth_config_required(edition: ProviderEdition) -> bool {
+    edition == ProviderEdition::BitbucketCloud
 }
 
 /// Two letters keep single-word names apart, such as Personnel and Professionnel.

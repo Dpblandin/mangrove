@@ -39,7 +39,7 @@ Une application OAuth doit d’abord être enregistrée sur le serveur utilisé.
 
 Après **Save application**, copier **Application ID** dans le champ de Mangrove, puis choisir **Se connecter avec GitLab**. Le champ **Secret** n’est pas utilisé. L’ID désigne l’application OAuth, et non un token personnel ; les utilisateurs d’une même application enregistrée peuvent utiliser son ID. Sur une instance auto-hébergée, enregistrer l’application sur cette instance.
 
-`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. Quand l’ID est configuré, le bouton de connexion reste visible et les instructions sont repliées sous **Configuration OAuth**.
+`MANGROVE_GITLAB_CLIENT_ID` préremplit l’ID public au lancement local. Un compte OAuth déjà connecté fournit aussi son ID aux prochaines connexions GitLab.com du même profil. L’ID et les instructions sont repliés sous **Configuration avancée** ; cette section s’ouvre d’elle-même si la connexion est lancée sans ID.
 
 Le renouvellement des tokens OAuth s’effectue avant les lectures quand leur expiration approche ; l’accès et le refresh token restent dans une seule entrée du coffre du compte. Déconnecter supprime cette entrée locale. Pour retirer aussi l’autorisation côté GitLab, révoquer Mangrove dans **Authorized applications** sur GitLab. Mangrove ne génère ni n’ajoute de clés SSH ; il utilise les clés ou agents déjà disponibles.
 
@@ -51,7 +51,7 @@ Sources : [création d’application et droits](https://docs.gitlab.com/integrat
 
 Mangrove utilise le **Device Flow** : GitHub s’ouvre dans le navigateur système, puis vous saisissez le code temporaire affiché dans Mangrove et autorisez l’application. Aucun mot de passe ni secret d’application n’est demandé dans Mangrove. Le code peut être copié ou la page GitHub rouverte depuis la carte d’autorisation ; le bouton confirme la copie avec **Code copié !**. Annuler ou changer de contexte termine l’attente et retire ce code de l’écran.
 
-Dans **Intégrations → GitHub.com**, ouvrir la configuration puis **Créer l’application dans GitHub**, ou [New OAuth App](https://github.com/settings/applications/new) :
+Dans **Intégrations → GitHub.com**, ouvrir **Configuration avancée** puis **Créer l’application dans GitHub**, ou [New OAuth App](https://github.com/settings/applications/new) :
 
 - **Application name** : `Mangrove`.
 - **Homepage URL** : `https://github.com/Dpblandin/mangrove`.
@@ -73,7 +73,7 @@ Sources : [création de l’application](https://docs.github.com/en/apps/oauth-a
 
 ## Connexion Bitbucket Cloud dans le navigateur
 
-Dans **Intégrations → Bitbucket Cloud**, renseigner l’URL du workspace, par exemple `https://bitbucket.org/votre-workspace`. Ouvrir **Configuration OAuth**, puis **Créer l’application dans Bitbucket Cloud** pour rejoindre **Workspace settings → OAuth consumers**. Créer un consumer :
+Dans **Intégrations → Bitbucket Cloud**, renseigner l’URL du workspace, par exemple `https://bitbucket.org/votre-workspace`. La **Configuration avancée**, ouverte par défaut pour Bitbucket Cloud, propose **Créer l’application dans Bitbucket Cloud** pour rejoindre **Workspace settings → OAuth consumers**. Créer un consumer :
 
 - **Name** : `Mangrove`.
 - **Callback URL** : exactement `http://127.0.0.1:47321/oauth/callback`, sélectionnable et copiable depuis Mangrove.

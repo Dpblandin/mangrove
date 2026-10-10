@@ -1021,43 +1021,65 @@ impl IntegrationsView {
                 ),
             )
             .child(
+                div().flex().child(
+                    link_action(
+                        "oauth-personal-token",
+                        "Utiliser un token personnel",
+                        p,
+                        offset,
+                    )
+                    .disabled(self.pending.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_browser_connection(false, window, cx)
+                    })),
+                ),
+            )
+            .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap(px(8.))
+                    .pt(px(12.))
+                    .border_t_1()
+                    .border_color(rgb(p.border))
                     .child(
-                        link_action(
-                            "oauth-application-config",
-                            if self.oauth_config_open {
-                                "Masquer la configuration OAuth"
+                        Button::new("oauth-advanced-configuration")
+                            .gap(px(6.))
+                            .px(px(4.))
+                            .py(px(6.))
+                            .border_1()
+                            .border_color(transparent_black())
+                            .rounded(RADIUS_MD)
+                            .text_size(px(12. + offset))
+                            .text_color(rgb(p.muted))
+                            .cursor_pointer()
+                            .accessibility_label(if self.oauth_config_open {
+                                "Masquer la configuration avancée"
                             } else {
-                                "Configuration OAuth"
-                            },
-                            p,
-                            offset,
-                        )
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.oauth_config_open = !this.oauth_config_open;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        link_action(
-                            "oauth-personal-token",
-                            "Utiliser un token personnel",
-                            p,
-                            offset,
-                        )
-                        .disabled(self.pending.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_browser_connection(false, window, cx)
-                        })),
+                                "Afficher la configuration avancée"
+                            })
+                            .hover(move |style| style.text_color(rgb(p.text)))
+                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                            .styles(|styles| {
+                                styles.disabled(|style| style.opacity(0.5).cursor_default())
+                            })
+                            .disabled(self.pending.is_some())
+                            .child(icon(
+                                if self.oauth_config_open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                14.,
+                                p.muted,
+                            ))
+                            .child("Configuration avancée")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.oauth_config_open = !this.oauth_config_open;
+                                cx.notify();
+                            })),
                     ),
             );
         if self.oauth_config_open {
-            let mut configuration = div().flex().flex_col().gap(px(12.)).pt(px(16.))
-                .border_t_1().border_color(rgb(p.border))
+            let mut configuration = div().flex().flex_col().gap(px(12.))
                 .child(field(&self.client_id, "oauth-client-id", if github { "Client ID public" } else if bitbucket { "Consumer Key publique" } else { "Application ID public" }, p, offset))
                 .child(note(
                     if github {
