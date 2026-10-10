@@ -1,6 +1,5 @@
 use crate::{
-    command_palette::shortcut_label,
-    format::format_count,
+    format::{count_label, format_count, shortcut_label},
     graph::{self, ROW_HEIGHT},
     history::{
         HistoryCache, HistoryPage, HistoryReadSlots, PAGE_SIZE, PageRequests, PositionRead,
@@ -1436,8 +1435,12 @@ impl HistoryView {
             .track_focus(&self.working_focus)
             .tab_index(0)
             .aria_label(format!(
-                "Modifications non commitées, {} changements",
-                format_count(self.working.staged + self.working.unstaged)
+                "Modifications locales, {}",
+                count_label(
+                    self.working.staged + self.working.unstaged,
+                    "changement",
+                    "changements"
+                )
             ))
             .aria_toggled(if self.working.selected {
                 Toggled::True
@@ -2286,18 +2289,6 @@ fn with_alpha(color: u32, alpha: f32) -> Hsla {
     value
 }
 
-pub fn short_date(timestamp: i64) -> String {
-    use chrono::Datelike;
-    let Some(date) = chrono::DateTime::from_timestamp(timestamp, 0) else {
-        return "Date inconnue".into();
-    };
-    let date = date.with_timezone(&chrono::Local);
-    let months = [
-        "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.",
-        "déc.",
-    ];
-    format!("{:02} {}", date.day(), months[date.month0() as usize])
-}
 #[cfg(test)]
 mod tests {
     use super::{
