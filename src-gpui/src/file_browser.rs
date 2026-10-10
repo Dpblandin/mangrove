@@ -1104,28 +1104,18 @@ impl FileBrowser {
                             })),
                     )
                     .child(
-                        action(("history-diff", index), "Diff", false, false, p, o)
-                            .on_click(cx.listener(move |v, _, _, cx| {
+                        action(("history-diff", index), "Diff", false, false, p, o).on_click(
+                            cx.listener(move |v, _, _, cx| {
                                 v.select_revision(index, FileView::Diff, cx)
-                            }))
-                            .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.select_revision(index, FileView::Diff, cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            }),
+                        ),
                     )
                     .child(
-                        action(("history-content", index), "Fichier", false, false, p, o)
-                            .on_click(cx.listener(move |v, _, _, cx| {
+                        action(("history-content", index), "Fichier", false, false, p, o).on_click(
+                            cx.listener(move |v, _, _, cx| {
                                 v.select_revision(index, FileView::File, cx)
-                            }))
-                            .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.select_revision(index, FileView::File, cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            }),
+                        ),
                     )
                     .into_any_element()
             })
@@ -1238,13 +1228,7 @@ impl Render for FileBrowser {
                             .hover(move |s| s.bg(rgb(p.surface)))
                             .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .child(icon(IconName::X, 16., p.muted))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close)))
-                            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    cx.emit(FileBrowserEvent::Close);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close))),
                     ),
             )
             .child(
@@ -1263,13 +1247,7 @@ impl Render for FileBrowser {
                         action("return-history", "", false, false, p, o)
                             .aria_label("Retour à l’historique du dépôt")
                             .child(icon(IconName::ArrowLeft, 13., p.text))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close)))
-                            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    cx.emit(FileBrowserEvent::Close);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close))),
                     )
                     .children((!original && self.source.target.is_some()).then(|| {
                         action(
@@ -1288,14 +1266,6 @@ impl Render for FileBrowser {
                             o,
                         )
                         .on_click(cx.listener(|v, _, _, cx| v.restore(cx)))
-                        .on_key_down(cx.listener(
-                            |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.restore(cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        ))
                     }))
                     .children(
                         [
@@ -1316,14 +1286,6 @@ impl Render for FileBrowser {
                                 o,
                             )
                             .on_click(cx.listener(move |v, _, _, cx| v.show(mode, cx)))
-                            .on_key_down(cx.listener(
-                                move |v, e: &KeyDownEvent, _, cx| {
-                                    if is_activate(e) {
-                                        v.show(mode, cx);
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
                         }),
                     ),
             );
@@ -1331,13 +1293,7 @@ impl Render for FileBrowser {
             root = root.child(
                 notice(error.clone(), p.danger, o).child(
                     action("retry-file", "Réessayer", false, self.loading, p, o)
-                        .on_click(cx.listener(|v, _, _, cx| v.show(v.mode, cx)))
-                        .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                            if is_activate(e) {
-                                v.show(v.mode, cx);
-                                cx.stop_propagation();
-                            }
-                        })),
+                        .on_click(cx.listener(|v, _, _, cx| v.show(v.mode, cx))),
                 ),
             );
         }
@@ -1403,15 +1359,7 @@ impl Render for FileBrowser {
                             o,
                         )
                         .flex_shrink_0()
-                        .on_click(cx.listener(|v, _, _, cx| v.page(-1, cx)))
-                        .on_key_down(cx.listener(
-                            |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.page(-1, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        )),
+                        .on_click(cx.listener(|v, _, _, cx| v.page(-1, cx))),
                     )
                     // The counter gives way first so both page buttons stay whole.
                     .child(
@@ -1448,15 +1396,7 @@ impl Render for FileBrowser {
                             o,
                         )
                         .flex_shrink_0()
-                        .on_click(cx.listener(|v, _, _, cx| v.page(1, cx)))
-                        .on_key_down(cx.listener(
-                            |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.page(1, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        )),
+                        .on_click(cx.listener(|v, _, _, cx| v.page(1, cx))),
                     ),
             );
         } else {
@@ -1506,22 +1446,11 @@ impl Render for FileBrowser {
                                             p,
                                             o,
                                         )
-                                        .on_click({
-                                            let sha = sha.clone();
+                                        .on_click(
                                             cx.listener(move |_, _, _, cx| {
                                                 cx.emit(FileBrowserEvent::NavigateCommit(
                                                     sha.clone(),
                                                 ))
-                                            })
-                                        })
-                                        .on_key_down(
-                                            cx.listener(move |_, e: &KeyDownEvent, _, cx| {
-                                                if is_activate(e) {
-                                                    cx.emit(FileBrowserEvent::NavigateCommit(
-                                                        sha.clone(),
-                                                    ));
-                                                    cx.stop_propagation();
-                                                }
                                             }),
                                         ),
                                     ),
@@ -1572,13 +1501,7 @@ impl Render for FileBrowser {
                             .cursor_pointer()
                             .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .child(icon(IconName::X, 13., p.muted))
-                            .on_click(cx.listener(|v, _, _, cx| v.close_inspection(cx)))
-                            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.close_inspection(cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|v, _, _, cx| v.close_inspection(cx))),
                     );
                     root = root.child(inspection);
                 }
@@ -1597,9 +1520,6 @@ impl Render for FileBrowser {
     }
 }
 
-pub fn is_activate(event: &KeyDownEvent) -> bool {
-    matches!(event.keystroke.key.as_str(), "enter" | "space")
-}
 pub fn action(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,

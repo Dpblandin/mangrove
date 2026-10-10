@@ -5,8 +5,8 @@ use crate::{
     code_view::{CodeView, CodeViewEvent, Highlights, ReadingPosition, hunk_shortcut},
     file_browser::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
-        ReadGate, action, diff_counts, is_activate, line_counts, notice, path_label, path_title,
-        reading_label, status_icon,
+        ReadGate, action, diff_counts, line_counts, notice, path_label, path_title, reading_label,
+        status_icon,
     },
     format::{commit_date, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
@@ -2138,13 +2138,7 @@ impl InspectorView {
                             .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .cursor_pointer()
                             .child(icon(IconName::X, 16., p.muted))
-                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx)))
-                            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.close_workspace(cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx))),
                     ),
             )
             .child(
@@ -2161,13 +2155,7 @@ impl InspectorView {
                         action("local-back", "", false, false, p, o)
                             .child(icon(IconName::ArrowLeft, 13., p.text))
                             .child("Historique")
-                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx)))
-                            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.close_workspace(cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx))),
                     )
                     .child(
                         div()
@@ -2243,23 +2231,11 @@ impl InspectorView {
             )
             .child(
                 mode_button("central-mode", "Vue centrale", !self.compact, p, o)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(false, cx)))
-                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                        if is_activate(e) {
-                            v.set_compact(false, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(false, cx))),
             )
             .child(
                 mode_button("compact-mode", "Vue compacte", self.compact, p, o)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(true, cx)))
-                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                        if is_activate(e) {
-                            v.set_compact(true, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(true, cx))),
             )
     }
     fn state(&self, title: &str, text: &str, name: IconName, error: bool) -> Div {
@@ -2701,7 +2677,6 @@ impl InspectorView {
         // A new commit is being read: the retained content is dimmed and inert.
         let loading = self.details_loading;
         let sha = details.sha.clone();
-        let keyboard_sha = sha.clone();
         let copied = self.copied_sha.as_ref() == Some(&sha);
         let sha_bar = div()
             .id("commit-sha")
@@ -2760,12 +2735,6 @@ impl InspectorView {
                 }))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.copy_commit_sha(sha.clone(), cx);
-                }))
-                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if is_activate(event) {
-                        view.copy_commit_sha(keyboard_sha.clone(), cx);
-                        cx.stop_propagation();
-                    }
                 }))
         };
         panel = panel.child(
@@ -2857,7 +2826,6 @@ impl InspectorView {
                 })
                 .children(details.parents.iter().enumerate().map(|(index, parent)| {
                     let sha = parent.clone();
-                    let keyboard_sha = sha.clone();
                     let tooltip = if index == 0 && details.parents.len() > 1 {
                         format!("{sha} · Premier parent, utilisé pour le diff")
                     } else {
@@ -2877,14 +2845,6 @@ impl InspectorView {
                                 .focus_visible(|s| s.text_color(rgb(p.accent)).underline())
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.emit(InspectorEvent::NavigateCommit(sha.clone()));
-                                }))
-                                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
-                                    if is_activate(event) {
-                                        cx.emit(InspectorEvent::NavigateCommit(
-                                            keyboard_sha.clone(),
-                                        ));
-                                        cx.stop_propagation();
-                                    }
                                 }))
                         })
                 }))
@@ -3242,7 +3202,6 @@ impl InspectorView {
                 .border_color(rgb(p.border))
                 .children(stash.groups.iter().enumerate().map(|(index, group)| {
                     let area = group.area.clone();
-                    let keyboard_area = area.clone();
                     let label = match area.as_str() {
                         "index" => "Index",
                         "untracked" => "Non suivis",
@@ -3256,14 +3215,6 @@ impl InspectorView {
                         o,
                     )
                     .on_click(cx.listener(move |v, _, _, cx| v.change_stash_area(area.clone(), cx)))
-                    .on_key_down(cx.listener(
-                        move |v, e: &KeyDownEvent, _, cx| {
-                            if is_activate(e) {
-                                v.change_stash_area(keyboard_area.clone(), cx);
-                                cx.stop_propagation();
-                            }
-                        },
-                    ))
                 })),
         );
         if let Some(group) = stash.groups.iter().find(|g| g.area == self.stash_area) {

@@ -1151,12 +1151,6 @@ impl CodeView {
             };
             icon_button(id, name, label, move || label.into(), enabled, palette)
                 .on_click(cx.listener(move |view, _, _, cx| change(view, cx)))
-                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if is_activation(event) {
-                        change(view, cx);
-                        cx.stop_propagation();
-                    }
-                }))
         };
         div()
             .flex()
@@ -1194,12 +1188,6 @@ impl CodeView {
             let tooltip = SharedString::from(format!("{label} ({})", alt_shortcut_label(key)));
             icon_button(id, name, label, move || tooltip.clone(), enabled, palette)
                 .on_click(cx.listener(move |view, _, _, cx| view.jump_hunk(forward, cx)))
-                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if is_activation(event) {
-                        view.jump_hunk(forward, cx);
-                        cx.stop_propagation();
-                    }
-                }))
         };
         div()
             .flex()
@@ -2474,13 +2462,7 @@ impl Render for CodeView {
                                 .cursor_pointer()
                                 .focus_visible(move |style| style.border_color(rgb(p.accent)))
                                 .child(action.label())
-                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(action.event())))
-                                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
-                                    if is_activation(event) {
-                                        cx.emit(action.event());
-                                        cx.stop_propagation();
-                                    }
-                                })),
+                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(action.event()))),
                         )
                     }),
             );
@@ -2587,10 +2569,6 @@ impl Render for CodeView {
         }
         root
     }
-}
-
-fn is_activation(event: &KeyDownEvent) -> bool {
-    matches!(event.keystroke.key.as_str(), "enter" | "space")
 }
 
 /// Alt+↓ moves to the next hunk and Alt+↑ to the previous one.
@@ -3624,6 +3602,161 @@ mod tests {
             show(cx, crate::preferences::DiffLayout::Split),
             (30, px(3.))
         );
+    }
+
+    /// Presses then releases a key on the focused element. Unlike
+    /// `TestWindowExt::press`, the requests of the key down are applied and
+    /// drawn before the key up, as between two platform events.
+    fn press(cx: &mut gpui_kit::TestAppContext, window: gpui_kit::AnyWindowHandle, key: &str) {
+        use gpui_kit::{AppContext, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke};
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            let down = KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            window.dispatch_event(down.to_platform_input(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// A diff header that applies its buttons' requests, as the file
+    /// browser and the inspector do.
+    struct DiffHeader {
+        viewer: gpui_kit::Entity<super::CodeView>,
+    }
+
+    impl gpui_kit::Render for DiffHeader {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{ParentElement, Styled, div};
+            let (layout, hunks, font) = self.viewer.update(cx, |viewer, cx| {
+                (
+                    viewer.layout_controls(window, cx),
+                    viewer.hunk_controls(cx),
+                    viewer.font_controls(window, cx),
+                )
+            });
+            div()
+                .size_full()
+                .children(layout)
+                .child(hunks)
+                .child(font)
+                .child(self.viewer.clone())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn header_buttons_act_once_per_key_press_and_keep_the_focus(cx: &mut gpui_kit::TestAppContext) {
+        use super::{CodeView, CodeViewEvent, Highlights};
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::{AppContext, WindowOptions};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let hunk = |start: u32| DiffHunk {
+            header: format!("@@ -{start},2 +{start},2 @@"),
+            lines: [
+                ("context", "fn main() {}"),
+                ("deletion", "let a = 1;"),
+                ("addition", "let a = 2;"),
+            ]
+            .map(|(kind, content)| DiffLine {
+                kind: kind.into(),
+                old_line: (kind != "addition").then_some(start),
+                new_line: (kind != "deletion").then_some(start),
+                content: content.into(),
+            })
+            .into(),
+        };
+        let diff = Arc::new(FileDiff {
+            hunks: vec![hunk(10), hunk(40), hunk(70)],
+            ..FileDiff::default()
+        });
+        cx.update(gpui_kit::init);
+        let (window, header) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let viewer = cx.new(|cx| CodeView::new(window, cx));
+                cx.new(|_| DiffHeader { viewer })
+            })
+            .unwrap()
+        });
+        let viewer = cx.read(|cx| header.read(cx).viewer.clone());
+        let preferences = std::rc::Rc::new(std::cell::RefCell::new(Preferences {
+            diff_layout: DiffLayout::Split,
+            ..Preferences::default()
+        }));
+        cx.update_window(window, |_, window, cx| {
+            viewer.update(cx, |view, cx| {
+                view.set_split_host(true, cx);
+                view.set_preferences(preferences.borrow().clone(), cx);
+                view.set_prepared_diff(diff, "a.rs".into(), Highlights::default(), window, cx);
+            })
+        })
+        .unwrap();
+        let applied = preferences.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&viewer, move |viewer, event: &CodeViewEvent, cx| {
+                let preferences = {
+                    let mut preferences = applied.borrow_mut();
+                    match event {
+                        CodeViewEvent::LayoutChanged(layout) => preferences.diff_layout = *layout,
+                        CodeViewEvent::FontSizeChanged(size) => preferences.diff_font_size = *size,
+                        _ => return,
+                    }
+                    preferences.clone()
+                };
+                viewer.update(cx, |view, cx| view.set_preferences(preferences, cx));
+            })
+        });
+        cx.run_until_parked();
+        let split = |cx: &mut gpui_kit::TestAppContext| {
+            viewer.read_with(cx, |view, _| view.split.is_some())
+        };
+        assert!(split(cx));
+        // Tab reaches the layout toggle first; each press switches once.
+        let focused = cx
+            .update_window(window, |_, window, cx| {
+                window.focus_next(cx);
+                window.focused(cx)
+            })
+            .unwrap();
+        assert!(focused.is_some());
+        let focus = |cx: &mut gpui_kit::TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.focused(cx))
+                .unwrap()
+        };
+        press(cx, window, "enter");
+        assert!(!split(cx));
+        assert_eq!(focus(cx), focused);
+        press(cx, window, "space");
+        assert!(split(cx));
+        assert_eq!(focus(cx), focused);
+        // The next hunk and font buttons also take one step per press.
+        let tab = |cx: &mut gpui_kit::TestAppContext, stops: usize| {
+            cx.update_window(window, |_, window, cx| {
+                for _ in 0..stops {
+                    window.focus_next(cx);
+                }
+            })
+            .unwrap()
+        };
+        tab(cx, 2);
+        press(cx, window, "enter");
+        let (line, second) = viewer.read_with(cx, |view, _| (view.active_line, view.hunk_rows[1]));
+        assert_eq!(line, second);
+        let size = preferences.borrow().diff_font_size;
+        tab(cx, 2);
+        press(cx, window, "enter");
+        assert_eq!(preferences.borrow().diff_font_size, size + 1.);
     }
 
     #[gpui_kit::test]
