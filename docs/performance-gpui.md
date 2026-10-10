@@ -224,3 +224,23 @@ La fixture `--large-change` modifie aussi 960 paires de lignes de `packages/core
 cargo test --release --locked --manifest-path src-gpui/Cargo.toml \
   changed_words_timing_probe -- --ignored --nocapture
 ```
+
+### Côte à côte
+
+Le benchmark applicatif accepte `MANGROVE_BENCH_DIFF_LAYOUT=split`, lu seulement quand `MANGROVE_BENCH_OUTPUT` active la mesure ; `unified` reste la valeur par défaut. Le grand diff par défaut est un ajout pur et reste unifié : la comparaison des deux dispositions cible `packages/core/src/search.ts`. Le rapport indique `heavy_diff_split`, qui vaut 1 si le diff défilé était bien côte à côte, et `draw_ms` dans la phase `diff_scroll`. Ces lancements ne passent pas par le runner de la comparaison historique, qui exige le grand diff de 2 000 lignes.
+
+Le 10 octobre 2026, sur la fixture de 10 007 commits avec `--large-change`, cinq paires de lancements directs du bundle de mesure ont alterné les deux dispositions, avec un contenu de 1440 × 888 et un cache SQLite réutilisé par disposition. Le patch de 1 973 lignes défile sans coloration syntaxique, au-delà de la borne de 20 000 tokens, mais avec ses mots modifiés. La médiane des médianes de dessin CPU par frame passe de **2,63 ms en unifié à 3,04 ms côte à côte**, soit **1,15 fois** ; la médiane des p95 passe de 3,05 à 3,47 ms, soit 1,14 fois. L’objectif était de rester sous 1,5 fois. Les intervalles de soumission restent autour de 8,31 ms dans les deux dispositions. L’activation des fenêtres n’est pas attestée et la charge de fond n’est pas neutralisée ; les [relevés par lancement](performance-split-gpui.json) conservent le hash du binaire mesuré.
+
+Sur le thread d’interface, construire la disposition côte à côte d’environ 2 000 lignes coûte 0,04 ms quand les paires viennent de la préparation en arrière-plan. Un patch affiché avant celle-ci est apparié sur place : 1,9 ms au p95 pour des blocs de 20 paires et 3,7 ms pour des blocs de 32 longues paires, selon la sonde ignorée `split_layout_timing_probe` en release.
+
+```sh
+for layout in unified split; do
+  MANGROVE_BENCH_REPO=/chemin/absolu/fixture-10000 \
+  MANGROVE_BENCH_CACHE=/chemin/absolu/cache-$layout \
+  MANGROVE_BENCH_OUTPUT=/chemin/absolu/diff-$layout.json \
+  MANGROVE_BENCH_HEAVY=packages/core/src/search.ts \
+  MANGROVE_BENCH_DIFF_LAYOUT=$layout \
+  MANGROVE_BENCH_SAMPLES=2 \
+  'src-gpui/target/benchmark/release/bundle/Mangrove GPUI Benchmark.app/Contents/MacOS/mangrove-gpui'
+done
+```
