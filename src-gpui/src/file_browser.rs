@@ -1,8 +1,8 @@
 //! File revision browsing. One native read is retained until it actually settles;
 //! replacing a view only replaces the queued intent, never creates an unbounded queue.
 use crate::{
-    code_view::{CodeView, CodeViewEvent},
-    format::{commit_date, count_label, short_sha},
+    code_view::{CodeView, CodeViewEvent, hunk_shortcut},
+    format::{commit_date, count_label, format_count, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax::{self, Tokens},
@@ -10,7 +10,12 @@ use crate::{
     view_cache::render_cached_view,
 };
 use accesskit::Role;
-use gpui_kit::{assets::IconName, component::scroll::Scrollbar, prelude::*, *};
+use gpui_kit::{
+    assets::IconName,
+    component::{scroll::Scrollbar, tooltip::Tooltip},
+    prelude::*,
+    *,
+};
 use mangrove_core::{Workspace, model::*};
 use std::sync::{
     Arc, Mutex,
@@ -163,6 +168,20 @@ impl FileView {
             Self::Blame => "Blame",
         }
     }
+    /// This view when it can present `target`, otherwise the diff.
+    fn for_target(self, target: Option<&FileTarget>) -> Self {
+        let applies = match (self, target) {
+            (Self::Diff, _) => true,
+            (_, None) => false,
+            (_, Some(target)) if target.file_key.is_empty() => false,
+            (Self::History, _) => true,
+            (Self::File, Some(target)) => target.status != "deleted",
+            (Self::Blame, Some(target)) => {
+                target.status != "deleted" && !supports_path(&target.path)
+            }
+        };
+        if applies { self } else { Self::Diff }
+    }
 }
 
 pub enum FileBrowserEvent {
@@ -208,6 +227,8 @@ pub struct FileBrowser {
     source: FilePresentation,
     target: Option<FileTarget>,
     mode: FileView,
+    /// The last view chosen by the user, restored on each new file when it applies.
+    preferred: FileView,
     generation: u64,
     live_generation: Arc<AtomicU64>,
     color_active: bool,
@@ -269,6 +290,7 @@ impl FileBrowser {
             source: FilePresentation::empty(0),
             target: None,
             mode: FileView::Diff,
+            preferred: FileView::Diff,
             generation: 0,
             live_generation: Arc::new(AtomicU64::new(0)),
             color_active: false,
@@ -306,6 +328,7 @@ impl FileBrowser {
     }
 
     pub fn present(&mut self, presentation: FilePresentation, cx: &mut Context<Self>) {
+        let was_loading = self.source.loading_source();
         let change = self.source.accept(presentation);
         if change == PresentationChange::Ignored {
             return;
@@ -318,13 +341,23 @@ impl FileBrowser {
             .map(|prepared| prepared.diff.clone());
         if change == PresentationChange::Replaced {
             self.select_target(target.clone(), diff.clone(), cx);
-            self.mode = FileView::Diff;
+            self.mode = self.preferred.for_target(target.as_ref());
         }
         if self.target == target {
             self.diff = diff;
             self.diff_tokens = self.source.tokens();
-            self.error = self.source.error();
+            if self.mode == FileView::Diff {
+                self.error = self.source.error();
+            }
             self.viewer_dirty = true;
+        }
+        // A retained File, History or Blame view reads once its source is ready.
+        if self.mode != FileView::Diff
+            && !self.source.loading_source()
+            && (was_loading || change == PresentationChange::Replaced)
+            && self.target == self.source.target
+        {
+            self.load(None, cx);
         }
         cx.notify();
     }
@@ -358,6 +391,12 @@ impl FileBrowser {
     pub fn font_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.viewer
             .update(cx, |view, cx| view.font_controls(window, cx))
+    }
+    pub fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.mode == FileView::Diff {
+            self.viewer
+                .update(cx, |view, cx| view.jump_hunk(forward, cx));
+        }
     }
     #[cfg(feature = "app-benchmark")]
     pub fn benchmark_readiness(&self, cx: &App) -> (bool, bool, usize) {
@@ -439,6 +478,7 @@ impl FileBrowser {
         {
             return;
         }
+        self.preferred = mode;
         if self.mode == mode && self.loading {
             return;
         }
@@ -848,7 +888,8 @@ impl FileBrowser {
             .as_ref()
             .map(|t| t.path.clone())
             .unwrap_or_default();
-        let loading = self.loading || self.source.loading_source();
+        let loading =
+            (self.loading || self.source.loading_source()).then(|| reading_label(mode, &path));
         let error = self.error.clone();
         #[cfg(feature = "app-benchmark")]
         let prepare_start = std::time::Instant::now();
@@ -918,14 +959,14 @@ impl FileBrowser {
                             .flex_col()
                             .gap(px(5.))
                             .child(div().text_size(px(12. + o)).child(entry.summary.clone()))
-                            .child(div().text_size(px(10. + o)).text_color(rgb(p.muted)).child(
+                            .child(div().text_size(px(11. + o)).text_color(rgb(p.muted)).child(
                                 format!(
                                     "{} · {} · {}{}",
                                     entry.author,
                                     commit_date(entry.time),
                                     short_sha(&entry.sha),
                                     if entry.merge {
-                                        " · Merge, premier parent"
+                                        " · Fusion, premier parent"
                                     } else {
                                         ""
                                     }
@@ -934,7 +975,7 @@ impl FileBrowser {
                             .children(entry.old_path.as_ref().map(|old| {
                                 div()
                                     .font_family(MONO)
-                                    .text_size(px(10. + o))
+                                    .text_size(px(11. + o))
                                     .text_color(rgb(p.muted))
                                     .child(format!("{old} → {}", entry.path))
                             })),
@@ -978,7 +1019,7 @@ impl Render for FileBrowser {
         let path = self
             .target
             .as_ref()
-            .map(|t| t.path.clone())
+            .map(|t| path_label(&t.path, t.old_path.as_deref()))
             .unwrap_or_default();
         let sha = self
             .target
@@ -988,6 +1029,14 @@ impl Render for FileBrowser {
         let busy = self.source.loading_source();
         let original = self.target == self.source.target;
         let controls = self.font_controls(window, cx);
+        let diff_mode = self.mode == FileView::Diff;
+        let hunks = diff_mode.then(|| self.viewer.update(cx, |view, cx| view.hunk_controls(cx)));
+        let counts = self
+            .diff
+            .as_deref()
+            .filter(|_| diff_mode)
+            .and_then(line_counts)
+            .map(|(additions, deletions)| diff_counts(additions, deletions, p, o));
         let mut root = div()
             .id("file-workspace")
             .role(Role::Region)
@@ -999,9 +1048,12 @@ impl Render for FileBrowser {
             .bg(rgb(p.reading_bg))
             .text_color(rgb(p.text))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|view, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     cx.emit(FileBrowserEvent::Close);
+                    cx.stop_propagation();
+                } else if let Some(forward) = hunk_shortcut(e) {
+                    view.jump_hunk(forward, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -1018,34 +1070,37 @@ impl Render for FileBrowser {
                     .border_color(rgb(p.border))
                     .child(icon(IconName::FileText, 15., p.muted))
                     .child(
-                        div()
+                        path_title("file-path", path, o)
                             .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12. + o))
-                            .child(path),
+                            .when(busy, |s| s.opacity(0.6)),
                     )
+                    .children(counts)
                     .child(
                         div()
                             .font_family(MONO)
-                            .text_size(px(10. + o))
+                            .text_size(px(11. + o))
                             .text_color(rgb(p.muted))
+                            .when(busy, |s| s.opacity(0.6))
                             .child(sha),
                     )
+                    .children(hunks)
                     .child(controls)
                     .child(
                         div()
                             .id("close-file")
                             .role(Role::Button)
                             .aria_label("Fermer le fichier")
-                            .focusable()
+                            .tab_index(0)
                             .size(px(26.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(rgb(p.panel))
                             .cursor_pointer()
                             .hover(move |s| s.bg(rgb(p.surface)))
+                            .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .child(icon(IconName::X, 16., p.muted))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close)))
                             .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
@@ -1151,7 +1206,7 @@ impl Render for FileBrowser {
             );
         }
         if self.mode == FileView::History {
-            root=root.child(notice("Premier parent uniquement aux merges. Les renommages détectés sont suivis ; copies et renommages ambigus peuvent interrompre le suivi.",p.muted,o));
+            root=root.child(notice("Premier parent uniquement aux fusions. Les renommages détectés sont suivis ; copies et renommages ambigus peuvent interrompre le suivi.",p.muted,o));
             let count = self.history.as_ref().map(|h| h.entries.len()).unwrap_or(0);
             root = root.child(
                 div()
@@ -1200,7 +1255,7 @@ impl Render for FileBrowser {
                     .p(px(10.))
                     .border_t_1()
                     .border_color(rgb(p.border))
-                    .text_size(px(10. + o))
+                    .text_size(px(11. + o))
                     .text_color(rgb(p.muted))
                     .child(
                         action(
@@ -1310,11 +1365,22 @@ impl Render for FileBrowser {
                                             p,
                                             o,
                                         )
-                                        .on_click(
+                                        .on_click({
+                                            let sha = sha.clone();
                                             cx.listener(move |_, _, _, cx| {
                                                 cx.emit(FileBrowserEvent::NavigateCommit(
                                                     sha.clone(),
                                                 ))
+                                            })
+                                        })
+                                        .on_key_down(
+                                            cx.listener(move |_, e: &KeyDownEvent, _, cx| {
+                                                if is_activate(e) {
+                                                    cx.emit(FileBrowserEvent::NavigateCommit(
+                                                        sha.clone(),
+                                                    ));
+                                                    cx.stop_propagation();
+                                                }
                                             }),
                                         ),
                                     ),
@@ -1352,7 +1418,18 @@ impl Render for FileBrowser {
                     inspection = inspection.child(body).child(
                         div()
                             .id("inspection-close")
+                            .role(Role::Button)
+                            .aria_label("Fermer le commit consulté")
+                            .tab_index(0)
+                            .size(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(rgb(p.panel))
                             .cursor_pointer()
+                            .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .child(icon(IconName::X, 13., p.muted))
                             .on_click(cx.listener(|v, _, _, cx| v.close_inspection(cx)))
                             .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
@@ -1400,7 +1477,7 @@ pub fn action(
         } else {
             accesskit::Toggled::False
         })
-        .when(!disabled, |button| button.focusable())
+        .when(!disabled, |button| button.tab_index(0))
         .flex()
         .items_center()
         .gap(px(6.))
@@ -1411,7 +1488,7 @@ pub fn action(
         .border_color(rgb(if selected { p.accent } else { p.border }))
         .bg(rgb(p.surface))
         .text_color(rgb(if selected { p.accent } else { p.text }))
-        .text_size(px(10. + o))
+        .text_size(px(11. + o))
         .when(disabled, |s| s.opacity(0.4))
         .when(!disabled, |s| {
             s.cursor_pointer()
@@ -1425,9 +1502,62 @@ pub fn notice(text: impl Into<SharedString>, color: u32, o: f32) -> Div {
         .flex_shrink_0()
         .px(px(16.))
         .py(px(9.))
-        .text_size(px(10. + o))
+        .text_size(px(11. + o))
         .text_color(rgb(color))
         .child(text.into())
+}
+/// Header text of a file, with the previous path of a rename or copy.
+pub fn path_label(path: &str, old_path: Option<&str>) -> String {
+    match old_path.filter(|old| *old != path) {
+        Some(old) => format!("{old} → {path}"),
+        None => path.to_owned(),
+    }
+}
+/// A path cut from its start, so the file name stays visible; full text on hover.
+pub fn path_title(id: &'static str, label: String, o: f32) -> Stateful<Div> {
+    let label = SharedString::from(label);
+    let tooltip = label.clone();
+    div()
+        .id(id)
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis_start()
+        .text_size(px(12. + o))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(label)
+}
+/// Message of an empty view while its file is read.
+pub fn reading_label(view: FileView, path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match view {
+        _ if name.is_empty() => "Lecture…".into(),
+        FileView::Diff => format!("Lecture du diff de {name}…"),
+        FileView::Blame => format!("Lecture du blame de {name}…"),
+        FileView::File | FileView::History => format!("Lecture de {name}…"),
+    }
+}
+/// Exact line totals, unknown for files skipped before reading their patch.
+pub fn line_counts(diff: &FileDiff) -> Option<(usize, usize)> {
+    (!diff.truncated || !diff.hunks.is_empty()).then_some((diff.additions, diff.deletions))
+}
+pub fn diff_counts(additions: usize, deletions: usize, p: Palette, o: f32) -> Div {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .gap(px(8.))
+        .font_family(MONO)
+        .text_size(px(11. + o))
+        .child(
+            div()
+                .text_color(rgb(p.success))
+                .child(format!("+{}", format_count(additions))),
+        )
+        .child(
+            div()
+                .text_color(rgb(p.danger))
+                .child(format!("−{}", format_count(deletions))),
+        )
 }
 pub fn status_icon(status: &str, p: Palette) -> gpui_kit::component::Icon {
     let (name, color) = match status {
@@ -1444,8 +1574,15 @@ pub fn status_icon(status: &str, p: Palette) -> gpui_kit::component::Icon {
 }
 #[cfg(test)]
 mod tests {
-    use super::{FilePresentation, FileTarget, PreparedDiff, PresentationChange};
-    use mangrove_core::model::FileDiff;
+    use super::{
+        FileBrowser, FilePresentation, FileTarget, FileView, PreparedDiff, PresentationChange,
+        line_counts, path_label, reading_label,
+    };
+    use gpui_kit::{AppContext, TestAppContext, WindowOptions};
+    use mangrove_core::{
+        Workspace,
+        model::{DiffHunk, FileDiff},
+    };
     use std::sync::Arc;
 
     fn target(key: &str) -> FileTarget {
@@ -1576,6 +1713,112 @@ mod tests {
         assert!(source.target.is_none());
         assert!(source.prepared.is_none());
         assert!(source.error().is_none());
+    }
+
+    #[test]
+    fn renamed_paths_show_both_sides_and_reading_names_the_file() {
+        assert_eq!(path_label("src/new.rs", None), "src/new.rs");
+        assert_eq!(path_label("src/new.rs", Some("src/new.rs")), "src/new.rs");
+        assert_eq!(
+            path_label("src/new.rs", Some("lib/old.rs")),
+            "lib/old.rs → src/new.rs"
+        );
+        assert_eq!(
+            reading_label(FileView::Blame, "src/deep/main.rs"),
+            "Lecture du blame de main.rs…"
+        );
+        assert_eq!(
+            reading_label(FileView::Diff, "README.md"),
+            "Lecture du diff de README.md…"
+        );
+        assert_eq!(reading_label(FileView::File, "a/b.rs"), "Lecture de b.rs…");
+        assert_eq!(reading_label(FileView::Diff, ""), "Lecture…");
+    }
+
+    #[test]
+    fn line_counts_are_unknown_only_for_patches_skipped_by_size() {
+        let mut diff = FileDiff {
+            binary: false,
+            truncated: false,
+            additions: 8,
+            deletions: 2,
+            hunks: Vec::new(),
+        };
+        assert_eq!(line_counts(&diff), Some((8, 2)));
+        diff.truncated = true;
+        assert_eq!(line_counts(&diff), None);
+        diff.hunks.push(DiffHunk {
+            header: "@@ -1 +1 @@".into(),
+            lines: Vec::new(),
+        });
+        // A patch cut for display keeps the libgit2 totals of the whole file.
+        assert_eq!(line_counts(&diff), Some((8, 2)));
+    }
+
+    #[test]
+    fn views_apply_only_to_files_they_can_present() {
+        let file = target("file");
+        let deleted = FileTarget {
+            status: "deleted".into(),
+            ..target("deleted")
+        };
+        let image = FileTarget {
+            path: "logo.png".into(),
+            ..target("image")
+        };
+        for view in [
+            FileView::Diff,
+            FileView::File,
+            FileView::History,
+            FileView::Blame,
+        ] {
+            assert_eq!(view.for_target(Some(&file)), view);
+            assert_eq!(view.for_target(None), FileView::Diff);
+        }
+        assert_eq!(FileView::File.for_target(Some(&deleted)), FileView::Diff);
+        assert_eq!(FileView::Blame.for_target(Some(&deleted)), FileView::Diff);
+        assert_eq!(
+            FileView::History.for_target(Some(&deleted)),
+            FileView::History
+        );
+        assert_eq!(FileView::File.for_target(Some(&image)), FileView::File);
+        assert_eq!(FileView::Blame.for_target(Some(&image)), FileView::Diff);
+    }
+
+    #[gpui_kit::test]
+    fn chosen_view_survives_file_changes_while_it_applies(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Workspace::new(root.path().join("cache")).unwrap());
+        cx.update(gpui_kit::init);
+        let browser = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| FileBrowser::new(engine, Arc::default(), window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        browser.update(cx, |view, cx| {
+            view.present(FilePresentation::ready(1, target("a"), prepared()), cx);
+            view.show(FileView::Blame, cx);
+            assert_eq!(view.mode, FileView::Blame);
+            // A newly chosen file keeps Blame and reads it once its source is ready.
+            view.present(FilePresentation::loading(2, target("b"), None), cx);
+            assert_eq!(view.mode, FileView::Blame);
+            assert!(!view.loading);
+            view.present(FilePresentation::ready(2, target("b"), prepared()), cx);
+            assert!(view.loading);
+            let deleted = FileTarget {
+                status: "deleted".into(),
+                ..target("c")
+            };
+            view.present(FilePresentation::ready(3, deleted, prepared()), cx);
+            assert_eq!(view.mode, FileView::Diff);
+            view.present(FilePresentation::ready(4, target("d"), prepared()), cx);
+            assert_eq!(view.mode, FileView::Blame);
+            view.show(FileView::Diff, cx);
+            view.present(FilePresentation::ready(5, target("e"), prepared()), cx);
+            assert_eq!(view.mode, FileView::Diff);
+        });
     }
 
     #[test]

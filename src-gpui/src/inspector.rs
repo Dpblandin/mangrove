@@ -2,16 +2,17 @@
 //! The bounded read lane keeps the native read alive until completion and retains
 //! only the latest queued foreground intent. Immutable snapshots publish together.
 use crate::{
-    code_view::{CodeView, CodeViewEvent},
+    code_view::{CodeView, CodeViewEvent, hunk_shortcut},
     file_browser::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
-        ReadGate, action, is_activate, notice, status_icon,
+        ReadGate, action, diff_counts, is_activate, line_counts, notice, path_label, path_title,
+        reading_label, status_icon,
     },
     format::{commit_date, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
     preferences::Preferences,
     syntax,
-    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
+    theme::{Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
     view_cache::render_cached_view,
 };
 use accesskit::Role;
@@ -23,7 +24,7 @@ use gpui_kit::{
 };
 use mangrove_core::{Workspace, model::*};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -170,6 +171,33 @@ struct CachedDiff {
     bytes: usize,
     tokens: usize,
 }
+/// Line totals of the files read for the current selection, independent of
+/// the patch budget. They are complete only once every file was read.
+#[derive(Default)]
+struct LineTotals {
+    files: HashSet<String>,
+    additions: usize,
+    deletions: usize,
+    unknown: bool,
+}
+impl LineTotals {
+    fn record(&mut self, key: &str, diff: &FileDiff) {
+        if self.files.contains(key) {
+            return;
+        }
+        self.files.insert(key.to_owned());
+        match line_counts(diff) {
+            Some((additions, deletions)) => {
+                self.additions += additions;
+                self.deletions += deletions;
+            }
+            None => self.unknown = true,
+        }
+    }
+    fn complete(&self, files: usize) -> Option<(usize, usize)> {
+        (!self.unknown && self.files.len() == files).then_some((self.additions, self.deletions))
+    }
+}
 #[derive(Default)]
 struct DiffCache {
     entries: HashMap<String, CachedDiff>,
@@ -177,6 +205,7 @@ struct DiffCache {
     bytes: usize,
     tokens: usize,
     background_full: bool,
+    totals: LineTotals,
 }
 impl DiffCache {
     fn clear(&mut self) {
@@ -473,7 +502,7 @@ impl InspectorView {
             copied_sha: None,
             copy_feedback_task: None,
             stash_scroll: ScrollHandle::new(),
-            focus: std::array::from_fn(|_| cx.focus_handle()),
+            focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             active_file: [0; 3],
             subscriptions: vec![code_subscription, browser_subscription],
             restore_open: None,
@@ -660,6 +689,21 @@ impl InspectorView {
             .filter(|details| self.selection_sha() == Some(details.sha.as_str()))
             .map(|details| details.parents.clone())
             .unwrap_or_default()
+    }
+    /// Line totals of the selected commit, once every file was read exactly.
+    fn commit_totals(&self) -> Option<(usize, usize)> {
+        let details = self.details.as_ref().filter(|_| !self.details_loading)?;
+        self.cache.totals.complete(details.file_count)
+    }
+    /// Hunk navigation in the visible diff, central or compact.
+    fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.central_active() && matches!(self.selection, Selection::Commit(_)) {
+            self.browser
+                .update(cx, |view, cx| view.jump_hunk(forward, cx));
+        } else {
+            self.viewer
+                .update(cx, |view, cx| view.jump_hunk(forward, cx));
+        }
     }
     pub fn show_file_view(&mut self, mode: FileView, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, commit)) = self.command_file() else {
@@ -1622,13 +1666,18 @@ impl InspectorView {
             {
                 match result {
                     Ok(ReadResult::Diff(diff)) => {
-                        self.cache
-                            .remember(file.cache_key(), diff.clone(), background);
-                        self.color(file.clone(), diff.clone(), background, cx);
+                        let key = file.cache_key();
+                        self.cache.totals.record(&key, &diff.diff);
+                        if !background
+                            || !self.cache.full() && syntax::language(&file.path).is_some()
+                        {
+                            self.cache.remember(key, diff.clone(), background);
+                            self.color(file.clone(), diff.clone(), background, cx);
+                        }
                         if !background {
                             self.publish_diff(file, Some(diff), None, cx);
                         } else {
-                            changed = false;
+                            changed = self.commit_totals().is_some();
                         }
                     }
                     Err(error) if !background && request.revision.file_matches(self.revision) => {
@@ -1648,6 +1697,8 @@ impl InspectorView {
         }
     }
     fn schedule_preload(&mut self, cx: &mut Context<Self>) {
+        // Commit files are also read for their line totals, even with a full patch cache.
+        let totals = matches!(self.selection, Selection::Commit(_)) && !self.cache.totals.unknown;
         if self.preload_task.is_some()
             || self.color_active
             || self.color_pending.is_some()
@@ -1657,7 +1708,7 @@ impl InspectorView {
             || self.diff_loading
             || matches!(self.selection, Selection::Working)
                 && (self.status_loading || self.status_error.is_some())
-            || self.cache.full()
+            || self.cache.full() && !totals
         {
             return;
         }
@@ -1666,13 +1717,14 @@ impl InspectorView {
         while self.preload_cursor < files.len() {
             let file = files[self.preload_cursor].clone();
             self.preload_cursor += 1;
-            if self.cache.entries.contains_key(&file.cache_key())
-                || syntax::language(&file.path).is_none()
-            {
-                continue;
+            let key = file.cache_key();
+            let color = !self.cache.full()
+                && !self.cache.entries.contains_key(&key)
+                && syntax::language(&file.path).is_some();
+            if color || totals && !self.cache.totals.files.contains(&key) {
+                wanted = Some(file);
+                break;
             }
-            wanted = Some(file);
-            break;
         }
         let (Some(file), Some(id)) = (wanted, self.repository.as_ref().map(|r| r.id.clone()))
         else {
@@ -1693,7 +1745,7 @@ impl InspectorView {
                     && !view.active
                     && view.pending.is_none()
                     && !view.diff_loading
-                    && !view.cache.full()
+                    && (totals || !view.cache.full())
                 {
                     view.pending = Some(ReadRequest {
                         revision,
@@ -1760,7 +1812,13 @@ impl InspectorView {
             .map(|s| s.file.path.clone())
             .unwrap_or_default();
         let error = self.snapshot.as_ref().and_then(|s| s.error.clone());
-        let loading = self.diff_loading || self.details_loading;
+        let loading = (self.diff_loading || self.details_loading).then(|| {
+            let reading = self
+                .intent
+                .choice()
+                .map_or(path.as_str(), |file| &file.path);
+            reading_label(FileView::Diff, reading)
+        });
         #[cfg(feature = "app-benchmark")]
         let prepare_start = Instant::now();
         self.viewer.update(cx, |view, cx| {
@@ -1789,15 +1847,24 @@ impl InspectorView {
         let path = self
             .snapshot
             .as_ref()
-            .map(|s| s.file.path.clone())
-            .or_else(|| self.intent.choice().map(|f| f.path.clone()))
+            .map(|s| &s.file)
+            .or_else(|| self.intent.choice())
+            .map(|file| path_label(&file.path, file.old_path.as_deref()))
             .unwrap_or_default();
-        let controls = self.viewer.update(cx, |v, cx| v.font_controls(window, cx));
+        let (hunks, controls) = self.viewer.update(cx, |v, cx| {
+            (v.hunk_controls(cx), v.font_controls(window, cx))
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(p.reading_bg))
+            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+                if let Some(forward) = hunk_shortcut(e) {
+                    v.jump_hunk(forward, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .h(px(40.))
@@ -1810,21 +1877,19 @@ impl InspectorView {
                     .border_color(rgb(p.border))
                     .bg(rgb(p.panel))
                     .child(icon(IconName::FileText, 15., p.muted))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12. + o))
-                            .child(path),
-                    )
+                    .child(path_title("local-path", path, o).flex_1())
+                    .child(hunks)
                     .child(controls)
                     .child(
                         div()
                             .id("local-close")
                             .role(Role::Button)
                             .aria_label("Fermer le diff")
-                            .focusable()
+                            .tab_index(0)
+                            .rounded(RADIUS_SM)
+                            .border_1()
+                            .border_color(rgb(p.panel))
+                            .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .cursor_pointer()
                             .child(icon(IconName::X, 16., p.muted))
                             .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx)))
@@ -1866,7 +1931,11 @@ impl InspectorView {
                             .child("Diff"),
                     )
                     .child(div().flex_1())
-                    .children(self.diff().map(|diff| diff_counts(diff, p, o))),
+                    .children(
+                        self.diff()
+                            .and_then(|diff| line_counts(diff))
+                            .map(|(additions, deletions)| diff_counts(additions, deletions, p, o)),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(self.diff_body(window, cx)))
             .into_any_element()
@@ -1927,24 +1996,14 @@ impl InspectorView {
                 |s| s.pb(px(8.)),
             )
             .child(
-                mode_button(
-                    "central-mode",
-                    if stash {
-                        "Diff central"
-                    } else {
-                        "Vue centrale"
-                    },
-                    !self.compact,
-                    p,
-                    o,
-                )
-                .on_click(cx.listener(|v, _, _, cx| v.set_compact(false, cx)))
-                .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                    if is_activate(e) {
-                        v.set_compact(false, cx);
-                        cx.stop_propagation();
-                    }
-                })),
+                mode_button("central-mode", "Vue centrale", !self.compact, p, o)
+                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(false, cx)))
+                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+                        if is_activate(e) {
+                            v.set_compact(false, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
             )
             .child(
                 mode_button("compact-mode", "Vue compacte", self.compact, p, o)
@@ -2024,18 +2083,19 @@ impl InspectorView {
                                 .choice()
                                 .is_some_and(|intent| intent.key == s.file.key))
                 });
-                let file = file.clone();
                 let choice = file.clone();
                 let (directory, name) = split_path(&file.path);
+                let status = file_status_label(&file.status);
+                let old_path = file.old_path.as_deref().filter(|old| *old != file.path);
+                let tooltip = SharedString::from(path_label(&file.path, old_path));
                 let focus = self.focus[list].clone();
                 div()
                     .id(SharedString::from(format!("file-{area}-{index}")))
                     .role(Role::ListBoxOption)
-                    .aria_label(format!(
-                        "{}, {}",
-                        file.path,
-                        file_status_label(&file.status)
-                    ))
+                    .aria_label(match old_path {
+                        Some(old) => format!("{}, {status} depuis {old}", file.path),
+                        None => format!("{}, {status}", file.path),
+                    })
                     .aria_selected(selected)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(self.file_count(area))
@@ -2055,6 +2115,7 @@ impl InspectorView {
                     .gap(px(8.))
                     .cursor_pointer()
                     .hover(move |s| s.bg(rgb(p.surface)))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .child(status_icon(&file.status, p))
                     .child(
                         div()
@@ -2066,7 +2127,9 @@ impl InspectorView {
                             .child(
                                 div()
                                     .min_w_0()
-                                    .truncate()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis_start()
                                     .text_color(rgb(p.muted))
                                     .child(directory),
                             )
@@ -2154,7 +2217,13 @@ impl InspectorView {
             );
         }
         body.id(("files-focus", list))
+            .role(Role::ListBox)
+            .aria_label(list_label(area))
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(rgb(p.panel))
             .track_focus(&self.focus[list])
+            .focus_visible(move |s| s.border_color(rgb(p.accent)))
             .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
                 v.file_keydown(&keyboard_area, list, e, cx)
             }))
@@ -2167,6 +2236,11 @@ impl InspectorView {
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
     ) {
+        if let Some(forward) = hunk_shortcut(event) {
+            self.jump_hunk(forward, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.details_loading {
             return;
         }
@@ -2175,6 +2249,10 @@ impl InspectorView {
             return;
         }
         let current = self.active_file[list].min(files.len() - 1);
+        let selected = self
+            .intent
+            .choice()
+            .is_some_and(|choice| files[current].same_identity(choice));
         let height = self.scroll[list]
             .0
             .borrow()
@@ -2185,21 +2263,17 @@ impl InspectorView {
         let page = (f32::from(height) / (32. + self.preferences.font_size_offset * 2.))
             .floor()
             .max(1.) as usize;
-        let target = match event.keystroke.key.as_str() {
-            "down" => current.saturating_add(1),
-            "up" => current.saturating_sub(1),
-            "pagedown" => current.saturating_add(page),
-            "pageup" => current.saturating_sub(page),
-            "home" => 0,
-            "end" => files.len() - 1,
-            "enter" | "space" => current,
-            _ => return,
-        }
-        .min(files.len() - 1);
-        cx.stop_propagation();
-        if target == current && !matches!(event.keystroke.key.as_str(), "enter" | "space") {
+        let key = event.keystroke.key.as_str();
+        if !matches!(
+            key,
+            "down" | "up" | "pagedown" | "pageup" | "home" | "end" | "enter" | "space"
+        ) {
             return;
         }
+        cx.stop_propagation();
+        let Some(target) = list_target(key, current, selected, files.len(), page) else {
+            return;
+        };
         self.active_file[list] = target;
         self.scroll[list].scroll_to_item(target, ScrollStrategy::Nearest);
         self.choose(files[target].clone(), cx);
@@ -2211,9 +2285,15 @@ impl InspectorView {
         let path = self
             .snapshot
             .as_ref()
-            .map(|s| filename(&s.file.path))
+            .map(|s| path_label(&s.file.path, s.file.old_path.as_deref()))
             .unwrap_or_else(|| "Aperçu des modifications".into());
-        let controls = self.viewer.update(cx, |v, cx| v.font_controls(window, cx));
+        let counts = self
+            .diff()
+            .and_then(|diff| line_counts(diff))
+            .map(|(additions, deletions)| diff_counts(additions, deletions, p, o));
+        let (hunks, controls) = self.viewer.update(cx, |v, cx| {
+            (v.hunk_controls(cx), v.font_controls(window, cx))
+        });
         div()
             .flex_1()
             .min_h(px(110.))
@@ -2235,13 +2315,12 @@ impl InspectorView {
                     .border_color(rgb(p.border))
                     .child(icon(IconName::FileText, 13., p.muted))
                     .child(
-                        div()
+                        path_title("compact-path", path, o)
                             .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11. + o))
-                            .child(path),
+                            .text_size(px(11. + o)),
                     )
+                    .children(counts)
+                    .child(hunks)
                     .child(controls),
             )
             .child(div().flex_1().min_h_0().child(self.diff_body(window, cx)))
@@ -2253,6 +2332,10 @@ impl InspectorView {
         self.copy_feedback_task = None;
     }
     fn copy_commit_sha(&mut self, sha: String, cx: &mut Context<Self>) {
+        // The retained panel belongs to the previous commit until details arrive.
+        if self.details_loading {
+            return;
+        }
         cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
         self.copied_sha = Some(sha);
         self.copy_feedback_task = Some(cx.spawn(async move |this, cx| {
@@ -2368,9 +2451,76 @@ impl InspectorView {
                 .into_any_element();
         };
         let (title, description) = self.commit_message.clone().unwrap_or_default();
+        // A new commit is being read: the retained content is dimmed and inert.
+        let loading = self.details_loading;
         let sha = details.sha.clone();
         let keyboard_sha = sha.clone();
         let copied = self.copied_sha.as_ref() == Some(&sha);
+        let sha_bar = div()
+            .id("commit-sha")
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(RADIUS_SM)
+            .border_1()
+            .border_color(rgb(p.panel))
+            .text_size(px(12. + o))
+            .child(div().text_color(rgb(p.muted)).child("commit :"));
+        let sha_bar = if loading {
+            sha_bar
+                .role(Role::Status)
+                .aria_label("Chargement du commit sélectionné")
+                .text_color(rgb(p.muted))
+                .child("Chargement…")
+        } else {
+            sha_bar
+                .role(Role::Button)
+                .aria_label(format!("Copier le SHA complet du commit {}", details.sha))
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(p.hover)))
+                .focus_visible(move |s| s.border_color(rgb(p.accent)))
+                .child(short_sha(&sha))
+                .when(self.sha_hovered || copied, |s| {
+                    s.child(
+                        deferred(
+                            div()
+                                .id("sha-copy-tooltip")
+                                .role(if copied { Role::Status } else { Role::Tooltip })
+                                .absolute()
+                                .top(relative(1.))
+                                .right(px(0.))
+                                .mt(px(3.))
+                                .px(px(8.))
+                                .py(px(4.))
+                                .rounded(RADIUS_SM)
+                                .bg(rgb(p.bg))
+                                .border_1()
+                                .border_color(rgb(p.border))
+                                .text_size(px(11. + o))
+                                .whitespace_nowrap()
+                                .child(if copied { "Copié !" } else { "Copier" }),
+                        )
+                        .with_priority(10),
+                    )
+                })
+                .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                    view.sha_hovered = *hovered;
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.copy_commit_sha(sha.clone(), cx);
+                }))
+                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                    if is_activate(event) {
+                        view.copy_commit_sha(keyboard_sha.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        };
         panel = panel.child(
             div()
                 .h(px(40. + o * 2.))
@@ -2380,70 +2530,14 @@ impl InspectorView {
                 .justify_center()
                 .border_b_1()
                 .border_color(rgb(p.border))
-                .child(
-                    div()
-                        .id("commit-sha")
-                        .role(Role::Button)
-                        .aria_label(format!("Copier le SHA complet du commit {}", details.sha))
-                        .focusable()
-                        .relative()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.))
-                        .px(px(8.))
-                        .py(px(5.))
-                        .rounded(RADIUS_SM)
-                        .text_size(px(12. + o))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(p.hover)))
-                        .child(div().text_color(rgb(p.muted)).child("commit :"))
-                        .child(short_sha(&sha))
-                        .when(self.sha_hovered || copied, |s| {
-                            s.child(
-                                deferred(
-                                    div()
-                                        .id("sha-copy-tooltip")
-                                        .role(if copied { Role::Status } else { Role::Tooltip })
-                                        .absolute()
-                                        .top(relative(1.))
-                                        .right(px(0.))
-                                        .mt(px(3.))
-                                        .px(px(8.))
-                                        .py(px(4.))
-                                        .rounded(RADIUS_SM)
-                                        .bg(rgb(p.bg))
-                                        .border_1()
-                                        .border_color(rgb(p.border))
-                                        .text_size(px(11. + o))
-                                        .whitespace_nowrap()
-                                        .child(if copied { "Copié !" } else { "Copier" }),
-                                )
-                                .with_priority(10),
-                            )
-                        })
-                        .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                            view.sha_hovered = *hovered;
-                            cx.notify();
-                        }))
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.copy_commit_sha(sha.clone(), cx);
-                        }))
-                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                            if is_activate(event) {
-                                view.copy_commit_sha(keyboard_sha.clone(), cx);
-                                cx.stop_propagation();
-                            }
-                        })),
-                ),
+                .child(sha_bar),
         );
         if let Some(limit) = &details.similarity_limited {
             panel = panel.child(notice(limit.clone(), p.warning, o));
         }
+        let title_line = (15. + o) * 1.5;
         panel = panel.child(
             div()
-                .h(relative(0.36))
-                .min_h(px(180.))
-                .max_h(px(290.))
                 .flex_shrink_0()
                 .mx(px(12.))
                 .mt(px(12.))
@@ -2455,14 +2549,16 @@ impl InspectorView {
                 .border_1()
                 .border_color(rgb(p.border))
                 .overflow_hidden()
+                .when(loading, |s| s.opacity(0.5))
                 .child(
                     div()
                         .id("commit-message")
                         .role(Role::Document)
                         .aria_label("Message du commit")
                         .track_scroll(&self.message_scroll)
-                        .flex_1()
-                        .min_h_0()
+                        // Fit the message between two title lines and a low cap.
+                        .min_h(px(24. + title_line * 2.))
+                        .max_h(px(132. + o * 4.))
                         .min_w_0()
                         .overflow_y_scroll()
                         .p(px(12.))
@@ -2515,21 +2611,26 @@ impl InspectorView {
                         .id(("commit-parent", index))
                         .role(Role::Button)
                         .aria_label(format!("Aller au commit parent {sha}"))
-                        .focusable()
-                        .cursor_pointer()
                         .text_color(rgb(p.text))
-                        .hover(|s| s.text_color(rgb(p.accent)))
                         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                         .child(short_sha(parent))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(InspectorEvent::NavigateCommit(sha.clone()));
-                        }))
-                        .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
-                            if is_activate(event) {
-                                cx.emit(InspectorEvent::NavigateCommit(keyboard_sha.clone()));
-                                cx.stop_propagation();
-                            }
-                        }))
+                        .when(!loading, |s| {
+                            s.tab_index(0)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(rgb(p.accent)))
+                                .focus_visible(|s| s.text_color(rgb(p.accent)).underline())
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(InspectorEvent::NavigateCommit(sha.clone()));
+                                }))
+                                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
+                                    if is_activate(event) {
+                                        cx.emit(InspectorEvent::NavigateCommit(
+                                            keyboard_sha.clone(),
+                                        ));
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                        })
                 }))
                 .into_any_element()
         });
@@ -2541,6 +2642,7 @@ impl InspectorView {
                 .flex_col()
                 .gap(px(10.))
                 .p(px(12.))
+                .when(loading, |s| s.opacity(0.5))
                 .child(self.commit_identity(
                     &details.author,
                     &details.email,
@@ -2573,7 +2675,7 @@ impl InspectorView {
                 .when(details.parents.len() > 1, |s| {
                     s.child(
                         div()
-                            .text_size(px(10. + o))
+                            .text_size(px(11. + o))
                             .text_color(rgb(p.muted))
                             .child("Fusion · diff comparé au premier parent"),
                     )
@@ -2587,6 +2689,7 @@ impl InspectorView {
             .border_color(rgb(p.border))
             .when(self.compact, |s| s.h(relative(0.30)))
             .when(!self.compact, |s| s.flex_1())
+            .when(loading, |s| s.opacity(0.5))
             .child(
                 div()
                     .h(px(40.))
@@ -2606,20 +2709,17 @@ impl InspectorView {
                             .child("Fichiers modifiés")
                             .child(
                                 div()
-                                    .h(px(17.))
                                     .px(px(5.))
                                     .rounded(RADIUS_SM)
                                     .bg(rgb(p.surface))
-                                    .text_size(px(9. + o))
+                                    .text_size(px(11. + o))
                                     .text_color(rgb(p.muted))
                                     .child(format_count(details.file_count)),
                             ),
                     )
                     .children(
-                        self.snapshot
-                            .as_ref()
-                            .and_then(|s| s.prepared.as_ref().map(|prepared| &prepared.diff))
-                            .map(|d| diff_counts(d, p, o)),
+                        self.commit_totals()
+                            .map(|(additions, deletions)| diff_counts(additions, deletions, p, o)),
                     ),
             )
             .child(self.mode_controls(false, cx));
@@ -2695,7 +2795,7 @@ impl InspectorView {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(9. + o))
+                                    .text_size(px(11. + o))
                                     .text_color(rgb(p.muted))
                                     .child(if staged {
                                         "Comparaison avec HEAD"
@@ -2709,7 +2809,7 @@ impl InspectorView {
                             .px(px(5.))
                             .rounded(RADIUS_SM)
                             .bg(rgb(p.surface))
-                            .text_size(px(9. + o))
+                            .text_size(px(11. + o))
                             .text_color(rgb(p.muted))
                             .child(format_count(count)),
                     ),
@@ -2742,7 +2842,7 @@ impl InspectorView {
             .border_color(rgb(p.border))
             .child(self.panel_heading("Modifications locales", IconName::FolderGit2));
         let Some(status) = self.status.clone() else {
-            return panel.child(self.state(if self.status_error.is_some(){"Impossible de lire les modifications locales"}else if self.status_loading{"Lecture des modifications locales…"}else{"Fichiers non commités"},self.status_error.as_deref().unwrap_or("Ouvrez un dépôt pour consulter les changements de son index et de ses fichiers de travail."),IconName::FolderGit2,self.status_error.is_some())).into_any_element();
+            return panel.child(self.state(if self.status_error.is_some(){"Impossible de lire les modifications locales"}else if self.status_loading{"Lecture des modifications locales…"}else{"Aucune modification locale à afficher"},self.status_error.as_deref().unwrap_or("Ouvrez un dépôt pour consulter les changements de son index et de ses fichiers de travail."),IconName::FolderGit2,self.status_error.is_some())).into_any_element();
         };
         if !status.available {
             return panel
@@ -2968,7 +3068,7 @@ fn mode_button(
         } else {
             accesskit::Toggled::False
         })
-        .focusable()
+        .tab_index(0)
         .px(px(8.))
         .py(px(4.))
         .rounded(RADIUS_MD)
@@ -2976,28 +3076,44 @@ fn mode_button(
         .border_color(rgb(if selected { p.accent_border } else { p.panel }))
         .bg(rgb(if selected { p.accent_soft } else { p.panel }))
         .text_color(rgb(if selected { p.accent } else { p.muted }))
-        .text_size(px(10. + o))
+        .text_size(px(11. + o))
         .cursor_pointer()
         .hover(move |s| s.bg(rgb(p.surface)))
         .focus_visible(move |style| style.border_color(rgb(p.accent)))
         .child(label)
 }
-fn diff_counts(diff: &FileDiff, p: Palette, o: f32) -> Div {
-    div()
-        .flex()
-        .gap(px(8.))
-        .font_family(MONO)
-        .text_size(px(10. + o))
-        .child(
-            div()
-                .text_color(rgb(p.success))
-                .child(format!("+{}", format_count(diff.additions))),
-        )
-        .child(
-            div()
-                .text_color(rgb(p.danger))
-                .child(format!("−{}", format_count(diff.deletions))),
-        )
+fn list_label(area: &str) -> &'static str {
+    match area {
+        "" => "Fichiers modifiés",
+        "staged" => "Fichiers indexés",
+        "unstaged" => "Fichiers non indexés",
+        _ => "Fichiers du stash",
+    }
+}
+/// Row reached by a list key, or `None` when nothing changes. Without a
+/// selected row, the first move selects the active row instead of skipping it.
+fn list_target(
+    key: &str,
+    current: usize,
+    selected: bool,
+    len: usize,
+    page: usize,
+) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let current = current.min(last);
+    let target = match key {
+        "down" | "up" if !selected => current,
+        "down" => current + 1,
+        "up" => current.saturating_sub(1),
+        "pagedown" => current.saturating_add(page),
+        "pageup" => current.saturating_sub(page),
+        "home" => 0,
+        "end" => last,
+        "enter" | "space" => return Some(current),
+        _ => return None,
+    }
+    .min(last);
+    (target != current || !selected).then_some(target)
 }
 fn file_status_label(status: &str) -> &'static str {
     match status {
@@ -3016,9 +3132,6 @@ fn split_path(path: &str) -> (String, String) {
         Some(index) => (path[..=index].into(), path[index + 1..].into()),
         None => (String::new(), path.into()),
     }
-}
-fn filename(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).into()
 }
 #[cfg(test)]
 mod tests {
@@ -3230,6 +3343,49 @@ mod tests {
             intent.resolve_status(current, current, &rows),
             RefreshedIntent::Empty
         ));
+    }
+    #[test]
+    fn commit_totals_sum_every_file_once_and_stay_hidden_until_exact() {
+        let mut totals = super::LineTotals::default();
+        let mut patch = FileDiff {
+            binary: false,
+            truncated: false,
+            additions: 3,
+            deletions: 1,
+            hunks: Vec::new(),
+        };
+        totals.record("a", &patch);
+        assert_eq!(totals.complete(2), None);
+        // A file read again, e.g. by the preload, is not counted twice.
+        totals.record("a", &patch);
+        patch.additions = 0;
+        patch.deletions = 4;
+        totals.record("b", &patch);
+        assert_eq!(totals.complete(2), Some((3, 5)));
+        // A patch skipped by size makes the commit total unknown.
+        patch.truncated = true;
+        patch.hunks.clear();
+        totals.record("c", &patch);
+        assert_eq!(totals.complete(3), None);
+    }
+    #[test]
+    fn file_list_keys_select_the_active_row_before_moving() {
+        use super::list_target;
+        // Nothing selected yet: the first arrow selects the active row.
+        assert_eq!(list_target("down", 0, false, 5, 3), Some(0));
+        assert_eq!(list_target("up", 2, false, 5, 3), Some(2));
+        assert_eq!(list_target("down", 0, true, 5, 3), Some(1));
+        assert_eq!(list_target("up", 0, true, 5, 3), None);
+        assert_eq!(list_target("down", 4, true, 5, 3), None);
+        assert_eq!(list_target("pagedown", 1, true, 5, 3), Some(4));
+        assert_eq!(list_target("pageup", 4, true, 5, 3), Some(1));
+        assert_eq!(list_target("home", 3, true, 5, 3), Some(0));
+        assert_eq!(list_target("end", 3, true, 5, 3), Some(4));
+        // Enter and Space reopen the current row, like a click.
+        assert_eq!(list_target("enter", 3, true, 5, 3), Some(3));
+        assert_eq!(list_target("space", 9, false, 5, 3), Some(4));
+        assert_eq!(list_target("left", 1, true, 5, 3), None);
+        assert_eq!(list_target("down", 0, false, 0, 3), None);
     }
     #[test]
     fn diff_cache_evicts_least_recently_used_foreground_entries() {
