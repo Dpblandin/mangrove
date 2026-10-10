@@ -116,6 +116,17 @@ pub fn alt_shortcut_label(key: &str) -> String {
     }
 }
 
+/// Shortcut that keeps the Control key on every platform: « ⌃⇥ » or « ⌃⇧⇥ »
+/// on macOS, « Ctrl+Tab » or « Ctrl+Maj+Tab » elsewhere.
+pub fn control_shortcut_label(key: &str, shift: bool) -> String {
+    if cfg!(target_os = "macos") {
+        let key = if key == "Tab" { "⇥" } else { key };
+        format!("⌃{}{key}", if shift { "⇧" } else { "" })
+    } else {
+        format!("Ctrl+{}{key}", if shift { "Maj+" } else { "" })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{alt_shortcut_label, compact_date_at, count_label, display_path};

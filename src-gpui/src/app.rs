@@ -2,7 +2,7 @@
 #[cfg(feature = "app-benchmark")]
 use crate::perf::{Configuration, PerfAction, PerfSession, PerfSnapshot};
 use crate::{
-    chrome::{Chrome, ChromeEvent},
+    chrome::{Chrome, ChromeEvent, Notice},
     command_palette::{CommandPalette, PaletteEvent},
     history_view::{HistoryEvent, HistoryView},
     inspector::{InspectorEvent, InspectorView},
@@ -15,11 +15,14 @@ use crate::{
 };
 use gpui_kit::{component::input::Escape as InputEscape, prelude::*, *};
 use mangrove_core::{Workspace, model::RepositoryInfo};
+use std::sync::Arc;
 #[cfg(feature = "app-benchmark")]
 use std::time::Instant;
-use std::{sync::Arc, time::Duration};
 
 mod commands;
+mod fetch;
+
+use fetch::FetchFeedback;
 
 actions!(
     mangrove,
@@ -28,6 +31,8 @@ actions!(
         OpenRepository,
         NewTab,
         CloseTab,
+        NextTab,
+        PreviousTab,
         ShowSettings,
         ShowCommandPalette,
         Escape,
@@ -37,6 +42,13 @@ actions!(
         ZoomReset
     ]
 );
+
+/// Cmd/Ctrl+1 to 8 select a tab position, 9 the last tab.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = mangrove, no_json)]
+pub struct SelectTab {
+    pub position: usize,
+}
 
 pub fn bind_keys(cx: &mut App) {
     use gpui_kit::component::input::{Copy, Cut, Paste, SelectAll};
@@ -55,27 +67,38 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new(&format!("{modifier}--"), ZoomOut, None),
             KeyBinding::new(&format!("{modifier}-0"), ZoomReset, None),
         ]);
+        cx.bind_keys((1..=9).map(|position| {
+            KeyBinding::new(
+                &format!("{modifier}-{position}"),
+                SelectTab { position },
+                None,
+            )
+        }));
     }
-    cx.bind_keys([KeyBinding::new("escape", Escape, None)]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+        KeyBinding::new("escape", Escape, None),
+    ]);
     cx.set_menus([
         Menu::new("Mangrove").items([
             MenuItem::action("Paramètres…", ShowSettings),
             MenuItem::separator(),
             MenuItem::action("Quitter Mangrove", Quit),
         ]),
-        Menu::new("File").items([
+        Menu::new("Fichier").items([
             MenuItem::action("Ouvrir un dépôt…", OpenRepository),
             MenuItem::action("Nouvel onglet", NewTab),
             MenuItem::action("Fermer l’onglet", CloseTab),
         ]),
-        Menu::new("Edit").items([
+        Menu::new("Édition").items([
             MenuItem::action("Couper", Cut),
             MenuItem::action("Copier", Copy),
             MenuItem::action("Coller", Paste),
             MenuItem::separator(),
             MenuItem::action("Tout sélectionner", SelectAll),
         ]),
-        Menu::new("View").items([
+        Menu::new("Affichage").items([
             MenuItem::action("Palette de commandes…", ShowCommandPalette),
             MenuItem::separator(),
             MenuItem::action("Rechercher des commits", Search),
@@ -83,6 +106,13 @@ pub fn bind_keys(cx: &mut App) {
             MenuItem::action("Agrandir le texte", ZoomIn),
             MenuItem::action("Réduire le texte", ZoomOut),
             MenuItem::action("Taille du texte par défaut", ZoomReset),
+        ]),
+        Menu::new("Fenêtre").items([
+            MenuItem::action("Onglet suivant", NextTab),
+            MenuItem::action("Onglet précédent", PreviousTab),
+            MenuItem::separator(),
+            MenuItem::action("Premier onglet", SelectTab { position: 1 }),
+            MenuItem::action("Dernier onglet", SelectTab { position: 9 }),
         ]),
     ]);
 }
@@ -99,6 +129,8 @@ pub struct Mangrove {
     opening: bool,
     fetching: bool,
     error: Option<String>,
+    fetch_error: Option<Notice>,
+    fetch_feedback: FetchFeedback,
     generation: u64,
     refresh_queued: bool,
     pending_navigation: Option<String>,
@@ -178,6 +210,8 @@ impl Mangrove {
                     }
                 }
             }),
+            // Closed tabs, settings and dialogs leave no focused element behind.
+            cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)),
         ];
         let mut this = Self {
             engine,
@@ -191,6 +225,8 @@ impl Mangrove {
             opening: false,
             fetching: false,
             error: None,
+            fetch_error: None,
+            fetch_feedback: FetchFeedback::default(),
             generation: 0,
             refresh_queued: false,
             pending_navigation: None,
@@ -248,8 +284,10 @@ impl Mangrove {
     fn sync_chrome(&mut self, cx: &mut Context<Self>) {
         let error = self
             .error
-            .clone()
-            .or_else(|| self.history.read(cx).error().map(str::to_owned));
+            .as_deref()
+            .or_else(|| self.history.read(cx).error())
+            .map(Notice::plain)
+            .or_else(|| self.fetch_error.clone());
         let name = self
             .repository
             .as_ref()
@@ -293,6 +331,8 @@ impl Mangrove {
         self.generation += 1;
         self.open_lane.invalidate_pending();
         self.fetch_timer = None;
+        self.fetch_error = None;
+        self.fetch_feedback.reset_backoff();
         self.opening = false;
         self.refresh_queued = false;
         self.repository = None;
@@ -352,6 +392,12 @@ impl Mangrove {
         cx: &mut Context<Self>,
     ) {
         if !refresh {
+            let retry = (path.clone(), solo.clone());
+            if self.confirm_leave_clone(window, cx, move |view, window, cx| {
+                view.open(retry.0, false, retry.1, window, cx)
+            }) {
+                return;
+            }
             self.chrome
                 .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         }
@@ -389,6 +435,8 @@ impl Mangrove {
         }
         if !same_path {
             self.repository = None;
+            self.fetch_error = None;
+            self.fetch_feedback.reset_backoff();
             self.history.update(cx, |view, cx| view.clear(cx));
             self.sidebar
                 .update(cx, |view, cx| view.prepare_repository_open(&path, cx));
@@ -463,6 +511,10 @@ impl Mangrove {
                                     .update(cx, |history, cx| history.jump_to(sha, window, cx));
                             }
                             view.sync_selection(cx);
+                            view.error = None;
+                            if view.focus.is_focused(window) {
+                                view.restore_focus(window, cx);
+                            }
                         }
                         Err(error) => {
                             view.error = Some(error);
@@ -490,18 +542,31 @@ impl Mangrove {
             self.open(repo.path.clone(), true, None, window, cx);
         }
     }
+    /// Activating a tab, even the current one, shows its content and focus.
     fn activate_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.active == Some(id) {
+        if self.confirm_leave_clone(window, cx, move |view, window, cx| {
+            view.activate_tab(id, window, cx)
+        }) {
             return;
         }
-        let path = self.tabs.activate(id);
-        self.clear_workspace(cx);
+        self.chrome
+            .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
         self.leave_settings(window, cx);
-        self.focus.focus(window, cx);
-        if let Some(path) = path {
-            self.open(path, true, None, window, cx);
-        } else {
-            self.refresh_recent(cx);
+        if self.tabs.active != Some(id) {
+            let path = self.tabs.activate(id);
+            self.clear_workspace(cx);
+            if let Some(path) = path {
+                self.open(path, true, None, window, cx);
+            } else {
+                self.refresh_recent(cx);
+            }
+        }
+        self.restore_focus(window, cx);
+        cx.notify();
+    }
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.neighbor(step) {
+            self.activate_tab(id, window, cx);
         }
     }
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -521,7 +586,7 @@ impl Mangrove {
         if active {
             let path = self.tabs.active_tab().and_then(|tab| tab.path.clone());
             self.clear_workspace(cx);
-            self.focus.focus(window, cx);
+            self.restore_focus(window, cx);
             if let Some(path) = path {
                 self.open(path, true, None, window, cx);
             } else {
@@ -539,8 +604,27 @@ impl Mangrove {
         self.tabs.create();
         self.leave_settings(window, cx);
         self.clear_workspace(cx);
-        self.focus.focus(window, cx);
+        self.restore_focus(window, cx);
         self.refresh_recent(cx);
+    }
+    /// True when the center shows the history list, which may take the focus.
+    fn history_visible(&self, cx: &App) -> bool {
+        let chrome = self.chrome.read(cx);
+        self.repository.is_some()
+            && !self.settings
+            && !self.palette_open
+            && !chrome.repository_browser_open()
+            && !chrome.choosing_repository()
+            && !self.inspector.read(cx).central_active()
+    }
+    /// Give the keyboard to the history list when shown, else to the workspace.
+    fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history_visible(cx) {
+            self.history
+                .update(cx, |history, cx| history.focus_list(window, cx));
+        } else {
+            self.focus.focus(window, cx);
+        }
     }
     fn pick_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.confirm_leave_clone(window, cx, |view, window, cx| {
@@ -784,9 +868,7 @@ impl Mangrove {
     fn chrome_event(&mut self, event: &ChromeEvent, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             event,
-            ChromeEvent::OpenRepository(_)
-                | ChromeEvent::ActivateTab(_)
-                | ChromeEvent::NewTab
+            ChromeEvent::NewTab
                 | ChromeEvent::CloseRepositoryBrowser
                 | ChromeEvent::ManageIntegrations
                 | ChromeEvent::ShowSettings
@@ -800,10 +882,7 @@ impl Mangrove {
         }
         if matches!(
             event,
-            ChromeEvent::OpenRepository(_)
-                | ChromeEvent::ActivateTab(_)
-                | ChromeEvent::NewTab
-                | ChromeEvent::ProfileChanged
+            ChromeEvent::OpenRepository(_) | ChromeEvent::NewTab | ChromeEvent::ProfileChanged
         ) {
             self.chrome
                 .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
@@ -823,7 +902,7 @@ impl Mangrove {
             ChromeEvent::CloseRepositoryBrowser => {
                 self.chrome
                     .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
-                self.focus.focus(window, cx);
+                self.restore_focus(window, cx);
                 cx.notify();
             }
             ChromeEvent::ManageIntegrations => {
@@ -856,10 +935,10 @@ impl Mangrove {
             }
             ChromeEvent::BackToWorkspace => {
                 self.leave_settings(window, cx);
-                self.focus.focus(window, cx);
+                self.restore_focus(window, cx);
                 cx.notify();
             }
-            ChromeEvent::Fetch => self.fetch(window, cx),
+            ChromeEvent::Fetch => self.fetch(true, window, cx),
             ChromeEvent::PreferencesChanged => self.apply_preferences(window, cx),
             ChromeEvent::ProfileChanged => {
                 self.recent_task = None;
@@ -877,6 +956,9 @@ impl Mangrove {
             }
             ChromeEvent::DismissError => {
                 self.error = None;
+                if let Some(notice) = self.fetch_error.take() {
+                    self.fetch_feedback.dismiss(notice);
+                }
                 self.history
                     .update(cx, |history, cx| history.clear_error(cx));
                 self.sync_chrome(cx);
@@ -901,20 +983,19 @@ impl Mangrove {
             return;
         }
         let generation = self.generation;
+        let delay = self.fetch_feedback.delay(interval);
         self.fetch_timer = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs(u64::from(interval) * 60))
-                .await;
+            cx.background_executor().timer(delay).await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |view, cx| {
                     if view.generation == generation {
-                        view.fetch(window, cx);
+                        view.fetch(false, window, cx);
                     }
                 });
             });
         }));
     }
-    fn fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn fetch(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repository.clone() else {
             return;
         };
@@ -923,23 +1004,26 @@ impl Mangrove {
         }
         self.fetching = true;
         self.fetch_timer = None;
-        self.error = None;
         self.sync_chrome(cx);
-        let generation = self.generation;
         let engine = self.engine.clone();
         self.fetch_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let session = repo.id.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { engine.fetch_repository(&repo.id) })
+                .spawn(async move { engine.fetch_repository(&session) })
                 .await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |view, cx| {
                     view.fetching = false;
-                    if view.generation == generation {
-                        view.error = match result {
-                            Ok(result) => result.error,
-                            Err(error) => Some(error),
-                        };
+                    // A refresh may have replaced the generation meanwhile;
+                    // the result still belongs to the same repository session.
+                    if view
+                        .repository
+                        .as_ref()
+                        .is_some_and(|current| current.id == repo.id)
+                    {
+                        let error = result.map_or_else(Some, |result| result.error);
+                        view.fetch_error = view.fetch_feedback.finish(error, manual);
                         view.refresh(window, cx);
                     }
                     view.sync_chrome(cx);
@@ -1111,6 +1195,9 @@ impl Render for Mangrove {
             .capture_action(cx.listener(Self::guard_palette::<OpenRepository>))
             .capture_action(cx.listener(Self::guard_palette::<NewTab>))
             .capture_action(cx.listener(Self::guard_palette::<CloseTab>))
+            .capture_action(cx.listener(Self::guard_palette::<NextTab>))
+            .capture_action(cx.listener(Self::guard_palette::<PreviousTab>))
+            .capture_action(cx.listener(Self::guard_palette::<SelectTab>))
             .capture_action(cx.listener(Self::guard_palette::<ShowSettings>))
             .capture_action(cx.listener(Self::guard_palette::<Search>))
             .capture_action(cx.listener(Self::guard_palette::<ZoomIn>))
@@ -1128,11 +1215,24 @@ impl Render for Mangrove {
                     view.close_tab(id, window, cx);
                 }
             }))
+            .on_action(cx.listener(|view, _: &NextTab, window, cx| view.cycle_tab(1, window, cx)))
+            .on_action(
+                cx.listener(|view, _: &PreviousTab, window, cx| view.cycle_tab(-1, window, cx)),
+            )
+            .on_action(cx.listener(|view, action: &SelectTab, window, cx| {
+                if let Some(id) = view.tabs.by_shortcut(action.position) {
+                    view.activate_tab(id, window, cx);
+                }
+            }))
             .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
                 view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
             }))
             .on_action(cx.listener(|view, _: &Search, window, cx| {
-                if view.repository.is_none() {
+                if view.repository.is_none()
+                    || view.confirm_leave_clone(window, cx, |_, window, cx| {
+                        window.dispatch_action(Box::new(Search), cx)
+                    })
+                {
                     return;
                 }
                 view.leave_settings(window, cx);
@@ -1143,13 +1243,7 @@ impl Render for Mangrove {
                 // ModeChanged restores the list focus through a queued
                 // event; focus the search after that event and the view switch.
                 cx.on_next_frame(window, |view, window, cx| {
-                    if !view.settings
-                        && !view.palette_open
-                        && !view.chrome.read(cx).repository_browser_open()
-                        && view.repository.is_some()
-                        && !view.inspector.read(cx).central_active()
-                        && !view.chrome.read(cx).choosing_repository()
-                    {
+                    if view.history_visible(cx) {
                         view.history
                             .update(cx, |history, cx| history.focus_search(window, cx));
                     }
@@ -1197,17 +1291,34 @@ impl Render for Mangrove {
         let topbar = self
             .chrome
             .update(cx, |chrome, cx| chrome.render_topbar(window, cx));
-        let sidebar = if self.sidebar.read(cx).repository.is_some() {
-            render_cached_view(self.sidebar.clone(), window)
-        } else {
-            self.chrome
-                .read(cx)
-                .render_empty_sidebar()
-                .into_any_element()
-        };
-        let footer = self.chrome.read(cx).render_sidebar_footer();
-        let left_divider = self.chrome.update(cx, |chrome, cx| {
-            chrome.render_divider(Pane::Left, width, window, cx)
+        let sidebar_ready = self.sidebar.read(cx).repository.is_some();
+        // The home screen has no references to show; it uses the full width.
+        let left_pane = (sidebar_ready || self.repository.is_some() || self.opening).then(|| {
+            let sidebar = if sidebar_ready {
+                render_cached_view(self.sidebar.clone(), window)
+            } else {
+                self.chrome
+                    .read(cx)
+                    .render_empty_sidebar()
+                    .into_any_element()
+            };
+            let footer = self.chrome.read(cx).render_sidebar_footer();
+            let divider = self.chrome.update(cx, |chrome, cx| {
+                chrome.render_divider(Pane::Left, width, window, cx)
+            });
+            [
+                div()
+                    .w(px(layout.left))
+                    .flex_shrink_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(p.panel))
+                    .child(div().flex_1().min_h_0().child(sidebar))
+                    .child(footer)
+                    .into_any_element(),
+                divider,
+            ]
         });
         let center = if self.repository.is_some() && self.inspector.read(cx).central_active() {
             self.inspector
@@ -1229,18 +1340,7 @@ impl Render for Mangrove {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
-                .child(
-                    div()
-                        .w(px(layout.left))
-                        .flex_shrink_0()
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .bg(rgb(p.panel))
-                        .child(div().flex_1().min_h_0().child(sidebar))
-                        .child(footer),
-                )
-                .child(left_divider)
+                .children(left_pane.into_iter().flatten())
                 .child(
                     div()
                         .flex()
