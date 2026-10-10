@@ -8,6 +8,7 @@ use crate::{
     inspector::{InspectorEvent, InspectorView, InspectorViewState},
     preferences::{Pane, Preferences},
     repository_open::{OpenIntent, RepositoryOpenLane},
+    settings::SettingsView,
     sidebar::{SidebarEvent, SidebarView, SidebarViewState},
     tabs::Tabs,
     theme::SANS,
@@ -167,6 +168,8 @@ pub struct Mangrove {
     tab_states: HashMap<u64, TabState>,
     restoring: Option<(u64, TabState)>,
     settings: bool,
+    /// The settings were opened over the clone screen, which they return to.
+    settings_from_clone: bool,
     opening: bool,
     fetching: bool,
     error: Option<String>,
@@ -273,6 +276,7 @@ impl Mangrove {
             tab_states: HashMap::new(),
             restoring: None,
             settings: false,
+            settings_from_clone: false,
             opening: false,
             fetching: false,
             error: None,
@@ -406,6 +410,29 @@ impl Mangrove {
                 .update(cx, |view, cx| view.leave(window, cx));
         }
         self.settings = false;
+        self.settings_from_clone = false;
+    }
+    /// Shows the settings in place of the workspace or of the clone screen.
+    fn enter_settings(
+        &mut self,
+        show: impl FnOnce(&mut SettingsView, &mut Window, &mut Context<SettingsView>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let from_clone = self.chrome.read(cx).repository_browser_open();
+        self.chrome
+            .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
+        self.chrome
+            .read(cx)
+            .settings
+            .clone()
+            .update(cx, |view, cx| {
+                view.set_return_to_clone(from_clone, cx);
+                show(view, window, cx);
+            });
+        self.settings = true;
+        self.settings_from_clone = from_clone;
+        cx.notify();
     }
 
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1086,37 +1113,35 @@ impl Mangrove {
                 self.restore_focus(window, cx);
                 cx.notify();
             }
-            ChromeEvent::ManageIntegrations => {
-                self.chrome
-                    .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
-                self.chrome
-                    .read(cx)
-                    .settings
-                    .clone()
-                    .update(cx, |settings, cx| settings.show_integrations(window, cx));
-                self.settings = true;
-                cx.notify();
-            }
+            ChromeEvent::ManageIntegrations => self.enter_settings(
+                |settings, window, cx| settings.show_integrations(window, cx),
+                window,
+                cx,
+            ),
             ChromeEvent::ShowSettings => {
                 if self.settings || !self.chrome.read(cx).can_show_settings(cx) {
                     return;
                 }
-                self.chrome
-                    .update(cx, |chrome, cx| chrome.close_repository_browser(cx));
-                let chrome = self.chrome.read(cx);
-                let settings = chrome.settings.clone();
-                let interval = chrome.preferences.auto_fetch_interval;
-                settings.update(cx, |view, cx| {
-                    view.set_interval(interval, window, cx);
-                    view.show(window, cx);
-                });
-                self.focus.focus(window, cx);
-                self.settings = true;
-                cx.notify();
+                let interval = self.chrome.read(cx).preferences.auto_fetch_interval;
+                // The settings give the keyboard to their navigation.
+                self.enter_settings(
+                    |settings, window, cx| {
+                        settings.set_interval(interval, window, cx);
+                        settings.show(window, cx);
+                    },
+                    window,
+                    cx,
+                );
             }
             ChromeEvent::BackToWorkspace => {
+                let to_clone = self.settings && self.settings_from_clone;
                 self.leave_settings(window, cx);
-                self.restore_focus(window, cx);
+                if to_clone {
+                    self.chrome
+                        .update(cx, |chrome, cx| chrome.open_repository_browser(window, cx));
+                } else {
+                    self.restore_focus(window, cx);
+                }
                 cx.notify();
             }
             ChromeEvent::Fetch => self.fetch(true, window, cx),
@@ -1402,7 +1427,10 @@ impl Render for Mangrove {
             )
             .on_action(cx.listener(|view, _: &NewTab, window, cx| view.new_tab(window, cx)))
             .on_action(cx.listener(|view, _: &CloseTab, window, cx| {
-                if let Some(id) = view.tabs.active {
+                // The settings cover the tabs; closing closes them, not a hidden tab.
+                if view.settings {
+                    view.chrome_event(&ChromeEvent::BackToWorkspace, window, cx);
+                } else if let Some(id) = view.tabs.active {
                     view.close_tab(id, window, cx);
                 }
             }))

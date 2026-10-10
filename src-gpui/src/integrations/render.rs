@@ -1,11 +1,55 @@
 //! Native settings and remote-repository views. Credentials and background
 //! work remain owned by the parent view.
 use super::*;
+use crate::settings::ui::{
+    self, CONTENT_MAX_WIDTH, PAGE_GAP, PAGE_PADDING, action, card, card_title, danger_action,
+    field, field_label, input_control, link_action, note, page_header, primary_action,
+};
 use crate::theme::{RADIUS_LG, RADIUS_MD, RADIUS_SM, mix};
-use gpui_kit::base::SelectableText;
+use gpui_kit::base::{RadioGroup, SelectableText};
 use gpui_kit::component::spinner::Spinner;
 
 impl IntegrationsView {
+    /// The message, confirmation or error reported at `spot`, with a way to
+    /// stop the operation it describes.
+    fn feedback_at(&self, spot: &Spot, cx: &mut Context<Self>) -> Option<Div> {
+        let feedback = self.feedback.as_ref().filter(|feedback| {
+            &feedback.spot == spot
+                // The repository select shows its own loading state.
+                && !(feedback.tone == Tone::Progress
+                    && self.pending == Some(PendingOperation::RepositoryRead))
+        })?;
+        let cancellable = feedback.tone == Tone::Progress
+            && self.pending.is_some_and(|operation| {
+                !matches!(
+                    operation,
+                    PendingOperation::Disconnect | PendingOperation::RepositoryRead
+                )
+            });
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    ui::feedback(
+                        feedback.tone,
+                        feedback.text.clone(),
+                        self.palette,
+                        self.offset,
+                    )
+                    .flex_1(),
+                )
+                .when(cancellable, |row| {
+                    row.child(
+                        action("remote-cancel", "Annuler", self.palette, self.offset).on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_pending(window, cx)),
+                        ),
+                    )
+                }),
+        )
+    }
+
     fn clone_content(&self, repository: Option<&Repository>, cx: &mut Context<Self>) -> Div {
         let p = self.palette;
         let offset = self.offset;
@@ -19,7 +63,7 @@ impl IntegrationsView {
             .then(|| display_path(&parent.join(&name).to_string_lossy()));
         let mut form = card(p)
             .gap(px(18.))
-            .child(subtitle(
+            .child(card_title(
                 if self.direct_clone {
                     "Depuis une URL"
                 } else {
@@ -62,7 +106,7 @@ impl IntegrationsView {
                 input_control(
                     &self.clone_url,
                     "clone-url",
-                    "URL du dépôt · HTTPS ou SSH",
+                    "URL du dépôt (HTTPS ou SSH)",
                     p,
                     offset,
                 ),
@@ -93,7 +137,7 @@ impl IntegrationsView {
                                     .px(px(12.))
                                     .py(px(6.))
                                     .border_1()
-                                    .border_color(rgb(p.border))
+                                    .border_color(rgb(ui::field_border(p)))
                                     .rounded(RADIUS_MD)
                                     .bg(rgb(p.bg))
                                     .text_color(rgb(p.text))
@@ -108,7 +152,7 @@ impl IntegrationsView {
                                     })
                                     .search_placeholder("Rechercher un dépôt…")
                                     .accessibility_label(if loading {
-                                        "Dépôt à cloner · chargement des dépôts"
+                                        "Dépôt à cloner, chargement des dépôts"
                                     } else {
                                         "Dépôt à cloner"
                                     })
@@ -157,7 +201,7 @@ impl IntegrationsView {
                     destination.as_ref().filter(|_| remote.is_some()),
                     |view, destination| {
                         view.child(
-                            note(&format!("Destination : {destination}"), p)
+                            note(format!("Destination : {destination}"), p)
                                 .text_size(px(11. + offset)),
                         )
                     },
@@ -237,7 +281,7 @@ impl IntegrationsView {
                     // Keep the visible end-of-list sentinel from restarting the
                     // same page until the user explicitly retries.
                     this.repository_load_error = Some(mangrove_remote::RemoteError::Cancelled);
-                    this.message = None;
+                    this.feedback = None;
                     cx.notify();
                 },
             ))
@@ -254,7 +298,7 @@ impl IntegrationsView {
             .items_center()
             .gap(px(8.))
             .child(
-                note(&description, p)
+                note(description, p)
                     .flex_1()
                     .truncate()
                     .text_size(px(11. + offset)),
@@ -265,12 +309,6 @@ impl IntegrationsView {
     fn profiles_content(&self, cx: &mut Context<Self>) -> Div {
         let p = self.palette;
         let offset = self.offset;
-        let mut content = div().flex().flex_col().gap(px(24.)).child(section_header(
-            "Profils",
-            "Un espace personnel pour vos comptes, préférences et dépôts récents.",
-            p,
-            offset,
-        ));
         let mut profiles = div().flex().flex_col().gap(px(10.));
         for profile in &self.profiles {
             let id = profile.id.clone();
@@ -281,95 +319,103 @@ impl IntegrationsView {
                 .min_w_0()
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .pr(px(12.))
+                .gap(px(12.))
+                .p(px(14.))
                 .rounded(RADIUS_LG)
                 .border_1()
                 .border_color(rgb(if active { p.accent_border } else { p.border }))
-                .bg(rgb(if active { p.accent_soft } else { p.panel }));
+                .bg(rgb(if active {
+                    ui::selected_fill(p)
+                } else {
+                    p.panel
+                }));
             if self.renaming_profile.as_ref() == Some(&profile.id) {
+                let empty = self.profile_rename.read(cx).value().trim().is_empty();
                 profiles = profiles.child(
-                    row.p(px(12.))
-                        .gap(px(12.))
-                        .child(profile_avatar(profile, p, 36.))
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
                         .child(
-                            input_control(
-                                &self.profile_rename,
-                                "profile-rename",
-                                "Nom du profil",
-                                p,
-                                offset,
-                            )
-                            .flex_1(),
+                            row.child(profile_avatar(profile, p, 36.))
+                                .child(
+                                    input_control(
+                                        &self.profile_rename,
+                                        "profile-rename",
+                                        "Nom du profil",
+                                        p,
+                                        offset,
+                                    )
+                                    .flex_1(),
+                                )
+                                .child(
+                                    primary_action("profile-rename-save", "Enregistrer", p, offset)
+                                        .disabled(empty)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.save_profile_name(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    link_action("profile-rename-cancel", "Annuler", p, offset)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.cancel_profile_rename(window, cx)
+                                        })),
+                                ),
                         )
-                        .child(
-                            primary_action("profile-rename-save", "Enregistrer", p, offset)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.save_profile_name(window, cx)
-                                })),
-                        )
-                        .child(
-                            link_action("profile-rename-cancel", "Annuler", p, offset).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.cancel_profile_rename(window, cx)
-                                }),
-                            ),
-                        ),
+                        .children(self.feedback_at(&Spot::ProfileRename, cx)),
                 );
                 continue;
             }
+            let activate_id = id.clone();
             let rename_id = id.clone();
             let delete_id = id.clone();
             let deleting = self.deleting_profile.as_ref() == Some(&profile.id);
             profiles = profiles.child(
-                row.hover(move |style| style.bg(rgb(p.hover)))
+                row.child(profile_avatar(profile, p, 36.))
                     .child(
-                        Button::new(SharedString::from(format!("profile-{id}")))
+                        div()
                             .flex_1()
                             .min_w_0()
-                            .p(px(16.))
-                            .rounded(RADIUS_LG)
-                            .border_1()
-                            .border_color(transparent_black())
-                            .justify_start()
-                            .gap(px(14.))
-                            .cursor_pointer()
-                            .accessibility_label(format!("Sélectionner le profil {}", profile.name))
-                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                            .disabled(deleting)
-                            .styles(|styles| {
-                                styles.disabled(|style| style.opacity(0.5).cursor_default())
-                            })
-                            .child(profile_avatar(profile, p, 36.))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_left()
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(profile.name.clone()),
-                                    )
-                                    .child(
-                                        note(
-                                            &count_label(
-                                                profile.accounts.len(),
-                                                "compte connecté",
-                                                "comptes connectés",
-                                            ),
-                                            p,
-                                        )
-                                        .text_size(px(11. + offset)),
-                                    ),
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(profile.name.clone()),
                             )
-                            .when(active, |view| {
-                                view.child(badge("Actif", p.accent, p.accent_soft, offset))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_profile(id.clone(), cx)
-                            })),
+                            .child(
+                                note(
+                                    if deleting {
+                                        "Suppression…".to_string()
+                                    } else {
+                                        count_label(
+                                            profile.accounts.len(),
+                                            "compte connecté",
+                                            "comptes connectés",
+                                        )
+                                    },
+                                    p,
+                                )
+                                .text_size(px(11. + offset)),
+                            ),
                     )
+                    .when(active, |row| row.child(active_badge(p, offset)))
+                    .when(!active, |row| {
+                        row.child(
+                            action(
+                                format!("profile-activate-{activate_id}"),
+                                "Activer",
+                                p,
+                                offset,
+                            )
+                            .accessibility_label(format!("Activer le profil {}", profile.name))
+                            .disabled(deleting)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.activate_profile(activate_id.clone(), cx)
+                                },
+                            )),
+                        )
+                    })
                     .child(
                         link_action(format!("profile-rename-{rename_id}"), "Renommer", p, offset)
                             .accessibility_label(format!("Renommer le profil {}", profile.name))
@@ -381,11 +427,7 @@ impl IntegrationsView {
                     .child(
                         link_action(
                             format!("profile-delete-{delete_id}"),
-                            if deleting {
-                                "Suppression…"
-                            } else {
-                                "Supprimer"
-                            },
+                            "Supprimer",
                             p,
                             offset,
                         )
@@ -400,20 +442,23 @@ impl IntegrationsView {
                     ),
             );
         }
-        profiles = profiles.child(
-            note(
-                "Le profil actif ne peut pas être supprimé. Supprimer un profil retire ses comptes du coffre du système.",
-                p,
-            )
-            .text_size(px(11. + offset)),
-        );
-        content = content.child(profiles).child(
-            card(p).child(subtitle("Nouveau profil", offset)).child(
+        let profiles = profiles
+            .children(self.feedback_at(&Spot::ProfileList, cx))
+            .child(
+                note(
+                    "Activer un profil ferme les onglets de dépôts ouverts. Le profil actif ne peut pas être supprimé ; supprimer un profil retire ses comptes du coffre du système.",
+                    p,
+                )
+                .text_size(px(11. + offset)),
+            );
+        let creating = self.profile_name.read(cx).value().trim().is_empty();
+        let new_profile = card(p)
+            .child(card_title("Nouveau profil", offset))
+            .child(
                 div()
                     .flex()
                     .items_end()
                     .gap(px(12.))
-                    .mt(px(14.))
                     .child(field(
                         &self.profile_name,
                         "profile-name",
@@ -422,21 +467,29 @@ impl IntegrationsView {
                         offset,
                     ))
                     .child(
-                        primary_action("profile-create", "Créer", p, offset).on_click(
-                            cx.listener(|this, _, window, cx| this.create_profile(window, cx)),
-                        ),
+                        primary_action("profile-create", "Créer", p, offset)
+                            .disabled(creating)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.create_profile(window, cx)),
+                            ),
                     ),
-            ),
-        );
+            )
+            .children(self.feedback_at(&Spot::NewProfile, cx));
         let mut favorites = card(p)
-            .gap(px(12.))
-            .child(subtitle("Favoris", offset))
-            .when(self.profile.favorites.is_empty(), |view| {
-                view.child(note(
-                    "Gardez vos dépôts les plus utilisés à portée de main.",
-                    p,
-                ))
-            });
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(card_title("Favoris", offset))
+                    .child(note(
+                        format!(
+                            "Dépôts du profil « {} » proposés sur l’accueil. Un favori local s’ouvre directement.",
+                            self.profile.name
+                        ),
+                        p,
+                    )),
+            );
         for (index, favorite) in self.profile.favorites.iter().take(MAX_ROWS).enumerate() {
             let value = favorite.clone();
             favorites = favorites.child(
@@ -455,17 +508,22 @@ impl IntegrationsView {
                     .when(PathBuf::from(favorite).is_absolute(), |view| {
                         let path = favorite.clone();
                         view.child(
-                            action(format!("favorite-open-{index}"), "Ouvrir", p, offset).on_click(
-                                cx.listener(move |_, _, _, cx| {
+                            action(format!("favorite-open-{index}"), "Ouvrir", p, offset)
+                                .accessibility_label(format!("Ouvrir {}", display_path(&path)))
+                                .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.emit(IntegrationsEvent::OpenLocalFavorite(path.clone()))
-                                }),
-                            ),
+                                })),
                         )
                     })
                     .child(
                         link_action(format!("favorite-remove-{index}"), "Retirer", p, offset)
+                            .accessibility_label(format!(
+                                "Retirer {} des favoris",
+                                display_path(&value)
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.profile.favorites.retain(|favorite| favorite != &value);
+                                this.feedback = None;
                                 cx.emit(IntegrationsEvent::FavoritesChanged(
                                     this.profile.favorites.clone(),
                                 ));
@@ -474,98 +532,259 @@ impl IntegrationsView {
                     ),
             );
         }
-        content.child(
-            favorites.child(
+        let adding = self.favorite.read(cx).value().trim().is_empty();
+        let favorites = favorites
+            .child(
                 div()
                     .flex()
                     .items_end()
                     .gap(px(12.))
-                    .mt(px(4.))
                     .child(field(
                         &self.favorite,
                         "profile-favorite",
-                        "Chemin local ou URL d’un dépôt",
+                        "Ajouter un dépôt local ou distant",
                         p,
                         offset,
                     ))
-                    .child(action("favorite-add", "Ajouter", p, offset).on_click(
-                        cx.listener(|this, _, window, cx| this.add_favorite(window, cx)),
-                    )),
-            ),
-        )
+                    .child(
+                        action("favorite-browse", "Parcourir…", p, offset)
+                            .disabled(self.pending.is_some() || self.picking_path)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pick_path(PathPickerTarget::Favorite, window, cx)
+                            })),
+                    )
+                    .child(
+                        action("favorite-add", "Ajouter", p, offset)
+                            .disabled(adding)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_favorite(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.feedback_at(&Spot::Favorite, cx));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(PAGE_GAP))
+            .child(page_header(
+                "Profils",
+                "Chaque profil garde ses comptes, ses favoris, sa clé SSH, son apparence et ses dépôts récents.",
+                p,
+                offset,
+            ))
+            .child(profiles)
+            .child(new_profile)
+            .child(favorites)
     }
 
     fn ssh_content(&self, cx: &mut Context<Self>) -> Div {
         let p = self.palette;
         let offset = self.offset;
-        let mut choices = div().flex().gap(px(10.));
-        for (id, label, choice) in [
-            ("ssh-agent", "Agent SSH", SshChoice::Agent),
-            ("ssh-disabled", "Désactivé", SshChoice::Disabled),
-        ] {
-            choices = choices.child(
-                action(id, label, p, offset)
-                    .when(self.profile.ssh == choice, |button| {
-                        button
-                            .bg(rgb(p.accent_soft))
-                            .border_color(rgb(p.accent_border))
-                    })
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.ssh_choice(choice.clone(), cx)),
+        let key_selected =
+            self.choosing_key || matches!(self.profile.ssh, SshChoice::KeyFile { .. });
+        let options = [
+            (
+                "ssh-agent",
+                "Agent SSH",
+                !key_selected && self.profile.ssh == SshChoice::Agent,
+            ),
+            ("ssh-key", "Clé privée", key_selected),
+            (
+                "ssh-disabled",
+                "Désactivé",
+                !key_selected && self.profile.ssh == SshChoice::Disabled,
+            ),
+        ];
+        let mut group = RadioGroup::new("ssh-mode")
+            .axis(Axis::Horizontal)
+            .flex()
+            .gap(px(8.))
+            .on_key_down(cx.listener(Self::ssh_mode_key));
+        for (index, (id, label, checked)) in options.into_iter().enumerate() {
+            group = group.child(
+                ui::choice(id, checked, p)
+                    .track_focus(&self.ssh_focus[index])
+                    .tab_stop(checked)
+                    .set_position(index + 1, options.len())
+                    .accessibility_label(label)
+                    .gap(px(8.))
+                    .min_h(px(ui::CONTROL_HEIGHT))
+                    .px(px(14.))
+                    .text_size(px(12. + offset))
+                    .text_color(rgb(if checked { p.text } else { p.muted }))
+                    .when(checked, |radio| radio.font_weight(FontWeight::MEDIUM))
+                    .child(radio_mark(checked, p))
+                    .child(label)
+                    .on_change({
+                        let view = cx.entity().downgrade();
+                        move |_, _, window, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.choose_ssh_mode(index, true, window, cx)
+                            });
+                        }
+                    }),
+            );
+        }
+        let explanation = if key_selected {
+            "Utilise un fichier de clé privée existant. Une clé protégée par une passphrase doit être chargée dans l’agent SSH."
+        } else if self.profile.ssh == SshChoice::Agent {
+            "Utilise l’agent SSH déjà démarré sur cet ordinateur et les identités qu’il a chargées."
+        } else {
+            "Les consultations et les clones SSH sont désactivés pour ce profil."
+        };
+        let mut authentication = card(p)
+            .child(card_title("Authentification", offset))
+            .child(group)
+            .child(note(explanation, p))
+            .children(self.feedback_at(&Spot::Ssh, cx));
+        if key_selected {
+            let missing = match &self.profile.ssh {
+                SshChoice::KeyFile { path } => !path.is_file(),
+                _ => false,
+            };
+            let empty = self.key_path.read(cx).value().trim().is_empty();
+            authentication = authentication.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .pt(px(16.))
+                    .border_t_1()
+                    .border_color(rgb(p.border))
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap(px(12.))
+                            .child(field(
+                                &self.key_path,
+                                "ssh-key-path",
+                                "Fichier de la clé privée",
+                                p,
+                                offset,
+                            ))
+                            .child(
+                                action("ssh-key-browse", "Parcourir…", p, offset)
+                                    .disabled(self.pending.is_some() || self.picking_path)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick_path(PathPickerTarget::SshKey, window, cx)
+                                    })),
+                            )
+                            .child(
+                                primary_action("ssh-key-save", "Utiliser cette clé", p, offset)
+                                    .disabled(empty)
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_ssh_key(cx))),
+                            ),
+                    )
+                    .children(self.feedback_at(&Spot::SshKey, cx).or_else(|| {
+                        missing.then(|| {
+                            ui::feedback(
+                                Tone::Error,
+                                "Le fichier de cette clé est introuvable. Choisissez-en un autre ou passez à l’agent SSH.",
+                                p,
+                                offset,
+                            )
+                        })
+                    })),
+            );
+        }
+        let reading = self.pending == Some(PendingOperation::Read);
+        let remote_empty = self.ssh_remote.read(cx).value().trim().is_empty();
+        let mut check = card(p)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(card_title("Vérifier un accès SSH", offset))
+                    .child(note(
+                        "Liste les branches et les tags du serveur sans télécharger d’objets Git.",
+                        p,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(12.))
+                    .child(field(
+                        &self.ssh_remote,
+                        "ssh-remote",
+                        "URL SSH du dépôt",
+                        p,
+                        offset,
+                    ))
+                    .child(
+                        primary_action("ssh-read-references", "Vérifier", p, offset)
+                            .accessibility_label("Vérifier l’accès et lister les références")
+                            .disabled(
+                                remote_empty
+                                    || self.profile.ssh == SshChoice::Disabled
+                                    || (self.pending.is_some() && !reading),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.read_ssh(cx))),
+                    ),
+            )
+            .child(
+                note(
+                    if self.profile.ssh == SshChoice::Disabled && self.choosing_key {
+                        "Retenez d’abord la clé avec « Utiliser cette clé » pour vérifier un accès."
+                    } else if self.profile.ssh == SshChoice::Disabled {
+                        "Choisissez l’agent SSH ou une clé privée pour vérifier un accès."
+                    } else {
+                        "Utilisez le nom réel du serveur, déjà présent dans known_hosts. Les alias et options de ~/.ssh/config ne sont pas utilisés."
+                    },
+                    p,
+                )
+                .text_size(px(11. + offset)),
+            )
+            .children(self.feedback_at(&Spot::SshRemote, cx));
+        if !self.ssh_references.is_empty() {
+            check = check.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .p(px(12.))
+                    .rounded(RADIUS_MD)
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .bg(rgb(p.bg))
+                    .font_family(crate::theme::MONO)
+                    .text_size(px(11. + offset))
+                    .children(
+                        self.ssh_references
+                            .iter()
+                            .map(|reference| note(reference, p).text_color(rgb(p.text))),
                     ),
             );
         }
-        let choice_label = match &self.profile.ssh {
-            SshChoice::Agent => "Agent SSH du système",
-            SshChoice::Disabled => "SSH désactivé",
-            SshChoice::KeyFile { .. } => "Clé privée existante",
-        };
-        let mut content = div().flex().flex_col().gap(px(24.))
-            .child(section_header("SSH", "Choisissez l’agent ou la clé à utiliser pour ce profil.", p, offset))
-            .child(card(p).gap(px(16.)).child(div().flex().items_center().gap(px(12.))
-                .child(icon(IconName::ShieldCheck, 22., p.accent))
-                .child(div().child(subtitle(choice_label, offset)).child(note(&format!("Profil {}", self.profile.name), p))))
-                .child(choices)
-                .child(div().pt(px(16.)).border_t_1().border_color(rgb(p.border)).flex().items_end().gap(px(12.))
-                    .child(field(&self.key_path, "ssh-key-path", "Chemin absolu d’une clé privée existante", p, offset))
-                    .child(action("ssh-key-browse", "Parcourir…", p, offset).disabled(self.pending.is_some() || self.picking_path)
-                        .on_click(cx.listener(|this, _, window, cx| this.pick_path(PathPickerTarget::SshKey, window, cx))))
-                    .child(action("ssh-key-save", "Utiliser cette clé", p, offset).on_click(cx.listener(|this, _, _, cx| {
-                        let value = this.key_path.read(cx).value().trim().to_string(); let path = expand_home(&value);
-                        if path.is_absolute() && !value.chars().any(char::is_control) { this.error = None; this.ssh_choice(SshChoice::KeyFile { path }, cx); }
-                        else { this.error = Some("Indiquez un chemin absolu de clé SSH.".into()); cx.notify(); }
-                    })))))
-            .child(card(p).gap(px(14.)).child(subtitle("Vérifier un accès SSH", offset))
-                .child(note("Consulte les branches et tags du serveur sans télécharger les objets Git.", p))
-                .child(field(&self.ssh_remote, "ssh-remote", "URL SSH du dépôt", p, offset))
-                .child(note("Utilisez le nom réel du serveur, déjà reconnu dans known_hosts. Les alias et hooks de votre configuration SSH ne sont pas utilisés.", p))
-                .child(div().flex().child(primary_action("ssh-read-references", "Consulter les références", p, offset).disabled(self.pending.is_some()).on_click(cx.listener(|this, _, _, cx| this.read_ssh(cx))))));
-        for reference in &self.ssh_references {
-            content = content.child(note(reference, p));
-        }
-        content
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(PAGE_GAP))
+            .child(page_header(
+                "SSH",
+                format!(
+                    "Accès SSH du profil « {} », utilisé pour vérifier un accès et cloner en SSH.",
+                    self.profile.name
+                ),
+                p,
+                offset,
+            ))
+            .child(authentication)
+            .child(check)
     }
 
-    fn provider_rail(&self, cx: &mut Context<Self>) -> Div {
+    fn provider_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let mut rail = div()
-            .w(px(218.))
-            .flex_none()
-            .h_full()
-            .bg(rgb(p.panel))
-            .border_r_1()
-            .border_color(rgb(p.border))
-            .py(px(24.))
-            .px(px(10.))
-            .child(
-                div()
-                    .px(px(12.))
-                    .mb(px(12.))
-                    .text_size(px(11. + self.offset))
-                    .text_color(rgb(p.muted))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("HÉBERGEMENT GIT"),
-            );
+        let offset = self.offset;
+        let mut grid = RadioGroup::new("provider-editions")
+            .axis(Axis::Horizontal)
+            .grid()
+            .grid_cols(3)
+            .gap(px(8.))
+            .on_key_down(cx.listener(Self::provider_key));
         for (index, edition) in ProviderEdition::ALL.into_iter().enumerate() {
             let count = self
                 .profile
@@ -574,56 +793,57 @@ impl IntegrationsView {
                 .filter(|account| edition.matches(account))
                 .count();
             let selected = self.edition == edition;
-            rail = rail.child(
-                Button::new(SharedString::from(format!("provider-{index}")))
-                    .w_full()
+            let status = if count == 0 {
+                "Non connecté".to_string()
+            } else {
+                count_label(count, "compte connecté", "comptes connectés")
+            };
+            grid = grid.child(
+                ui::choice(SharedString::from(format!("provider-{index}")), selected, p)
+                    .track_focus(&self.provider_focus[index])
+                    .tab_stop(selected)
+                    .set_position(index + 1, ProviderEdition::ALL.len())
+                    .disabled(self.pending == Some(PendingOperation::Disconnect))
+                    .accessibility_label(format!("{}, {status}", edition.label()))
                     .min_w_0()
-                    .min_h(px(48.))
+                    .gap(px(10.))
                     .px(px(12.))
                     .py(px(10.))
-                    .gap(px(10.))
-                    .justify_start()
-                    .rounded(RADIUS_MD)
-                    .text_color(rgb(if selected { p.text } else { p.muted }))
-                    .text_size(px(12. + self.offset))
-                    .bg(rgb(if selected { p.selection } else { p.panel }))
-                    .cursor_pointer()
-                    .accessibility_label(edition.label())
-                    .hover(move |style| style.bg(rgb(p.hover)))
-                    .focus_visible(move |style| style.bg(rgb(p.selection)))
-                    .disabled(self.pending == Some(PendingOperation::Disconnect))
-                    .child(provider_mark(edition, p, 24.))
+                    .child(provider_mark(edition, p, 28.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .whitespace_normal()
-                            .text_left()
-                            .child(edition.label()),
+                            .child(
+                                div()
+                                    .text_size(px(12. + offset))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
+                                    .child(edition.label()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .text_size(px(11. + offset))
+                                    .text_color(rgb(if count > 0 { p.success } else { p.muted }))
+                                    .when(count > 0, |line| {
+                                        line.child(icon(IconName::CircleCheck, 12., p.success))
+                                    })
+                                    .child(div().min_w_0().truncate().child(status)),
+                            ),
                     )
-                    .when(count > 0, |view| {
-                        view.child(div().size(px(7.)).rounded_full().bg(rgb(p.success)))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_provider(edition, window, cx)
-                    })),
+                    .on_change({
+                        let view = cx.entity().downgrade();
+                        move |_, _, window, cx| {
+                            let _ = view
+                                .update(cx, |this, cx| this.select_provider(edition, window, cx));
+                        }
+                    }),
             );
         }
-        rail.child(
-            div()
-                .mt(px(24.))
-                .px(px(12.))
-                .border_t_1()
-                .border_color(rgb(p.border))
-                .pt(px(16.))
-                .child(note("Comptes du profil", p).text_size(px(11. + self.offset)))
-                .child(
-                    div()
-                        .mt(px(4.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(self.profile.name.clone()),
-                ),
-        )
+        grid
     }
 
     fn integrations_content(&self, cx: &mut Context<Self>) -> Div {
@@ -635,12 +855,21 @@ impl IntegrationsView {
             .iter()
             .filter(|account| self.edition.matches(account))
             .collect();
-        let mut content = div().flex().flex_col().gap(px(24.)).child(section_header(
-            self.edition.label(),
-            "Gérez vos connexions et retrouvez les dépôts depuis l’accueil.",
-            p,
-            offset,
-        ));
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .gap(px(PAGE_GAP))
+            .child(page_header(
+                "Intégrations",
+                format!(
+                    "Comptes du profil « {} ». Ils permettent de parcourir et de cloner vos dépôts depuis Nouvel onglet → Cloner.",
+                    self.profile.name
+                ),
+                p,
+                offset,
+            ))
+            .child(self.provider_grid(cx))
+            .children(self.feedback_at(&Spot::Accounts, cx));
         for account in &accounts {
             let remove_id = account.id.clone();
             let refresh_id = account.id.clone();
@@ -667,7 +896,6 @@ impl IntegrationsView {
             };
             content = content.child(
                 card(p)
-                    .gap(px(18.))
                     .child(
                         div()
                             .flex()
@@ -680,24 +908,26 @@ impl IntegrationsView {
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(5.))
+                                    .gap(px(4.))
                                     .child(
                                         div()
                                             .flex()
                                             .items_center()
-                                            .gap(px(7.))
+                                            .gap(px(6.))
+                                            .text_size(px(11. + offset))
                                             .text_color(rgb(p.success))
-                                            .child(icon(IconName::CircleCheck, 14., p.success))
-                                            .child("Compte connecté"),
+                                            .child(icon(IconName::CircleCheck, 13., p.success))
+                                            .child("Connecté"),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(16. + offset))
+                                            .text_size(px(15. + offset))
                                             .font_weight(FontWeight::SEMIBOLD)
+                                            .whitespace_normal()
                                             .child(display_name.to_string()),
                                     )
                                     .when_some(identity, |view, name| {
-                                        view.child(note(&format!("@{name}"), p))
+                                        view.child(note(format!("@{name}"), p))
                                     })
                                     .child(
                                         note(&account.server_url, p).text_size(px(11. + offset)),
@@ -708,14 +938,14 @@ impl IntegrationsView {
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
                             .flex_wrap()
-                            .gap(px(14.))
+                            .gap(px(12.))
                             .pt(px(14.))
                             .border_t_1()
                             .border_color(rgb(p.border))
                             .child(
                                 div()
+                                    .flex_1()
                                     .flex()
                                     .items_center()
                                     .gap(px(7.))
@@ -727,7 +957,7 @@ impl IntegrationsView {
                             .child(
                                 link_action(
                                     format!("account-refresh-{refresh_id}"),
-                                    "Actualiser le compte",
+                                    "Vérifier le compte",
                                     p,
                                     offset,
                                 )
@@ -739,13 +969,24 @@ impl IntegrationsView {
                                 )),
                             )
                             .child(
-                                action(format!("disconnect-{remove_id}"), "Déconnecter", p, offset)
-                                    .disabled(self.pending.is_some())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.disconnect(remove_id.clone(), cx)
-                                    })),
+                                danger_action(
+                                    format!("disconnect-{remove_id}"),
+                                    "Déconnecter…",
+                                    p,
+                                    offset,
+                                )
+                                .accessibility_label(format!(
+                                    "Déconnecter le compte {display_name}"
+                                ))
+                                .disabled(self.pending.is_some())
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.confirm_disconnect(remove_id.clone(), window, cx)
+                                    },
+                                )),
                             ),
-                    ),
+                    )
+                    .children(self.feedback_at(&Spot::Account(account.id.clone()), cx)),
             );
         }
         if !accounts.is_empty() && !self.adding_account {
@@ -760,13 +1001,20 @@ impl IntegrationsView {
                     .disabled(self.pending.is_some())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.adding_account = true;
-                        this.message = None;
-                        this.error = None;
+                        this.feedback = None;
                         cx.notify();
                     })),
                 ),
             );
         }
+        content.child(self.connection_form(!accounts.is_empty(), cx))
+    }
+
+    fn connection_form(&self, has_accounts: bool, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let provider = self.edition.provider();
+        let browser = supports_browser_connection(provider) && self.browser_connection;
         let mut form = card(p)
             .gap(px(18.))
             .child(
@@ -774,23 +1022,22 @@ impl IntegrationsView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(subtitle(
-                        if accounts.is_empty() {
-                            "Connecter votre compte"
+                    .child(card_title(
+                        &if has_accounts {
+                            format!("Ajouter un compte {}", self.edition.label())
                         } else {
-                            "Ajouter un compte"
+                            format!("Connecter un compte {}", self.edition.label())
                         },
                         offset,
                     ))
-                    .when(!accounts.is_empty(), |view| {
+                    .when(has_accounts, |view| {
                         view.child(
                             link_action("account-add-cancel", "Annuler", p, offset).on_click(
                                 cx.listener(|this, _, window, cx| {
                                     this.cancel();
                                     this.adding_account = false;
                                     this.clear_connection_secrets(window, cx);
-                                    this.message = None;
-                                    this.error = None;
+                                    this.feedback = None;
                                     cx.notify();
                                 }),
                             ),
@@ -800,47 +1047,64 @@ impl IntegrationsView {
             .child(field(
                 &self.label,
                 "account-label",
-                "Nom du compte · facultatif",
+                "Nom du compte (facultatif)",
                 p,
                 offset,
             ));
-        if self.edition.custom_server() {
-            form = form.child(field(
-                &self.server,
-                "account-server",
-                "URL du serveur",
-                p,
-                offset,
-            ));
-        } else if self.edition == ProviderEdition::BitbucketCloud {
-            form = form.child(field(
-                &self.server,
-                "account-server",
-                "Workspace · https://bitbucket.org/votre-workspace",
-                p,
-                offset,
-            ));
+        if self.needs_server() {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(field(
+                        &self.server,
+                        "account-server",
+                        if self.edition == ProviderEdition::BitbucketCloud {
+                            "URL du workspace"
+                        } else {
+                            "URL du serveur"
+                        },
+                        p,
+                        offset,
+                    ))
+                    .children(self.feedback_at(&Spot::Server, cx)),
+            );
         }
-        if self.edition.provider() == Provider::BitbucketCloud && !self.browser_connection {
-            form = form.child(field(
-                &self.username,
-                "account-username",
-                "Adresse e-mail Atlassian · pour un API token",
-                p,
-                offset,
-            ));
+        if browser {
+            return form.child(self.browser_connection_form(cx));
         }
-        if supports_browser_connection(self.edition.provider()) && self.browser_connection {
-            form = form.child(self.browser_connection_form(cx));
-        } else {
-            let permissions = match self.edition.provider() {
-                Provider::GitLab => "GitLab : autorisation read_api.",
-                Provider::GitHub => {
-                    "GitHub : accès aux dépôts, pull requests et checks en lecture."
-                }
-                _ => "Bitbucket : accès aux dépôts, pull requests et statuts CI en lecture.",
-            };
-            form = form
+        if provider == Provider::BitbucketCloud {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(field(
+                        &self.username,
+                        "account-username",
+                        "Adresse e-mail Atlassian",
+                        p,
+                        offset,
+                    ))
+                    .child(
+                        note("Nécessaire avec un API token Atlassian.", p)
+                            .text_size(px(11. + offset)),
+                    ),
+            );
+        }
+        let permissions = match provider {
+            Provider::GitLab => "Droit nécessaire : read_api.",
+            Provider::GitHub => {
+                "Droits nécessaires : lecture des dépôts, des pull requests et des checks."
+            }
+            _ => "Droits nécessaires : lecture des dépôts, des pull requests et des statuts CI.",
+        };
+        form.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
                 .child(field(
                     &self.token,
                     "account-token",
@@ -848,52 +1112,36 @@ impl IntegrationsView {
                     p,
                     offset,
                 ))
-                .child(note(permissions, p))
+                .child(note(permissions, p).text_size(px(11. + offset))),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(px(12.))
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .flex_wrap()
-                        .gap(px(12.))
-                        .child(
-                            primary_action("account-connect", "Connecter le compte", p, offset)
-                                .disabled(self.pending.is_some())
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.connect(window, cx)),
-                                ),
-                        )
-                        .when(
-                            supports_browser_connection(self.edition.provider()),
-                            |view| {
-                                view.child(
-                                    link_action(
-                                        "oauth-browser-mode",
-                                        "Connexion par navigateur",
-                                        p,
-                                        offset,
-                                    )
-                                    .disabled(self.pending.is_some())
-                                    .on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            this.set_browser_connection(true, window, cx)
-                                        },
-                                    )),
-                                )
-                            },
-                        ),
+                    primary_action("account-connect", "Connecter le compte", p, offset)
+                        .disabled(!self.can_connect(cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.))
-                        .text_size(px(11. + offset))
-                        .text_color(rgb(p.muted))
-                        .child(icon(IconName::ShieldCheck, 14., p.muted))
-                        .child("Identifiants enregistrés dans le coffre du système"),
-                );
-        }
-        content.child(form)
+                .when(supports_browser_connection(provider), |view| {
+                    view.child(
+                        link_action(
+                            "oauth-browser-mode",
+                            "Se connecter avec le navigateur",
+                            p,
+                            offset,
+                        )
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_browser_connection(true, window, cx)
+                        })),
+                    )
+                }),
+        )
+        .children(self.feedback_at(&Spot::Connection, cx))
+        .child(vault_note(p, offset))
     }
 
     fn browser_connection_form(&self, cx: &mut Context<Self>) -> Div {
@@ -901,243 +1149,356 @@ impl IntegrationsView {
         let offset = self.offset;
         let github = self.edition.provider() == Provider::GitHub;
         let bitbucket = self.edition.provider() == Provider::BitbucketCloud;
-        let provider = provider_label(self.edition.provider());
-        let mut content = div().flex().flex_col().gap(px(12.)).child(note(
+        let provider = self.edition.brand();
+        let id_label = if github {
+            "Client ID de l’application"
+        } else if bitbucket {
+            "Clé du consumer (Key)"
+        } else {
+            "Application ID"
+        };
+        let mut content = div().flex().flex_col().gap(px(16.)).child(note(
             if github {
-                "Mangrove ouvrira GitHub dans votre navigateur. Saisissez le code temporaire affiché ici pour autoriser la connexion."
+                "Mangrove ouvre GitHub dans votre navigateur ; saisissez-y le code temporaire affiché ici pour autoriser la connexion."
             } else {
-                "Autorisez Mangrove dans votre navigateur. La connexion est conservée dans le coffre sécurisé du système."
+                "Mangrove ouvre votre navigateur pour que vous l’autorisiez. La connexion est conservée dans le coffre du système."
             },
             p,
         ));
         if github {
             content = content.child(
-                gpui_kit::component::checkbox::Checkbox::new("github-private-repositories")
-                    .label("Inclure les dépôts privés")
-                    .checked(self.github_private_repos)
-                    .disabled(self.pending.is_some())
-                    .on_change(cx.listener(|this, checked, _, cx| {
-                        this.github_private_repos = *checked;
-                        cx.notify();
-                    })),
-            ).child(note(
-                if self.github_private_repos {
-                    "GitHub demande une autorisation qui inclut l’écriture pour accéder aux dépôts privés. Mangrove utilise ces accès pour la consultation."
-                } else {
-                    "L’accès aux dépôts privés n’est pas demandé."
-                },
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(div().flex().child(
+                        ui::checkbox(
+                            "github-private-repositories",
+                            "Inclure les dépôts privés",
+                            self.github_private_repos,
+                            p,
+                            offset,
+                        )
+                        .disabled(self.pending.is_some())
+                        .on_change({
+                            let view = cx.entity().downgrade();
+                            move |_, _, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.github_private_repos = !this.github_private_repos;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    ))
+                    .child(
+                        note(
+                            if self.github_private_repos {
+                                "GitHub demande alors un droit qui inclut l’écriture. Mangrove s’en sert uniquement pour consulter."
+                            } else {
+                                "Seuls les dépôts publics seront accessibles."
+                            },
+                            p,
+                        )
+                        .text_size(px(11. + offset)),
+                    ),
+            );
+        }
+        let mut credentials = div().flex().flex_col().gap(px(12.)).child(field(
+            &self.client_id,
+            "oauth-client-id",
+            id_label,
+            p,
+            offset,
+        ));
+        if bitbucket {
+            credentials = credentials.child(field(
+                &self.consumer_secret,
+                "oauth-consumer-secret",
+                "Secret du consumer",
                 p,
+                offset,
             ));
         }
-        if let Some(authorization) = &self.github_authorization {
-            let generation = self.generation;
+        if self.app_configured {
+            // A known application only needs its credentials checked.
+            content = content.child(credentials).child(
+                div().flex().child(
+                    Button::new("oauth-setup-toggle")
+                        .gap(px(6.))
+                        .px(px(4.))
+                        .py(px(6.))
+                        .border_1()
+                        .border_color(transparent_black())
+                        .rounded(RADIUS_MD)
+                        .text_size(px(12. + offset))
+                        .text_color(rgb(p.muted))
+                        .cursor_pointer()
+                        .accessibility_label(if self.setup_open {
+                            "Masquer la création de l’application"
+                        } else {
+                            "Afficher la création de l’application"
+                        })
+                        .hover(move |style| style.text_color(rgb(p.text)))
+                        .focus_visible(move |style| ui::focus_ring(style, p.accent))
+                        .child(icon(
+                            if self.setup_open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            },
+                            14.,
+                            p.muted,
+                        ))
+                        .child(format!("Créer une autre application {provider}"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.setup_open = !this.setup_open;
+                            cx.notify();
+                        })),
+                ),
+            );
+            if self.setup_open {
+                content = content.child(self.application_setup(cx));
+            }
+        } else {
+            // Without an application, the connection walks through its creation.
             content = content.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(12.))
+                    .gap(px(16.))
                     .p(px(16.))
                     .rounded(RADIUS_LG)
                     .border_1()
                     .border_color(rgb(p.border))
-                    .child(note("Code à saisir dans GitHub", p))
-                    .child(
-                        div()
-                            .text_size(px(24. + offset))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(authorization.user_code.expose_secret().to_string()),
-                    )
+                    .bg(rgb(p.bg))
                     .child(
                         div()
                             .flex()
-                            .flex_wrap()
-                            .gap(px(10.))
-                            .child(
-                                action(
-                                    "github-device-copy",
-                                    if authorization.copied {
-                                        "Code copié !"
-                                    } else {
-                                        "Copier le code"
-                                    },
-                                    p,
-                                    offset,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        if this.generation != generation {
-                                            return;
-                                        }
-                                        let Some(authorization) = &mut this.github_authorization
-                                        else {
-                                            return;
-                                        };
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            authorization.user_code.expose_secret().to_string(),
-                                        ));
-                                        authorization.copied = true;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                action("github-device-open", "Ouvrir GitHub", p, offset).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        if this.generation != generation {
-                                            return;
-                                        }
-                                        if let Some(authorization) = &this.github_authorization {
-                                            cx.open_url(&authorization.verification_url);
-                                        }
-                                    }),
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(field_label("Configuration requise", p, offset))
+                            .child(note(
+                                format!(
+                                    "La connexion par navigateur passe par une application Mangrove enregistrée dans votre compte {provider}."
                                 ),
-                            ),
+                                p,
+                            )),
                     )
-                    .child(note(
-                        "En attente de votre autorisation. Ce code expire après quelques minutes.",
+                    .child(setup_step(
+                        1,
+                        &format!("Créez l’application dans {provider}"),
+                        self.application_setup(cx),
                         p,
+                        offset,
+                    ))
+                    .child(setup_step(
+                        2,
+                        if bitbucket {
+                            "Collez sa clé et son secret"
+                        } else {
+                            "Collez son identifiant"
+                        },
+                        credentials,
+                        p,
+                        offset,
                     )),
             );
         }
-        content = content
+        if let Some(authorization) = &self.github_authorization {
+            content = content.child(self.github_code(authorization, cx));
+        }
+        content
             .child(
-                div().flex().child(
-                    primary_action(
-                        "oauth-browser-connect",
-                        &format!("Se connecter avec {provider}"),
-                        p,
-                        offset,
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(12.))
+                    .child(
+                        primary_action(
+                            "oauth-browser-connect",
+                            &format!("Se connecter avec {provider}"),
+                            p,
+                            offset,
+                        )
+                        .disabled(!self.can_connect(cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                     )
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
-                ),
+                    .child(
+                        link_action(
+                            "oauth-personal-token",
+                            "Utiliser un token personnel",
+                            p,
+                            offset,
+                        )
+                        .disabled(self.pending.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_browser_connection(false, window, cx)
+                        })),
+                    ),
             )
+            .children(self.feedback_at(&Spot::Connection, cx))
+            .child(vault_note(p, offset))
+    }
+
+    /// How to register Mangrove with the provider, with the values to copy.
+    fn application_setup(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let github = self.edition.provider() == Provider::GitHub;
+        let bitbucket = self.edition.provider() == Provider::BitbucketCloud;
+        let provider = self.edition.brand();
+        let mut setup = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(note(
+                if github {
+                    "Créez une OAuth App nommée Mangrove, cochez « Enable Device Flow », puis copiez son Client ID. Aucun secret n’est nécessaire."
+                } else if bitbucket {
+                    "Dans les paramètres du workspace, créez un consumer OAuth Mangrove avec les droits Account, Repositories et Pull requests en lecture, puis copiez sa Key et son Secret."
+                } else {
+                    "Créez une application Mangrove non confidentielle avec le droit read_api, puis copiez son Application ID. Aucun secret n’est nécessaire."
+                },
+                p,
+            ))
             .child(
                 div().flex().child(
-                    link_action(
-                        "oauth-personal-token",
-                        "Utiliser un token personnel",
+                    action(
+                        "oauth-create-application",
+                        &format!("Ouvrir {provider}"),
                         p,
-                        offset,
+                        self.offset,
                     )
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_browser_connection(false, window, cx)
-                    })),
+                    .accessibility_label(format!(
+                        "Créer l’application dans {provider}, dans le navigateur"
+                    ))
+                    .disabled(
+                        self.pending.is_some()
+                            || (self.needs_server()
+                                && self.server.read(cx).value().trim().is_empty()),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_application_settings(cx))),
                 ),
+            );
+        if bitbucket {
+            setup = setup.child(self.copyable_oauth_url(
+                "oauth-bitbucket-callback-url",
+                "Callback URL",
+                oauth::REDIRECT_URI,
+                cx,
+            ));
+        } else if github {
+            setup = setup
+                .child(self.copyable_oauth_url(
+                    "oauth-homepage-url",
+                    "Homepage URL",
+                    "https://github.com/Dpblandin/mangrove",
+                    cx,
+                ))
+                .child(self.copyable_oauth_url(
+                    "oauth-callback-url",
+                    "Authorization callback URL",
+                    oauth::REDIRECT_URI,
+                    cx,
+                ))
+                .child(
+                    note(
+                        "GitHub exige cette URL de callback, mais la connexion par code ne l’utilise pas.",
+                        p,
+                    )
+                    .text_size(px(11. + self.offset)),
+                );
+        } else {
+            setup = setup.child(self.copyable_oauth_url(
+                "oauth-redirect-url",
+                "Redirect URI",
+                oauth::REDIRECT_URI,
+                cx,
+            ));
+        }
+        setup
+    }
+
+    fn github_code(&self, authorization: &GitHubAuthorization, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.offset;
+        let generation = self.generation;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .p(px(16.))
+            .rounded(RADIUS_LG)
+            .border_1()
+            .border_color(rgb(p.accent_border))
+            .bg(rgb(p.accent_soft))
+            .child(note("Code à saisir dans GitHub", p))
+            .child(
+                div()
+                    .text_size(px(24. + offset))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_family(crate::theme::MONO)
+                    .child(authorization.user_code.expose_secret().to_string()),
             )
             .child(
                 div()
                     .flex()
-                    .pt(px(12.))
-                    .border_t_1()
-                    .border_color(rgb(p.border))
+                    .flex_wrap()
+                    .gap(px(10.))
                     .child(
-                        Button::new("oauth-advanced-configuration")
-                            .gap(px(6.))
-                            .px(px(4.))
-                            .py(px(6.))
-                            .border_1()
-                            .border_color(transparent_black())
-                            .rounded(RADIUS_MD)
-                            .text_size(px(12. + offset))
-                            .text_color(rgb(p.muted))
-                            .cursor_pointer()
-                            .accessibility_label(if self.oauth_config_open {
-                                "Masquer la configuration avancée"
+                        action(
+                            "github-device-copy",
+                            if authorization.copied {
+                                "Code copié"
                             } else {
-                                "Afficher la configuration avancée"
-                            })
-                            .hover(move |style| style.text_color(rgb(p.text)))
-                            .focus_visible(move |style| style.border_color(rgb(p.accent)))
-                            .styles(|styles| {
-                                styles.disabled(|style| style.opacity(0.5).cursor_default())
-                            })
-                            .disabled(self.pending.is_some())
-                            .child(icon(
-                                if self.oauth_config_open {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                },
-                                14.,
-                                p.muted,
-                            ))
-                            .child("Configuration avancée")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.oauth_config_open = !this.oauth_config_open;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if self.oauth_config_open {
-            let mut configuration = div().flex().flex_col().gap(px(12.))
-                .child(field(&self.client_id, "oauth-client-id", if github { "Client ID public" } else if bitbucket { "Consumer Key publique" } else { "Application ID public" }, p, offset))
-                .child(note(
-                    if github {
-                        "Créez une OAuth App Mangrove dans GitHub, puis activez « Enable Device Flow » et recopiez son Client ID. Aucun secret d’application n’est nécessaire."
-                    } else if bitbucket {
-                        "Créez un consumer OAuth Mangrove dans votre workspace Bitbucket, avec Account · Read, Repositories · Read et Pull requests · Read. Recopiez sa Key et son Secret ci-dessous."
-                    } else {
-                        "Créez une application Mangrove non confidentielle dans GitLab, avec l’autorisation read_api. Aucun secret d’application n’est nécessaire."
-                    },
-                    p,
-                ))
-                .child(div().flex().child(action("oauth-create-application", &format!("Créer l’application dans {provider}"), p, offset)
-                    .disabled(self.pending.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.open_application_settings(cx)))));
-            if bitbucket {
-                configuration = configuration
-                    .child(field(&self.consumer_secret, "oauth-consumer-secret", "Consumer Secret · masqué", p, offset))
-                    .child(note("Bitbucket exige le Secret pour connecter et renouveler le compte. Il est conservé uniquement dans le coffre du système ; aucun secret n’est inclus dans Mangrove.", p))
-                    .child(self.copyable_oauth_url(
-                        "oauth-bitbucket-callback-url",
-                        "Callback URL",
-                        oauth::REDIRECT_URI,
-                        cx,
-                    ));
-            } else if github {
-                configuration = configuration
-                    .child(self.copyable_oauth_url(
-                        "oauth-homepage-url",
-                        "Homepage URL",
-                        "https://github.com/Dpblandin/mangrove",
-                        cx,
-                    ))
-                    .child(self.copyable_oauth_url(
-                        "oauth-callback-url",
-                        "Authorization callback URL",
-                        oauth::REDIRECT_URI,
-                        cx,
-                    ))
-                    .child(
-                        note(
-                            "Cette URL de callback n’est pas utilisée par la connexion GitHub.",
+                                "Copier le code"
+                            },
                             p,
+                            offset,
                         )
-                        .text_size(px(11. + offset)),
-                    );
-            } else {
-                configuration = configuration.child(self.copyable_oauth_url(
-                    "oauth-redirect-url",
-                    "URL de redirection",
-                    oauth::REDIRECT_URI,
-                    cx,
-                ));
-            }
-            content = content.child(configuration);
-        }
-        content
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.generation != generation {
+                                return;
+                            }
+                            let Some(authorization) = &mut this.github_authorization else {
+                                return;
+                            };
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                authorization.user_code.expose_secret().to_string(),
+                            ));
+                            authorization.copied = true;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        action("github-device-open", "Rouvrir GitHub", p, offset).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                if this.generation != generation {
+                                    return;
+                                }
+                                if let Some(authorization) = &this.github_authorization {
+                                    cx.open_url(&authorization.verification_url);
+                                }
+                            }),
+                        ),
+                    ),
+            )
+            .child(note(
+                "En attente de votre autorisation. Ce code expire après quelques minutes.",
+                p,
+            ))
     }
 
+    /// A value to paste into the provider's form, named by that form's field.
     fn copyable_oauth_url(
         &self,
         id: &'static str,
-        label: &'static str,
+        field: &'static str,
         value: &'static str,
         cx: &mut Context<Self>,
     ) -> Div {
         let p = self.palette;
+        let label = format!("Champ « {field} »");
         div()
             .flex()
             .items_center()
@@ -1157,6 +1518,7 @@ impl IntegrationsView {
                             .whitespace_normal()
                             .line_height(relative(1.6))
                             .text_color(rgb(p.text))
+                            .font_family(crate::theme::MONO)
                             .cursor(CursorStyle::IBeam)
                             .child(
                                 SelectableText::new(id, value)
@@ -1165,11 +1527,31 @@ impl IntegrationsView {
                     ),
             )
             .child(
-                action(format!("{id}-copy"), "Copier", p, self.offset)
-                    .accessibility_label(format!("Copier {label}"))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
-                    })),
+                action(
+                    format!("{id}-copy"),
+                    if self.copied == Some(id) {
+                        "Copié"
+                    } else {
+                        "Copier"
+                    },
+                    p,
+                    self.offset,
+                )
+                .accessibility_label(format!("Copier la valeur du champ « {field} »"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+                    this.copied = Some(id);
+                    this.copied_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(2))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.copied = None;
+                            cx.notify();
+                        });
+                    }));
+                    cx.notify();
+                })),
             )
     }
 
@@ -1504,23 +1886,36 @@ impl IntegrationsView {
 impl Render for IntegrationsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_repository_select(window, cx);
+        if self.profile_select_dirty {
+            self.sync_profile_select(window, cx);
+        }
+        if std::mem::take(&mut self.key_draft_reset)
+            && let SshChoice::KeyFile { path } = &self.profile.ssh
+        {
+            // An unapplied key path does not outlive the visit that typed it.
+            let path = display_path(&path.to_string_lossy());
+            self.key_path
+                .update(cx, |input, cx| input.set_value(path, window, cx));
+        }
         let p = self.palette;
-        let message = self
-            .message
-            .clone()
-            .filter(|_| self.pending != Some(PendingOperation::RepositoryRead));
         let content = match self.section {
             IntegrationsSection::Profiles => self.profiles_content(cx),
             IntegrationsSection::Ssh => self.ssh_content(cx),
             IntegrationsSection::Integrations => self.integrations_content(cx),
             IntegrationsSection::Repositories => self.repositories_content(cx),
         };
+        let page_feedback = self.feedback_at(&Spot::Page, cx);
         div()
             .id("integrations-view")
             .track_focus(&self.focus_handle)
             // The first Escape leaves the field; the next one reaches the app.
             .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
-                if this.profile_rename.read(cx).focus_handle(cx).is_focused(window) {
+                if this
+                    .profile_rename
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+                {
                     this.cancel_profile_rename(window, cx);
                 } else if this.input_focused(window, cx) {
                     this.focus_handle.focus(window, cx);
@@ -1535,9 +1930,6 @@ impl Render for IntegrationsView {
             .bg(rgb(p.bg))
             .text_color(rgb(p.text))
             .text_size(px(12. + self.offset))
-            .when(self.section == IntegrationsSection::Integrations, |view| {
-                view.child(self.provider_rail(cx))
-            })
             .when(self.section == IntegrationsSection::Repositories, |view| {
                 view.child(self.accounts_rail(cx))
             })
@@ -1554,67 +1946,24 @@ impl Render for IntegrationsView {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
-                            .px(px(28.))
-                            .py(px(28.))
+                            .p(px(PAGE_PADDING))
                             .child(
                                 div()
                                     .w_full()
-                                    .max_w(px(760.))
-                                    .when_some(message, |view, message| {
-                                        view.child(
-                                            div()
-                                                .mb(px(20.))
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(8.))
-                                                .text_color(rgb(p.muted))
-                                                .when(self.pending.is_some(), |view| {
-                                                    view.child(icon(
-                                                        IconName::LoaderCircle,
-                                                        16.,
-                                                        p.accent,
-                                                    ))
-                                                })
-                                                .child(note(&message, p)),
-                                        )
-                                    })
-                                    .when_some(self.error.clone(), |view, error| {
+                                    .max_w(px(CONTENT_MAX_WIDTH))
+                                    .mx_auto()
+                                    .when_some(page_feedback, |view, feedback| {
                                         view.child(
                                             div()
                                                 .mb(px(20.))
                                                 .p(px(14.))
                                                 .border_1()
-                                                .border_color(rgb(p.danger).opacity(0.4))
+                                                .border_color(rgb(p.border))
                                                 .rounded(RADIUS_MD)
-                                                .bg(rgb(p.danger).opacity(0.07))
-                                                .child(note(&error, p).text_color(rgb(p.danger))),
+                                                .bg(rgb(p.panel))
+                                                .child(feedback),
                                         )
                                     })
-                                    .when(
-                                        self.pending.is_some_and(|operation| {
-                                            operation != PendingOperation::Disconnect
-                                                && operation != PendingOperation::RepositoryRead
-                                        }),
-                                        |view| {
-                                            view.child(
-                                                div().flex().mb(px(20.)).child(
-                                                    action(
-                                                        "remote-cancel",
-                                                        "Annuler",
-                                                        p,
-                                                        self.offset,
-                                                    )
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        let cloning = this.pending == Some(PendingOperation::Clone);
-                                                        this.cancel();
-                                                        this.clear_connection_secrets(window, cx);
-                                                        this.message = cloning.then(|| "Clonage annulé. Un dossier incomplet peut subsister ; choisissez un nouveau nom avant de réessayer.".into());
-                                                        cx.notify();
-                                                    })),
-                                                ),
-                                            )
-                                        },
-                                    )
                                     .child(content),
                             ),
                     )
@@ -1625,54 +1974,86 @@ impl Render for IntegrationsView {
     }
 }
 
-fn section_header(label: &str, description: &str, p: Palette, offset: f32) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
-            div()
-                .text_size(px(23. + offset))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(label.to_string()),
-        )
-        .child(note(description, p))
-}
-
-fn subtitle(label: &str, offset: f32) -> Div {
-    div()
-        .text_size(px(15. + offset))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(label.to_string())
-}
-
 fn title(label: &str) -> Div {
-    subtitle(label, 0.)
+    card_title(label, 0.)
 }
 
-fn card(p: Palette) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .min_w_0()
-        .w_full()
-        .p(px(22.))
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(RADIUS_LG)
-        .bg(rgb(p.panel))
-}
-
-fn badge(label: &str, color: u32, background: u32, offset: f32) -> Div {
+/// The active profile's status, distinct from the row's text actions.
+fn active_badge(p: Palette, offset: f32) -> Div {
     div()
         .flex_none()
-        .px(px(8.))
-        .py(px(3.))
-        .rounded(RADIUS_SM)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(10.))
+        .py(px(4.))
+        .rounded_full()
+        .bg(rgb(mix(p.success, p.panel, 0.16)))
         .text_size(px(11. + offset))
-        .text_color(rgb(color))
-        .bg(rgb(background))
-        .child(label.to_string())
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(p.success))
+        .child(icon(IconName::CircleCheck, 12., p.success))
+        .child("Profil actif")
+}
+
+/// The dot of a radio option drawn as a segmented button.
+fn radio_mark(checked: bool, p: Palette) -> Div {
+    div()
+        .size(px(14.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if checked { p.accent } else { p.muted }))
+        .when(checked, |mark| {
+            mark.child(div().size(px(6.)).rounded_full().bg(rgb(p.accent)))
+        })
+}
+
+fn setup_step(number: usize, label: &str, body: impl IntoElement, p: Palette, offset: f32) -> Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(12.))
+        .child(
+            div()
+                .size(px(22.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(p.accent_border))
+                .text_size(px(11. + offset))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(p.accent))
+                .child(number.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .pt(px(2.))
+                .child(field_label(label, p, offset))
+                .child(body),
+        )
+}
+
+fn vault_note(p: Palette, offset: f32) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .text_size(px(11. + offset))
+        .text_color(rgb(p.muted))
+        .child(icon(IconName::LockKeyhole, 13., p.muted))
+        .child("Les identifiants sont conservés dans le coffre du système.")
 }
 
 fn avatar(label: &str, p: Palette, size: f32) -> Div {
@@ -1683,10 +2064,10 @@ fn avatar(label: &str, p: Palette, size: f32) -> Div {
 }
 
 fn profile_avatar(profile: &Profile, p: Palette, size: f32) -> Div {
-    let hue = p.graph[profile_hue(&profile.id, p.graph.len())];
+    let (color, background) = profile_colors(profile, p);
     avatar_shape(size)
-        .bg(rgb(mix(hue, p.panel, 0.18)))
-        .text_color(rgb(hue))
+        .bg(rgb(background))
+        .text_color(rgb(color))
         .child(profile_monogram(&profile.name))
 }
 
@@ -1737,52 +2118,6 @@ fn provider_mark(edition: ProviderEdition, p: Palette, size: f32) -> Div {
         })
 }
 
-fn primary_action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
-    action_base(id, label, p, offset)
-        .bg(rgb(p.accent))
-        .border_color(rgb(p.accent))
-        .text_color(rgb(p.on_accent))
-        .font_weight(FontWeight::SEMIBOLD)
-        .hover(move |style| style.bg(rgb(p.accent).opacity(0.9)))
-}
-
-fn link_action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
-    action(id, label, p, offset)
-        .border_color(transparent_black())
-        .text_color(rgb(p.accent))
-        .px(px(4.))
-        .py(px(6.))
-}
-
-fn note(label: &str, p: Palette) -> Div {
-    div()
-        .min_w_0()
-        .whitespace_normal()
-        .line_height(relative(1.6))
-        .text_color(rgb(p.muted))
-        .child(label.to_string())
-}
-
-fn action(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
-    action_base(id, label, p, offset).hover(move |style| style.bg(rgb(p.hover)))
-}
-
-fn action_base(id: impl Into<SharedString>, label: &str, p: Palette, offset: f32) -> Button {
-    Button::new(id.into())
-        .px(px(12.))
-        .py(px(8.))
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(RADIUS_MD)
-        .text_size(px(12. + offset))
-        .text_color(rgb(p.text))
-        .cursor_pointer()
-        .accessibility_label(label.to_string())
-        .focus_visible(move |style| style.border_color(rgb(p.accent)))
-        .styles(|styles| styles.disabled(|style| style.opacity(0.5).cursor_default()))
-        .child(div().min_w_0().whitespace_normal().child(label.to_string()))
-}
-
 fn clone_row(label: &str, p: Palette, offset: f32, control: impl IntoElement) -> Div {
     div()
         .flex()
@@ -1792,52 +2127,11 @@ fn clone_row(label: &str, p: Palette, offset: f32, control: impl IntoElement) ->
             div()
                 .w(px(132.))
                 .flex_none()
-                .pt(px(8.))
+                .pt(px(9.))
                 .text_size(px(12. + offset))
                 .text_color(rgb(p.muted))
                 .whitespace_normal()
                 .child(label.to_string()),
         )
         .child(div().flex_1().min_w_0().child(control))
-}
-
-fn input_control(
-    state: &Entity<InputState>,
-    id: &'static str,
-    label: &'static str,
-    p: Palette,
-    offset: f32,
-) -> Input {
-    Input::new(state)
-        .id(id)
-        .aria_label(label)
-        .appearance(false)
-        .with_size(px(36.))
-        .w_full()
-        .min_w_0()
-        .px(px(12.))
-        .py_0()
-        .border_1()
-        .border_color(rgb(p.border))
-        .rounded(RADIUS_MD)
-        .bg(rgb(p.bg))
-        .text_color(rgb(p.text))
-        .text_size(px(12. + offset))
-}
-
-fn field(
-    state: &Entity<InputState>,
-    id: &'static str,
-    label: &'static str,
-    p: Palette,
-    offset: f32,
-) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(note(label, p))
-        .child(input_control(state, id, label, p, offset))
 }

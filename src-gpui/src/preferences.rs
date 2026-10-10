@@ -9,6 +9,8 @@ use std::{
 };
 
 pub const DEFAULT_FONT_SIZE_OFFSET: f32 = 1.;
+pub const MIN_FONT_SIZE_OFFSET: f32 = 0.;
+pub const MAX_FONT_SIZE_OFFSET: f32 = 5.;
 /// Diffs start at the list text size of the interface: 11 px plus the default zoom.
 pub const DEFAULT_DIFF_FONT_SIZE: f32 = 12.;
 pub const MIN_DIFF_FONT_SIZE: f32 = 9.;
@@ -232,7 +234,12 @@ impl Preferences {
         self.palette().apply(self.font_size_offset, cx);
     }
     pub fn set_font_size_offset(&mut self, value: f32) {
-        self.font_size_offset = bounded(value, 0., 5., DEFAULT_FONT_SIZE_OFFSET);
+        self.font_size_offset = bounded(
+            value,
+            MIN_FONT_SIZE_OFFSET,
+            MAX_FONT_SIZE_OFFSET,
+            DEFAULT_FONT_SIZE_OFFSET,
+        );
     }
     pub fn set_diff_font_size(&mut self, value: f32) {
         self.diff_font_size = bounded(

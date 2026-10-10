@@ -170,7 +170,12 @@ impl Mangrove {
                 "fetch automatique intervalle settings",
             )
             .detail(if prefs.auto_fetch_interval == 0 {
-                "Toutes les minutes ; intervalle réglable dans Général".into()
+                match chrome.resumed_interval() {
+                    1 => "Toutes les minutes ; intervalle réglable dans Général".into(),
+                    interval => {
+                        format!("Toutes les {interval} minutes ; intervalle réglable dans Général")
+                    }
+                }
             } else {
                 format!("Intervalle actuel : {} min", prefs.auto_fetch_interval)
             }),
@@ -612,23 +617,11 @@ impl Mangrove {
             }),
             Command::ToggleImagePreviews => self.chrome.update(cx, |chrome, cx| {
                 chrome.preferences.show_image_previews = !chrome.preferences.show_image_previews;
-                chrome.settings.update(cx, |settings, cx| {
-                    settings.set_image_previews(chrome.preferences.show_image_previews, cx)
-                });
                 chrome.prefs_changed(window, cx);
             }),
-            Command::ToggleAutoFetch => self.chrome.update(cx, |chrome, cx| {
-                chrome.preferences.auto_fetch_interval =
-                    if chrome.preferences.auto_fetch_interval == 0 {
-                        1
-                    } else {
-                        0
-                    };
-                chrome.settings.update(cx, |settings, cx| {
-                    settings.set_interval(chrome.preferences.auto_fetch_interval, window, cx)
-                });
-                chrome.prefs_changed(window, cx);
-            }),
+            Command::ToggleAutoFetch => self
+                .chrome
+                .update(cx, |chrome, cx| chrome.toggle_auto_fetch(window, cx)),
             Command::DismissError => self.chrome_event(&ChromeEvent::DismissError, window, cx),
             Command::Quit => cx.quit(),
             Command::History | Command::CloseFile => {
