@@ -1140,13 +1140,6 @@ impl CodeView {
             cx.stop_propagation();
             return;
         }
-        if key == "escape" {
-            self.selection = None;
-            self.dragging = false;
-            self.drag_point = None;
-            cx.notify();
-            return;
-        }
         if self.show_blame && matches!(key, "enter" | "space") && !modifiers.shift {
             if let Some(group) = self.blame_group(self.active_line) {
                 cx.emit(CodeViewEvent::NavigateCommit(group.sha.clone()));
@@ -1647,6 +1640,17 @@ impl Render for CodeView {
             .focus_visible(move |style| style.border_color(rgb(p.accent)))
             .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy_selection(cx)))
             .on_action(cx.listener(|view, _: &SelectAll, _, cx| view.select_all(cx)))
+            // A first Escape clears the selection; the next one closes the view.
+            .on_action(cx.listener(|view, _: &crate::app::Escape, _, cx| {
+                if view.selection.is_none() && !view.dragging {
+                    cx.propagate();
+                    return;
+                }
+                view.selection = None;
+                view.dragging = false;
+                view.drag_point = None;
+                cx.notify();
+            }))
             .on_key_down(cx.listener(Self::keydown))
             .child(
                 canvas(

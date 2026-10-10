@@ -42,10 +42,9 @@ pub enum SettingsSection {
 pub struct SettingsView {
     section: SettingsSection,
     integrations: Option<Entity<IntegrationsView>>,
+    /// The last applied interval, restored if the field is left with an
+    /// invalid draft. Drafts apply only once stable, never mid-typing.
     interval: u32,
-    /// The interval when the field took focus, restored if it is left with an
-    /// invalid draft.
-    focus_interval: u32,
     commit_task: Option<Task<()>>,
     show_image_previews: bool,
     input: Entity<InputState>,
@@ -106,7 +105,6 @@ impl SettingsView {
             section: SettingsSection::General,
             integrations: None,
             interval,
-            focus_interval: interval,
             commit_task: None,
             show_image_previews,
             input,
@@ -184,7 +182,6 @@ impl SettingsView {
     }
     pub fn set_interval(&mut self, interval: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.interval = interval;
-        self.focus_interval = interval;
         self.commit_task = None;
         self.input.update(cx, |input, cx| {
             input.set_value(interval.to_string(), window, cx)
@@ -215,7 +212,7 @@ impl SettingsView {
     /// step or when the field is left.
     fn draft_changed(&mut self, cx: &mut Context<Self>) {
         self.commit_task = None;
-        match resolve_interval(self.input.read(cx).value().as_ref(), self.focus_interval) {
+        match resolve_interval(self.input.read(cx).value().as_ref(), self.interval) {
             Ok(interval) => {
                 self.error = None;
                 if interval != self.interval {
@@ -238,9 +235,7 @@ impl SettingsView {
         true
     }
     fn leave_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.commit_draft(cx) {
-            self.apply_interval(self.focus_interval, cx);
-        }
+        self.commit_draft(cx);
         self.set_interval(self.interval, window, cx);
     }
     fn apply_interval(&mut self, interval: u32, cx: &mut Context<Self>) {
@@ -692,9 +687,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn abandoning_an_invalid_draft_restores_the_interval_it_was_focused_with(
-        cx: &mut TestAppContext,
-    ) {
+    fn abandoning_an_invalid_draft_restores_the_last_applied_interval(cx: &mut TestAppContext) {
         let (window, view, applied) = open_settings(cx, 15);
         cx.update_window(window, |_, window, cx| {
             view.update(cx, |view, cx| view.focus(window, cx))
@@ -707,7 +700,7 @@ mod tests {
         assert_eq!(draft(cx, &view), "15");
         assert!(applied.borrow().is_empty());
 
-        // A paused valid draft applies; the focus value still wins on abandon.
+        // A paused valid draft applies and becomes the value an abandon keeps.
         edit(cx, window, &view, "30");
         cx.executor().advance_clock(INTERVAL_COMMIT_DELAY);
         assert_eq!(*applied.borrow(), [30]);
@@ -715,8 +708,8 @@ mod tests {
         cx.executor().advance_clock(INTERVAL_COMMIT_DELAY * 2);
         assert_eq!(*applied.borrow(), [30]);
         keys(cx, window, &["escape"]);
-        assert_eq!(*applied.borrow(), [30, 15]);
-        assert_eq!(draft(cx, &view), "15");
+        assert_eq!(*applied.borrow(), [30]);
+        assert_eq!(draft(cx, &view), "30");
         assert!(view.read_with(cx, |view, _| view.error.is_none()));
     }
 

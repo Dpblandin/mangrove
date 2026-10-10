@@ -268,8 +268,13 @@ pub struct FileBrowser {
 impl EventEmitter<FileBrowserEvent> for FileBrowser {}
 
 impl FileBrowser {
+    /// Keys move through the shown code; the history list keeps the panel.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
-        self.focus.focus(window, cx);
+        if self.mode == FileView::History {
+            self.focus.focus(window, cx);
+        } else {
+            self.viewer.read(cx).focus_handle(cx).focus(window, cx);
+        }
     }
     pub fn new(
         engine: Arc<Workspace>,
@@ -1288,6 +1293,7 @@ impl Render for FileBrowser {
                             p,
                             o,
                         )
+                        .flex_shrink_0()
                         .on_click(cx.listener(|v, _, _, cx| v.page(-1, cx)))
                         .on_key_down(cx.listener(
                             |v, e: &KeyDownEvent, _, cx| {
@@ -1298,23 +1304,26 @@ impl Render for FileBrowser {
                             },
                         )),
                     )
+                    // The counter gives way first so both page buttons stay whole.
                     .child(
-                        self.history
-                            .as_ref()
-                            .map(|h| {
-                                format!(
-                                    "{} · {} parcourus",
-                                    count_label(h.entries.len(), "changement", "changements"),
-                                    count_label(h.scanned, "commit", "commits")
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                if self.loading {
-                                    "Chargement…".into()
-                                } else {
-                                    String::new()
-                                }
-                            }),
+                        div().flex_1().min_w_0().truncate().text_center().child(
+                            self.history
+                                .as_ref()
+                                .map(|h| {
+                                    format!(
+                                        "{} · {} parcourus",
+                                        count_label(h.entries.len(), "changement", "changements"),
+                                        count_label(h.scanned, "commit", "commits")
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    if self.loading {
+                                        "Chargement…".into()
+                                    } else {
+                                        String::new()
+                                    }
+                                }),
+                        ),
                     )
                     .child(
                         action(
@@ -1329,6 +1338,7 @@ impl Render for FileBrowser {
                             p,
                             o,
                         )
+                        .flex_shrink_0()
                         .on_click(cx.listener(|v, _, _, cx| v.page(1, cx)))
                         .on_key_down(cx.listener(
                             |v, e: &KeyDownEvent, _, cx| {

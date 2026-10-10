@@ -928,6 +928,9 @@ impl Mangrove {
             HistoryEvent::SelectWorkingTree => self.select_working(cx),
             HistoryEvent::RefreshRepository => self.refresh(window, cx),
             HistoryEvent::Changed => {
+                let outside = self.history.read(cx).selection_outside_results();
+                self.inspector
+                    .update(cx, |view, cx| view.set_outside_results(outside, cx));
                 self.sync_chrome(cx);
             }
         }
@@ -988,8 +991,11 @@ impl Mangrove {
                 {
                     self.history
                         .update(cx, |history, cx| history.focus_list(window, cx));
-                } else if *active && self.focus.is_focused(window) {
-                    // A restored central view gets the keys nobody else holds.
+                } else if *active
+                    && (self.focus.is_focused(window)
+                        || self.history.focus_handle(cx).is_focused(window))
+                {
+                    // A restored central view takes the keys from the hidden list.
                     self.inspector
                         .update(cx, |inspector, cx| inspector.focus_workspace(window, cx));
                 }

@@ -398,6 +398,8 @@ pub struct InspectorView {
     subscriptions: Vec<Subscription>,
     restore_open: Option<bool>,
     pending_view: Option<InspectorViewState>,
+    /// The kept commit has no row in the current search results.
+    outside_results: bool,
     file_rows: HashMap<String, Arc<Vec<FileChoice>>>,
     #[cfg(feature = "app-benchmark")]
     benchmark_scroll: f32,
@@ -502,6 +504,7 @@ impl InspectorView {
             subscriptions: vec![code_subscription, browser_subscription],
             restore_open: None,
             pending_view: None,
+            outside_results: false,
             file_rows: HashMap::new(),
             #[cfg(feature = "app-benchmark")]
             benchmark_scroll: 0.,
@@ -663,6 +666,12 @@ impl InspectorView {
         self.browser
             .update(cx, |v, cx| v.set_preferences(preferences, cx));
         cx.notify();
+    }
+    pub fn set_outside_results(&mut self, outside: bool, cx: &mut Context<Self>) {
+        if self.outside_results != outside {
+            self.outside_results = outside;
+            cx.notify();
+        }
     }
     pub fn central_active(&self) -> bool {
         !self.compact && self.workspace_open
@@ -2590,6 +2599,13 @@ impl InspectorView {
         );
         if let Some(limit) = &details.similarity_limited {
             panel = panel.child(notice(limit.clone(), p.warning, o));
+        }
+        if self.outside_results {
+            panel = panel.child(notice(
+                "Ce commit n’apparaît pas dans les résultats de la recherche.",
+                p.muted,
+                o,
+            ));
         }
         let title_line = (15. + o) * 1.5;
         panel = panel.child(

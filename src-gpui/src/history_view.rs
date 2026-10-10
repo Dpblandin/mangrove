@@ -10,7 +10,7 @@ use crate::{
 };
 use gpui_kit::{
     assets::IconName,
-    component::input::{Input, InputEvent, InputState},
+    component::input::{Escape as InputEscape, Input, InputEvent, InputState},
     component::scroll::Scrollbar,
     component::tooltip::Tooltip,
     prelude::*,
@@ -320,6 +320,14 @@ impl HistoryView {
     }
     pub fn query(&self) -> &str {
         &self.query
+    }
+    /// A search without results keeps the commit selected but hides its row.
+    pub fn selection_outside_results(&self) -> bool {
+        self.filtered()
+            && !self.loading()
+            && self.total == 0
+            && !self.selected_sha.is_empty()
+            && !self.working.selected
     }
     /// Reselects a tab's commit within its search once its repository reopens.
     pub fn restore_view(
@@ -1643,6 +1651,10 @@ impl HistoryView {
             .role(Role::Menu)
             .aria_label("Actions du commit")
             .track_focus(&self.menu_focus)
+            // The Escape action reaches the focused menu before key events.
+            .on_action(cx.listener(|view, _: &crate::app::Escape, window, cx| {
+                view.close_menu(window, cx);
+            }))
             .w(menu.width)
             .occlude()
             .p(px(5.))
@@ -2276,6 +2288,10 @@ impl Render for HistoryView {
                             .border_1()
                             .border_color(rgb(palette.border))
                             .bg(rgb(palette.bg))
+                            // Escape keeps the search and hands the keys to its results.
+                            .on_action(cx.listener(|view, _: &InputEscape, window, cx| {
+                                view.focus_list(window, cx)
+                            }))
                             .child(theme::icon(IconName::Search, 14., palette.muted))
                             .child(
                                 Input::new(&self.search)

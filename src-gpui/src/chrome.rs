@@ -1782,14 +1782,16 @@ impl Chrome {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_resize(false, cx)),
             )
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if key == "escape" && this.resize.is_some() {
-                    this.finish_resize(true, cx);
-                    cx.stop_active_drag(window);
-                    cx.stop_propagation();
+            .on_action(cx.listener(|this, _: &crate::app::Escape, window, cx| {
+                if this.resize.is_none() {
+                    cx.propagate();
                     return;
                 }
+                this.finish_resize(true, cx);
+                cx.stop_active_drag(window);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                let key = event.keystroke.key.as_str();
                 if key == "enter" {
                     this.reset_pane(pane, cx);
                     cx.stop_propagation();
