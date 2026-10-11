@@ -2,6 +2,18 @@
 
 Client Git desktop natif pour explorer l’historique, les branches et les diffs d’un dépôt. Il ne modifie ni les fichiers ni l’index : seul le fetch met à jour les références distantes. L’interface native est dessinée avec GPUI au-dessus du moteur Rust `mangrove-core`, sans WebView ni serveur local.
 
+## Aperçu
+
+Captures de Mangrove sur macOS, avec un dépôt de démonstration et des données fictives.
+
+**Fenêtre principale** — branches, graphe de l’historique et détails du commit.
+
+![Fenêtre principale de Mangrove avec les branches, le graphe des commits et les fichiers modifiés](docs/screenshots/main-window.jpg)
+
+**Diff côte à côte** — coloration syntaxique, ajouts, suppressions et mots modifiés surlignés.
+
+![Diff TypeScript côte à côte dans Mangrove, avec les changements de lignes et de mots surlignés](docs/screenshots/diff.jpg)
+
 ## Fonctionnalités
 
 - **Dépôts** : dépôts locaux, bare et worktrees ; récents et favoris par profil ; onglets qui retrouvent leur sélection, leur recherche et leur position de lecture.
