@@ -26,6 +26,11 @@ pub const MONO: &str = "Menlo";
 pub const MONO: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const MONO: &str = "DejaVu Sans Mono";
+/// The typewriter face of the education ministry's text-mode terminals.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub const TERMINAL: &str = "Courier New";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const TERMINAL: &str = MONO;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,16 +42,18 @@ pub enum ThemeId {
     Ardoise,
     Gitlab,
     Octopus,
+    Minitel,
 }
 
 impl ThemeId {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Classic,
         Self::Mangrove,
         Self::Macchiato,
         Self::Ardoise,
         Self::Gitlab,
         Self::Octopus,
+        Self::Minitel,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -56,6 +63,7 @@ impl ThemeId {
             Self::Ardoise => "Ardoise",
             Self::Gitlab => "GitLab",
             Self::Octopus => "Octopus",
+            Self::Minitel => "3615 Profs",
         }
     }
 }
@@ -92,6 +100,10 @@ pub struct Palette {
     pub graph: &'static [u32],
     /// keyword, string, comment, number, type, function, punctuation, property.
     pub syntax: [u32; 8],
+    /// Interface text; code keeps `MONO`.
+    pub font: &'static str,
+    /// Kit's defaults for any token the palette does not set.
+    pub mode: ThemeMode,
 }
 
 impl Default for Palette {
@@ -143,6 +155,8 @@ impl Palette {
             deletion_gutter: 0,
             addition_word_bg: 0,
             deletion_word_bg: 0,
+            font: SANS,
+            mode: ThemeMode::Dark,
         };
         match theme {
             ThemeId::Classic => {}
@@ -270,6 +284,41 @@ impl Palette {
                     0x9cdcfe,
                 ];
             }
+            // The gray text-mode screens of school administration software:
+            // black typewriter text, a blue cursor and tinted status colors
+            // dark enough for 4.5:1 on every gray.
+            ThemeId::Minitel => {
+                palette.bg = 0xb4b4b4;
+                palette.reading_bg = 0xcbcbcb;
+                palette.panel = 0xc4c4c4;
+                palette.surface = 0xd4d4d4;
+                palette.border = 0x4a4a4a;
+                palette.text = 0x0c0c0c;
+                palette.muted = 0x262626;
+                palette.accent = 0x0000a8;
+                palette.success = 0x0b5a1a;
+                palette.danger = 0x8a0808;
+                palette.warning = 0x432800;
+                palette.renamed = palette.accent;
+                palette.addition_bg = 0xb3d1b3;
+                palette.deletion_bg = 0xddb2b2;
+                palette.on_accent = 0xececec;
+                palette.graph = &[
+                    0x0000a8, 0x0b6b1a, 0x8a0808, 0x6a3500, 0x6a1a8a, 0x00606a, 0x8a0060, 0x404040,
+                ];
+                palette.syntax = [
+                    0x00007a,
+                    0x6a3500,
+                    0x4a4a4a,
+                    0x8a0060,
+                    0x004d4d,
+                    palette.text,
+                    0x2a2a2a,
+                    0x3a2080,
+                ];
+                palette.font = TERMINAL;
+                palette.mode = ThemeMode::Light;
+            }
         }
         palette.selection = mix(palette.accent, palette.bg, 0.14);
         palette.accent_soft = mix(palette.accent, palette.bg, 0.10);
@@ -302,6 +351,11 @@ impl Palette {
                 palette.addition_word_bg = mix(0x003f0a, palette.addition_bg, 0.5);
                 palette.deletion_word_bg = mix(0x6a1010, palette.deletion_bg, 0.5);
             }
+            // Rows light up rather than darken, which would dim their text.
+            ThemeId::Minitel => {
+                palette.selection = 0xdcdcdc;
+                palette.hover = 0xd2d2d2;
+            }
             _ => {}
         }
         palette
@@ -314,11 +368,11 @@ impl Palette {
 
     /// Theme Kit's editable controls and menus with the application's colors.
     pub fn apply(self, _font_size_offset: f32, cx: &mut App) {
-        Theme::change(ThemeMode::Dark, None, cx);
+        Theme::change(self.mode, None, cx);
         // Kit controls read renderable tokens as well as solid colors. Keep
         // those and the Base projection synchronized when applying CSS colors.
         Theme::update(cx, |theme| {
-            theme.font_family = SharedString::from(SANS);
+            theme.font_family = SharedString::from(self.font);
             // The CSS root keeps rem at 16px; zoom changes text, never panel spacing.
             theme.font_size = gpui_kit::px(16.);
             theme.mono_font_family = SharedString::from(MONO);

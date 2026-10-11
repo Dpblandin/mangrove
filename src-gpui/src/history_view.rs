@@ -1564,7 +1564,7 @@ impl HistoryView {
         let measure = |text: &str| {
             let run = TextRun {
                 len: text.len(),
-                font: font(theme::SANS),
+                font: font(self.palette.font),
                 color: rgb(self.palette.text).into(),
                 background_color: None,
                 underline: None,
@@ -2298,7 +2298,7 @@ impl Render for HistoryView {
             .flex()
             .flex_col()
             .bg(rgb(palette.reading_bg))
-            .font_family(theme::SANS)
+            .font_family(palette.font)
             .text_color(rgb(palette.text))
             .child(
                 div()

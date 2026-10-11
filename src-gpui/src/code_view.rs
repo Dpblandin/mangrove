@@ -31,7 +31,7 @@ use crate::{
         DEFAULT_DIFF_FONT_SIZE, DiffLayout, MAX_DIFF_FONT_SIZE, MIN_DIFF_FONT_SIZE, Preferences,
     },
     syntax::{self, Kind},
-    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
     virtual_scroll::{RowGeometry, VirtualScrollHandle},
 };
 use selection::{Position, Selection, Side};
@@ -1156,7 +1156,7 @@ impl CodeView {
             .flex()
             .items_center()
             .gap(px(2.))
-            .font_family(SANS)
+            .font_family(palette.font)
             .child(button(
                 "diff-font-minus",
                 IconName::Minus,
@@ -2423,7 +2423,7 @@ impl Render for CodeView {
                     .gap(px(10.))
                     .p(px(22.))
                     .text_center()
-                    .font_family(SANS)
+                    .font_family(p.font)
                     .text_size(px(11. + self.ui_offset))
                     .text_color(rgb(if self.error.is_some() {
                         p.danger
@@ -2541,7 +2541,7 @@ impl Render for CodeView {
                     .gap(px(8.))
                     .px(px(17.))
                     .py(px(13.))
-                    .font_family(SANS)
+                    .font_family(p.font)
                     .text_size(px(11. + self.ui_offset))
                     .line_height(relative(1.625))
                     .text_color(rgb(p.warning))

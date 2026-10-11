@@ -34,7 +34,7 @@ use crate::{
     branch_tracking::{Badge, Status, TrackingState, text_width},
     format::{commit_date, compact_date, count_label, display_path, format_count, short_sha},
     repository_context::RepositoryContextState,
-    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
+    theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
     virtual_scroll::VirtualScrollHandle,
 };
 
@@ -1985,7 +1985,7 @@ impl Render for SidebarView {
         div().id("sidebar").relative().size_full().min_w_0().flex().flex_col()
             .capture_any_mouse_down(cx.listener(|view, _, _, _| view.restored_scroll_top = None))
             .capture_key_down(cx.listener(|view, _, _, _| view.restored_scroll_top = None))
-            .font_family(SANS).line_height(relative(1.5)).bg(rgb(p.panel)).text_color(rgb(p.text))
+            .font_family(p.font).line_height(relative(1.5)).bg(rgb(p.panel)).text_color(rgb(p.text))
             .border_r_1().border_color(rgb(p.border))
             .child(div().id("sidebar-heading").aria_label("ESPACE DE TRAVAIL")
                 .pt(px(16.)).pb(px(12.)).px(px(if self.width < 210. { 14. } else { 22. }))

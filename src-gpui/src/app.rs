@@ -12,7 +12,6 @@ use crate::{
     settings::SettingsView,
     sidebar::{SidebarEvent, SidebarView, SidebarViewState},
     tabs::Tabs,
-    theme::SANS,
     view_cache::render_cached_view,
 };
 use gpui_kit::{component::input::Escape as InputEscape, prelude::*, *};
@@ -1416,7 +1415,7 @@ impl Render for Mangrove {
             .overflow_hidden()
             .bg(rgb(p.bg))
             .text_color(rgb(p.text))
-            .font_family(SANS)
+            .font_family(p.font)
             .text_size(px(16. + prefs.font_size_offset))
             .font_weight(FontWeight::NORMAL)
             .line_height(relative(1.5))
