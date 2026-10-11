@@ -199,6 +199,27 @@ jobs:
           path: dist
           pattern: mangrove-*
           merge-multiple: true
+      - name: Sign the archives for the in-app updates
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::Le secret MINISIGN_SECRET_KEY manque : l’application refuserait d’installer ces archives."
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          key="$RUNNER_TEMP/minisign.key"
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          for archive in dist/mangrove-*; do
+            name=$(basename "$archive")
+            # The application requires this trusted comment: an archive cannot
+            # pass for another version or platform.
+            minisign -S -s "$key" -m "$archive" -t "$name" -x "$archive.minisig" < /dev/null
+            # The application holds this public key; a mismatch stops the release.
+            minisign -V -q -p crates/mangrove-update/release-key.pub -m "$archive"
+          done
+          rm -f "$key"
       - name: Create the release with its notes, builds and checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -210,8 +231,8 @@ jobs:
 
           ---
 
-          Installation : voir [docs/releases.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/v$VERSION/docs/releases.md#installer-une-release). Sommes SHA-256 : \`SHA256SUMS.txt\`.
+          Installation : voir [docs/releases.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/v$VERSION/docs/releases.md#installer-une-release). Sommes SHA-256 : \`SHA256SUMS.txt\`. Signatures minisign des mises à jour intégrées : fichiers \`.minisig\`.
           NOTES
-          (cd dist && sha256sum mangrove-* > SHA256SUMS.txt)
+          (cd dist && sha256sum mangrove-*.dmg mangrove-*.tar.gz mangrove-*.zip > SHA256SUMS.txt)
           gh release create "v$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "Mangrove $VERSION" --notes-file "$notes"

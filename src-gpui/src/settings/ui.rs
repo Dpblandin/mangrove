@@ -160,6 +160,7 @@ pub enum Tone {
     Progress,
     Success,
     Error,
+    Info,
 }
 
 /// A short message under the field or action it concerns.
@@ -168,6 +169,7 @@ pub fn feedback(tone: Tone, text: impl Into<SharedString>, p: Palette, offset: f
         Tone::Progress => (IconName::LoaderCircle, p.accent),
         Tone::Success => (IconName::CircleCheck, p.success),
         Tone::Error => (IconName::CircleAlert, p.danger),
+        Tone::Info => (IconName::Info, p.accent),
     };
     div()
         .flex()
@@ -176,10 +178,10 @@ pub fn feedback(tone: Tone, text: impl Into<SharedString>, p: Palette, offset: f
         .min_w_0()
         .text_size(px(12. + offset))
         .line_height(relative(1.5))
-        .text_color(rgb(if tone == Tone::Progress {
-            p.muted
-        } else {
-            color
+        .text_color(rgb(match tone {
+            Tone::Progress => p.muted,
+            Tone::Info => p.text,
+            _ => color,
         }))
         .child(
             div()
@@ -193,6 +195,50 @@ pub fn feedback(tone: Tone, text: impl Into<SharedString>, p: Palette, offset: f
                 .min_w_0()
                 .whitespace_normal()
                 .child(text.into()),
+        )
+}
+
+/// A remark below a card's settings, separated from them by a rule.
+pub fn footnote(glyph: IconName, text: impl Into<SharedString>, p: Palette, offset: f32) -> Div {
+    div()
+        .pt(px(16.))
+        .border_t_1()
+        .border_color(rgb(p.border))
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .text_size(px(11. + offset))
+        .line_height(relative(1.6))
+        .text_color(rgb(p.muted))
+        .child(
+            div()
+                .flex_none()
+                .mt(px(2.))
+                .child(icon(glyph, 13., p.muted)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .child(text.into()),
+        )
+}
+
+/// How far a download has come, from 0 to 1.
+pub fn progress_bar(fraction: f32, p: Palette) -> Div {
+    div()
+        .h(px(6.))
+        .w_full()
+        .rounded_full()
+        .overflow_hidden()
+        .bg(rgb(p.border))
+        .child(
+            div()
+                .h_full()
+                .w(relative(fraction.clamp(0., 1.)))
+                .rounded_full()
+                .bg(rgb(p.accent)),
         )
 }
 
