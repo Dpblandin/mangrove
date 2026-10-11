@@ -2,6 +2,25 @@
 
 Évolutions notables de Mangrove, regroupées par version. Chaque section est générée depuis les commits par `scripts/release.sh`, relue avant le tag, puis reprise telle quelle dans la release GitHub.
 
+## [0.2.0](https://github.com/Dpblandin/mangrove/releases/tag/v0.2.0) - 2026-10-11
+
+### Nouveautés
+
+- Avance et retard de chaque branche locale sur son upstream dans la sidebar (`↑3 ↓12`), et « disparu » quand l’upstream n’existe plus ; la puce HEAD de l’historique affiche les mêmes valeurs. [#10](https://github.com/Dpblandin/mangrove/issues/10)
+- Mots modifiés surlignés à l’intérieur des lignes changées d’un diff. [#11](https://github.com/Dpblandin/mangrove/issues/11)
+- Diffs côte à côte dans la vue centrale, au choix pour chaque profil, avec sélection et copie d’un seul côté. [#11](https://github.com/Dpblandin/mangrove/issues/11)
+- Fichiers volumineux lus jusqu’à une limite réglable dans les paramètres, de 2 à 64 Mio (8 par défaut), au lieu d’être ignorés au-delà de 2 Mio ; un fichier plus gros s’affiche sur demande.
+- Thème Octopus.
+- Paramètres retravaillés : erreurs sous chaque champ, Entrée pour valider, profil actif dans l’en-tête, clés SSH vérifiées avant usage et déconnexion confirmée. [#2](https://github.com/Dpblandin/mangrove/issues/2)
+
+### Corrections
+
+- Les boutons d’en-tête des diffs, de l’inspecteur et de l’explorateur de fichiers n’agissent plus deux fois par appui sur Entrée ou Espace. [#11](https://github.com/Dpblandin/mangrove/issues/11)
+
+### Mise à jour
+
+- Les dépôts déjà indexés sont réindexés une fois au premier lancement de cette version.
+
 ## [0.1.0](https://github.com/Dpblandin/mangrove/releases/tag/v0.1.0) - 2026-10-10
 
 Première version publique de Mangrove, client Git desktop natif en lecture seule.
