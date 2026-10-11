@@ -11,6 +11,7 @@ Client Git desktop natif pour explorer l’historique, les branches et les diffs
 - **Fichiers** : contenu à une révision, historique qui suit les renommages, blame ([détails](docs/file-browser.md)).
 - **Modifications locales** : fichiers indexés, non indexés et non suivis, en lecture seule.
 - **Fetch** : manuel ou automatique, avec des erreurs résumées et le détail de Git.
+- **Mises à jour** : recherche au lancement puis toutes les six heures, installation des releases signées en arrière-plan et redémarrage en un clic, réglables dans les paramètres ([détails](docs/releases.md#mises-à-jour-intégrées)).
 - **Intégrations** : profils, comptes GitLab, GitHub et Bitbucket (dépôts, PR/MR, CI), clonage HTTPS ou SSH ; jetons dans le coffre de l’OS ([détails](docs/integrations.md)).
 - **Interface** : sept thèmes dont [Catppuccin](https://catppuccin.com/palette/) Macchiato, palette de commandes **Cmd/Ctrl + P** ([commandes](docs/command-palette.md)), navigation au clavier, panneaux redimensionnables et zoom.
 
@@ -38,8 +39,8 @@ La CI lance ces vérifications sur macOS, Linux et Windows :
 
 ```sh
 cargo fmt --all --check
-cargo clippy --locked -p mangrove-core -p mangrove-remote --all-targets -- -D warnings
-cargo test --locked -p mangrove-core -p mangrove-remote
+cargo clippy --locked -p mangrove-core -p mangrove-remote -p mangrove-update --all-targets -- -D warnings
+cargo test --locked -p mangrove-core -p mangrove-remote -p mangrove-update
 
 cargo fmt --manifest-path src-gpui/Cargo.toml --all --check
 cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D warnings
@@ -58,6 +59,7 @@ Une version se publie avec `scripts/release.sh X.Y.Z` ; voir [les releases](docs
 
 - `crates/mangrove-core` : lecture Git, graphe, index de recherche et cache.
 - `crates/mangrove-remote` : profils, coffre de l’OS, API des hébergeurs et SSH.
+- `crates/mangrove-update` : releases GitHub, signatures minisign et installation des mises à jour.
 - `src-gpui` : application GPUI, dans un workspace Cargo séparé ([README](src-gpui/README.md)).
 - `scripts` : fixtures, benchmarks et release.
 - `docs` : [architecture](docs/architecture.md), [performances](docs/performance.md) et documentation des fonctionnalités.
