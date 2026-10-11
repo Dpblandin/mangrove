@@ -1,53 +1,55 @@
 # Mangrove
 
-Client Git desktop natif pour explorer l’historique, les branches et les diffs d’un dépôt. Il ne modifie ni les fichiers ni l’index : seul le fetch met à jour les références distantes. L’interface native est dessinée avec GPUI au-dessus du moteur Rust `mangrove-core`, sans WebView ni serveur local.
+[Français](README.fr.md) | **English**
 
-## Aperçu
+A native desktop Git client for exploring a repository’s history, branches, and diffs. It leaves files and the index untouched; fetching updates remote references. The native interface is rendered with GPUI on top of the Rust `mangrove-core` engine, without a WebView or local server.
 
-Captures de Mangrove sur macOS, avec un dépôt de démonstration et des données fictives.
+## Preview
 
-**Fenêtre principale** — branches, graphe de l’historique et détails du commit.
+Screenshots of Mangrove on macOS, using a demo repository with sample data.
 
-![Fenêtre principale de Mangrove avec les branches, le graphe des commits et les fichiers modifiés](docs/screenshots/main-window.jpg)
+**Main window** — branches, history graph, and commit details.
 
-**Diff côte à côte** — coloration syntaxique, ajouts, suppressions et mots modifiés surlignés.
+![Mangrove’s main window showing branches, the commit graph, and changed files](docs/screenshots/main-window.jpg)
 
-![Diff TypeScript côte à côte dans Mangrove, avec les changements de lignes et de mots surlignés](docs/screenshots/diff.jpg)
+**Side-by-side diff** — syntax highlighting, additions, deletions, and highlighted word changes.
 
-## Fonctionnalités
+![Side-by-side TypeScript diff in Mangrove, with highlighted line and word changes](docs/screenshots/diff.jpg)
 
-- **Dépôts** : dépôts locaux, bare et worktrees ; récents et favoris par profil ; onglets qui retrouvent leur sélection, leur recherche et leur position de lecture.
-- **Historique** : graphe des branches et des merges, colonne des références, recherche par message, auteur, SHA ou référence.
-- **Branches** : branches locales et distantes, tags, dossiers repliables, filtre et mode **Solo** ; avance et retard sur l’upstream ; worktrees et stashes ([détails](docs/repository-context.md)).
-- **Commits** : détails, fichiers modifiés, diffs unifiés ou côte à côte avec coloration syntaxique et mots modifiés surlignés, aperçus d’images avant/après.
-- **Fichiers** : contenu à une révision, historique qui suit les renommages, blame ([détails](docs/file-browser.md)).
-- **Modifications locales** : fichiers indexés, non indexés et non suivis, en lecture seule.
-- **Fetch** : manuel ou automatique, avec des erreurs résumées et le détail de Git.
-- **Mises à jour** : recherche au lancement puis toutes les six heures, installation des releases signées en arrière-plan et redémarrage en un clic, réglables dans les paramètres ([détails](docs/releases.md#mises-à-jour-intégrées)).
-- **Intégrations** : profils, comptes GitLab, GitHub et Bitbucket (dépôts, PR/MR, CI), clonage HTTPS ou SSH ; jetons dans le coffre de l’OS ([détails](docs/integrations.md)).
-- **Interface** : sept thèmes dont [Catppuccin](https://catppuccin.com/palette/) Macchiato, palette de commandes **Cmd/Ctrl + P** ([commandes](docs/command-palette.md)), navigation au clavier, panneaux redimensionnables et zoom.
+## Features
 
-## Installer
+- **Repositories**: local and bare repositories, and worktrees; recent and favorite repositories per profile; tabs that restore their selection, search, and scroll position.
+- **History**: branch and merge graph, references column, and search by message, author, SHA, or reference.
+- **Branches**: local and remote branches, tags, collapsible folders, filtering, and **Solo** mode; ahead/behind counts relative to the upstream branch; worktrees and stashes ([details](docs/repository-context.md)).
+- **Commits**: details, changed files, unified or side-by-side diffs with syntax highlighting and highlighted word changes, and before/after image previews.
+- **Files**: contents at a given revision, history that follows renames, and blame ([details](docs/file-browser.md)).
+- **Local changes**: read-only views of staged, unstaged, and untracked files.
+- **Fetch**: manual or automatic, with error summaries and detailed Git output.
+- **Updates**: checks at startup and every six hours, background installation of signed releases, and one-click restart, configurable in settings ([details](docs/releases.md#mises-à-jour-intégrées)).
+- **Integrations**: profiles, GitLab, GitHub, and Bitbucket accounts (repositories, PRs/MRs, CI), and HTTPS or SSH cloning; tokens stored in the OS credential store ([details](docs/integrations.md)).
+- **Interface**: seven themes, including [Catppuccin](https://catppuccin.com/palette/) Macchiato, a **Cmd/Ctrl + P** command palette ([commands](docs/command-palette.md)), keyboard navigation, resizable panels, and zoom.
 
-Les builds macOS (Apple Silicon et Intel), Linux et Windows sont attachés aux [releases GitHub](https://github.com/Dpblandin/mangrove/releases) ; voir [l’installation](docs/releases.md#installer-une-release). Le fetch et le clonage utilisent Git installé sur la machine.
+## Install
 
-La QA interactive est faite sur macOS Apple Silicon. Les builds Linux et Windows sont compilés et testés par la CI, mais pas encore validés à l’écran.
+Builds for macOS (Apple Silicon and Intel), Linux, and Windows are attached to [GitHub releases](https://github.com/Dpblandin/mangrove/releases); see the [installation instructions](docs/releases.md#installer-une-release). Fetching and cloning use Git installed on your machine.
 
-## Compiler
+Interactive QA is performed on macOS Apple Silicon. Linux and Windows builds are compiled and tested in CI, but have not yet been visually validated.
 
-Prérequis : Rust via rustup (la version est fixée par `rust-toolchain.toml`) et les [prérequis GPUI Kit](https://gpui-kit.com/docs/installation/) de l’OS, dont Xcode complet sur macOS.
+## Build
+
+Prerequisites: Rust via rustup (the version is pinned in `rust-toolchain.toml`) and the [GPUI Kit prerequisites](https://gpui-kit.com/docs/installation/) for your OS, including the full Xcode installation on macOS.
 
 ```sh
 cargo run --release --locked --manifest-path src-gpui/Cargo.toml
-cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- /chemin/du/depot
+cargo run --release --locked --manifest-path src-gpui/Cargo.toml -- /path/to/repository
 
-# Bundle macOS : src-gpui/target/release/bundle/Mangrove.app
+# macOS bundle: src-gpui/target/release/bundle/Mangrove.app
 sh src-gpui/scripts/package-macos.sh
 ```
 
-## Développer
+## Develop
 
-La CI lance ces vérifications sur macOS, Linux et Windows :
+CI runs these checks on macOS, Linux, and Windows:
 
 ```sh
 cargo fmt --all --check
@@ -59,23 +61,23 @@ cargo clippy --locked --manifest-path src-gpui/Cargo.toml --all-targets -- -D wa
 cargo test --locked --manifest-path src-gpui/Cargo.toml
 ```
 
-Pour créer un dépôt synthétique dans `.mangrove-dev/` (Node.js et Git suffisent) :
+To create a synthetic repository in `.mangrove-dev/` (only Node.js and Git are required):
 
 ```sh
 node scripts/create-fixture.mjs --commits 10000 --large-change
 ```
 
-Une version se publie avec `scripts/release.sh X.Y.Z` ; voir [les releases](docs/releases.md).
+Publish a release with `scripts/release.sh X.Y.Z`; see the [release documentation](docs/releases.md).
 
-## Organisation
+## Project structure
 
-- `crates/mangrove-core` : lecture Git, graphe, index de recherche et cache.
-- `crates/mangrove-remote` : profils, coffre de l’OS, API des hébergeurs et SSH.
-- `crates/mangrove-update` : releases GitHub, signatures minisign et installation des mises à jour.
-- `src-gpui` : application GPUI, dans un workspace Cargo séparé ([README](src-gpui/README.md)).
-- `scripts` : fixtures, benchmarks et release.
-- `docs` : [architecture](docs/architecture.md), [performances](docs/performance.md) et documentation des fonctionnalités.
+- `crates/mangrove-core`: Git reading, graph, search index, and cache.
+- `crates/mangrove-remote`: profiles, OS credential store, hosting provider APIs, and SSH.
+- `crates/mangrove-update`: GitHub releases, minisign signatures, and update installation.
+- `src-gpui`: GPUI application, in a separate Cargo workspace ([README](src-gpui/README.md)).
+- `scripts`: fixtures, benchmarks, and releases.
+- `docs`: [architecture](docs/architecture.md), [performance](docs/performance.md), and feature documentation.
 
-## Licence
+## License
 
-Mangrove est distribué sous [Functional Source License 1.1, avec MIT comme licence future](LICENSE.md) (FSL-1.1-MIT). L’utiliser, y compris au travail, le modifier et le redistribuer est permis ; l’intégrer à un produit ou service commercial concurrent ne l’est pas. Chaque version passe sous licence MIT deux ans après sa publication. Les licences des composants tiers accompagnent chaque build publié.
+Mangrove is distributed under the [Functional Source License 1.1, with MIT as the future license](LICENSE.md) (FSL-1.1-MIT). Use, including at work, modification, and redistribution are permitted; incorporating it into a competing commercial product or service is not. Each version becomes MIT-licensed two years after publication. Third-party component licenses are included with every published build.
