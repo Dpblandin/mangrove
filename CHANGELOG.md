@@ -2,6 +2,12 @@
 
 Évolutions notables de Mangrove, regroupées par version. Chaque section est générée depuis les commits par `scripts/release.sh`, relue avant le tag, puis reprise telle quelle dans la release GitHub.
 
+## [0.4.0](https://github.com/Dpblandin/mangrove/releases/tag/v0.4.0) - 2026-10-11
+
+### Nouveautés
+
+- *(update)* Update the application automatically from signed releases, with its settings in Settings → Mises à jour
+
 ## [0.3.0](https://github.com/Dpblandin/mangrove/releases/tag/v0.3.0) - 2026-10-11
 
 ### Nouveautés
