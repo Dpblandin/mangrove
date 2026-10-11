@@ -85,6 +85,9 @@ pub struct Palette {
     pub hunk_bg: u32,
     pub addition_gutter: u32,
     pub deletion_gutter: u32,
+    /// Changed words inside an added or deleted line.
+    pub addition_word_bg: u32,
+    pub deletion_word_bg: u32,
     /// Lane colors, cycled in order.
     pub graph: &'static [u32],
     /// keyword, string, comment, number, type, function, punctuation, property.
@@ -138,6 +141,8 @@ impl Palette {
             hunk_bg: 0,
             addition_gutter: 0,
             deletion_gutter: 0,
+            addition_word_bg: 0,
+            deletion_word_bg: 0,
         };
         match theme {
             ThemeId::Classic => {}
@@ -273,15 +278,29 @@ impl Palette {
         palette.hunk_bg = mix(palette.accent, palette.reading_bg, 0.12);
         palette.addition_gutter = mix(palette.success, palette.addition_bg, 0.10);
         palette.deletion_gutter = mix(palette.danger, palette.deletion_bg, 0.10);
+        // Changed words stand out from their line while text keeps 4.5:1 and
+        // syntax colors 3:1; lighter themes have less room for that step.
+        palette.addition_word_bg = mix(palette.success, palette.addition_bg, 0.18);
+        palette.deletion_word_bg = mix(palette.danger, palette.deletion_bg, 0.22);
         match theme {
+            ThemeId::Macchiato => {
+                palette.addition_word_bg = mix(palette.success, palette.addition_bg, 0.15);
+            }
             // GitLab keeps navigation selection and hover neutral.
             ThemeId::Gitlab => {
                 palette.selection = palette.surface;
                 palette.hover = palette.surface;
+                palette.addition_word_bg = mix(palette.success, palette.addition_bg, 0.15);
+                palette.deletion_word_bg = mix(palette.danger, palette.deletion_bg, 0.15);
             }
             ThemeId::Octopus => {
                 palette.selection = mix(palette.accent, palette.bg, 0.20);
                 palette.hover = mix(palette.accent, palette.bg, 0.10);
+                // Its comment green is under 3:1 on its added lines already: a
+                // lighter word background would dim comments further, so
+                // changed words take a deeper tint of the same brightness.
+                palette.addition_word_bg = mix(0x003f0a, palette.addition_bg, 0.5);
+                palette.deletion_word_bg = mix(0x6a1010, palette.deletion_bg, 0.5);
             }
             _ => {}
         }
@@ -398,21 +417,51 @@ pub fn icon(name: gpui_kit::assets::IconName, size: f32, color: u32) -> Icon {
 mod tests {
     use super::{Palette, ThemeId, mix};
 
-    fn luminance(color: u32) -> f64 {
-        let channel = |shift: u32| {
+    /// The linear sRGB red, green and blue of a color.
+    fn linear(color: u32) -> [f64; 3] {
+        [16, 8, 0].map(|shift| {
             let value = f64::from((color >> shift) & 255) / 255.;
             if value <= 0.04045 {
                 value / 12.92
             } else {
                 ((value + 0.055) / 1.055).powf(2.4)
             }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+        })
+    }
+
+    fn luminance(color: u32) -> f64 {
+        let [r, g, b] = linear(color);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
     }
 
     fn contrast(foreground: u32, background: u32) -> f64 {
         let (a, b) = (luminance(foreground), luminance(background));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// CIE76 distance in CIELAB (D65): brightness and saturation alike.
+    fn distance(first: u32, second: u32) -> f64 {
+        let lab = |color: u32| {
+            let [r, g, b] = linear(color);
+            let f = |t: f64| {
+                if t > 0.008856 {
+                    t.cbrt()
+                } else {
+                    7.787 * t + 16. / 116.
+                }
+            };
+            let x = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+            let y = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+            let z = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+            [116. * y - 16., 500. * (x - y), 200. * (y - z)]
+        };
+        let (first, second) = (lab(first), lab(second));
+        first
+            .iter()
+            .zip(second)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt()
     }
 
     #[test]
@@ -458,6 +507,32 @@ mod tests {
                         );
                     }
                     assert!(contrast(p.dimmed(text), p.panel) < contrast(text, p.panel) / 1.4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changed_words_stand_out_and_keep_their_text_readable_in_every_theme() {
+        for theme in ThemeId::ALL {
+            let p = Palette::for_theme(theme);
+            for (line, word) in [
+                (p.addition_bg, p.addition_word_bg),
+                (p.deletion_bg, p.deletion_word_bg),
+            ] {
+                let name = theme.label();
+                // Well beyond a just noticeable difference, about 2.3.
+                assert!(
+                    distance(word, line) >= 9.,
+                    "{name}: {word:06x} on {line:06x}"
+                );
+                assert!(contrast(p.text, word) >= 4.5, "{name}: text on {word:06x}");
+                for color in p.syntax {
+                    let ratio = contrast(color, word);
+                    assert!(
+                        ratio >= 3.,
+                        "{name}: {color:06x} {ratio:.2}:1 on {word:06x}"
+                    );
                 }
             }
         }

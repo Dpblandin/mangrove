@@ -1,11 +1,10 @@
 //! File revision browsing. One native read is retained until it actually settles;
 //! replacing a view only replaces the queued intent, never creates an unbounded queue.
 use crate::{
-    code_view::{CodeView, CodeViewEvent, ReadingPosition, hunk_shortcut},
+    code_view::{CodeView, CodeViewEvent, Highlights, ReadingPosition, hunk_shortcut},
     format::{commit_date, count_label, format_count, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
-    preferences::Preferences,
-    syntax::{self, Tokens},
+    preferences::{DiffLayout, Preferences},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, icon},
     view_cache::render_cached_view,
 };
@@ -34,19 +33,20 @@ pub struct FileTarget {
     pub status: String,
 }
 
-/// A patch and its syntax always belong to the same file revision.
+/// A patch, its syntax and its changed words always belong to the same
+/// file revision.
 #[derive(Clone)]
 pub struct PreparedDiff {
     pub diff: Arc<FileDiff>,
-    pub tokens: Tokens,
-    pub syntax_ready: bool,
+    pub highlights: Highlights,
+    pub highlights_ready: bool,
 }
 impl PreparedDiff {
     pub fn raw(diff: Arc<FileDiff>) -> Self {
         Self {
             diff,
-            tokens: Arc::new(Vec::new()),
-            syntax_ready: false,
+            highlights: Highlights::default(),
+            highlights_ready: false,
         }
     }
 }
@@ -117,11 +117,11 @@ impl FilePresentation {
         matches!(self.state, PresentationState::Loading)
     }
 
-    fn tokens(&self) -> Option<Tokens> {
+    fn highlights(&self) -> Option<Highlights> {
         self.prepared
             .as_ref()
-            .filter(|prepared| prepared.syntax_ready)
-            .map(|prepared| prepared.tokens.clone())
+            .filter(|prepared| prepared.highlights_ready)
+            .map(|prepared| prepared.highlights.clone())
     }
 
     fn owns_diff(&self, diff: &Arc<FileDiff>) -> bool {
@@ -188,6 +188,7 @@ pub enum FileBrowserEvent {
     Close,
     NavigateCommit(String),
     FontSizeChanged(f32),
+    LayoutChanged(DiffLayout),
     /// The inspector's patch was skipped: read it up to `PreviewLimit::MAX`.
     ShowLarge,
 }
@@ -239,7 +240,7 @@ pub struct FileBrowser {
     color_task: Option<Task<()>>,
     content: Option<Arc<FileContent>>,
     diff: Option<Arc<FileDiff>>,
-    diff_tokens: Option<Tokens>,
+    diff_highlights: Option<Highlights>,
     /// The user asked to read this target up to `PreviewLimit::MAX`.
     show_large: bool,
     blame: Option<Arc<FileBlame>>,
@@ -287,13 +288,22 @@ impl FileBrowser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let viewer = cx.new(|cx| CodeView::new(window, cx));
+        let viewer = cx.new(|cx| {
+            let mut viewer = CodeView::new(window, cx);
+            viewer.set_split_host(true, cx);
+            viewer
+        });
         let image_preview = cx.new(|_| ImagePreview::new(engine.clone(), gate.clone()));
         let subscription = cx.subscribe(&viewer, |view, _, event, cx| match event {
             CodeViewEvent::NavigateCommit(sha) => view.inspect_commit(sha.clone(), cx),
             CodeViewEvent::FontSizeChanged(size) => {
                 cx.emit(FileBrowserEvent::FontSizeChanged(*size))
             }
+            CodeViewEvent::LayoutChanged(layout) => {
+                cx.emit(FileBrowserEvent::LayoutChanged(*layout))
+            }
+            // The header shows the layout toggle.
+            CodeViewEvent::LayoutSwitched => cx.notify(),
             CodeViewEvent::Parent => view.parent_version(cx),
             CodeViewEvent::ShowLarge => view.show_large(cx),
         });
@@ -311,7 +321,7 @@ impl FileBrowser {
             color_task: None,
             content: None,
             diff: None,
-            diff_tokens: None,
+            diff_highlights: None,
             show_large: false,
             blame: None,
             history: None,
@@ -360,7 +370,7 @@ impl FileBrowser {
         }
         if self.target == target {
             self.diff = diff;
-            self.diff_tokens = self.source.tokens();
+            self.diff_highlights = self.source.highlights();
             if self.mode == FileView::Diff {
                 self.error = self.source.error();
             }
@@ -452,6 +462,10 @@ impl FileBrowser {
         )
     }
     #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_split(&self, cx: &App) -> bool {
+        self.viewer.read(cx).is_split()
+    }
+    #[cfg(feature = "app-benchmark")]
     pub fn benchmark_scroll_to(&mut self, offset: f32, cx: &mut Context<Self>) {
         let delta = offset - self.benchmark_scroll;
         self.benchmark_scroll = offset;
@@ -473,7 +487,7 @@ impl FileBrowser {
             .update(cx, |view, cx| view.present(None, self.generation, cx));
         self.target = target;
         self.diff = diff;
-        self.diff_tokens = None;
+        self.diff_highlights = None;
         self.show_large = false;
         self.content = None;
         self.blame = None;
@@ -508,7 +522,7 @@ impl FileBrowser {
             prepared.as_ref().map(|prepared| prepared.diff.clone()),
             cx,
         );
-        self.diff_tokens = self.source.tokens();
+        self.diff_highlights = self.source.highlights();
         self.show(mode, cx);
     }
     pub fn show(&mut self, mode: FileView, cx: &mut Context<Self>) {
@@ -673,7 +687,7 @@ impl FileBrowser {
     fn read_again(&mut self, diff: bool, content: bool, cx: &mut Context<Self>) {
         if diff {
             self.diff = None;
-            self.diff_tokens = None;
+            self.diff_highlights = None;
         }
         if content {
             self.content = None;
@@ -870,7 +884,7 @@ impl FileBrowser {
                         match result {
                             Ok(ReadResult::Diff(diff)) => {
                                 view.diff = Some(diff);
-                                view.diff_tokens = None;
+                                view.diff_highlights = None;
                                 view.resume_diff_color(cx);
                             }
                             Ok(ReadResult::Content(content, blame)) => {
@@ -912,7 +926,7 @@ impl FileBrowser {
         let (Some(target), Some(diff)) = (&self.target, &self.diff) else {
             return;
         };
-        if self.diff_tokens.is_some() || self.source.owns_diff(diff) {
+        if self.diff_highlights.is_some() || self.source.owns_diff(diff) {
             // The inspector owns the raw source patch's separate syntax lane.
             return;
         }
@@ -933,28 +947,23 @@ impl FileBrowser {
         self.color_active = true;
         let live_generation = self.live_generation.clone();
         self.color_task = Some(cx.spawn(async move |this, cx| {
-            let (request, tokens) = cx
+            let (request, highlights) = cx
                 .background_executor()
                 .spawn(async move {
-                    #[cfg(feature = "app-benchmark")]
-                    let syntax_start = std::time::Instant::now();
-                    let tokens = syntax::cached_diff_tokens_cancellable(
-                        &request.target.path,
-                        &request.diff,
-                        || live_generation.load(Ordering::Acquire) != request.generation,
-                    );
-                    #[cfg(feature = "app-benchmark")]
-                    crate::perf::record_operation("syntax", syntax_start.elapsed());
-                    (request, tokens)
+                    let highlights =
+                        Highlights::of_diff(&request.target.path, &request.diff, || {
+                            live_generation.load(Ordering::Acquire) != request.generation
+                        });
+                    (request, highlights)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.color_active = false;
                 if request.generation == view.generation
                     && view.target.as_ref() == Some(&request.target)
-                    && let Some(tokens) = tokens
+                    && let Some(highlights) = highlights
                 {
-                    view.diff_tokens = Some(tokens);
+                    view.diff_highlights = Some(highlights);
                     view.viewer_dirty = true;
                     cx.notify();
                 } else {
@@ -994,7 +1003,7 @@ impl FileBrowser {
         self.viewer_dirty = false;
         let mode = self.mode;
         let diff = self.diff.clone();
-        let diff_tokens = self.diff_tokens.clone();
+        let diff_highlights = self.diff_highlights.clone();
         let content = self.content.clone();
         let blame = self.blame.clone();
         let path = self
@@ -1016,7 +1025,7 @@ impl FileBrowser {
                         v.set_prepared_diff(
                             diff,
                             path,
-                            diff_tokens.unwrap_or_default(),
+                            diff_highlights.unwrap_or_default(),
                             window,
                             cx,
                         );
@@ -1095,28 +1104,18 @@ impl FileBrowser {
                             })),
                     )
                     .child(
-                        action(("history-diff", index), "Diff", false, false, p, o)
-                            .on_click(cx.listener(move |v, _, _, cx| {
+                        action(("history-diff", index), "Diff", false, false, p, o).on_click(
+                            cx.listener(move |v, _, _, cx| {
                                 v.select_revision(index, FileView::Diff, cx)
-                            }))
-                            .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.select_revision(index, FileView::Diff, cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            }),
+                        ),
                     )
                     .child(
-                        action(("history-content", index), "Fichier", false, false, p, o)
-                            .on_click(cx.listener(move |v, _, _, cx| {
+                        action(("history-content", index), "Fichier", false, false, p, o).on_click(
+                            cx.listener(move |v, _, _, cx| {
                                 v.select_revision(index, FileView::File, cx)
-                            }))
-                            .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.select_revision(index, FileView::File, cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            }),
+                        ),
                     )
                     .into_any_element()
             })
@@ -1145,6 +1144,12 @@ impl Render for FileBrowser {
         let controls = self.font_controls(window, cx);
         let diff_mode = self.mode == FileView::Diff;
         let hunks = diff_mode.then(|| self.viewer.update(cx, |view, cx| view.hunk_controls(cx)));
+        let layout = (diff_mode && !self.image_preview.read(cx).has_target())
+            .then(|| {
+                self.viewer
+                    .update(cx, |view, cx| view.layout_controls(window, cx))
+            })
+            .flatten();
         let counts = self
             .diff
             .as_deref()
@@ -1203,6 +1208,7 @@ impl Render for FileBrowser {
                             .when(busy, |s| s.opacity(0.6))
                             .child(sha),
                     )
+                    .children(layout)
                     .children(hunks)
                     .child(controls)
                     .child(
@@ -1222,13 +1228,7 @@ impl Render for FileBrowser {
                             .hover(move |s| s.bg(rgb(p.surface)))
                             .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .child(icon(IconName::X, 16., p.muted))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close)))
-                            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    cx.emit(FileBrowserEvent::Close);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close))),
                     ),
             )
             .child(
@@ -1247,13 +1247,7 @@ impl Render for FileBrowser {
                         action("return-history", "", false, false, p, o)
                             .aria_label("Retour à l’historique du dépôt")
                             .child(icon(IconName::ArrowLeft, 13., p.text))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close)))
-                            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    cx.emit(FileBrowserEvent::Close);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(FileBrowserEvent::Close))),
                     )
                     .children((!original && self.source.target.is_some()).then(|| {
                         action(
@@ -1272,14 +1266,6 @@ impl Render for FileBrowser {
                             o,
                         )
                         .on_click(cx.listener(|v, _, _, cx| v.restore(cx)))
-                        .on_key_down(cx.listener(
-                            |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.restore(cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        ))
                     }))
                     .children(
                         [
@@ -1300,14 +1286,6 @@ impl Render for FileBrowser {
                                 o,
                             )
                             .on_click(cx.listener(move |v, _, _, cx| v.show(mode, cx)))
-                            .on_key_down(cx.listener(
-                                move |v, e: &KeyDownEvent, _, cx| {
-                                    if is_activate(e) {
-                                        v.show(mode, cx);
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
                         }),
                     ),
             );
@@ -1315,13 +1293,7 @@ impl Render for FileBrowser {
             root = root.child(
                 notice(error.clone(), p.danger, o).child(
                     action("retry-file", "Réessayer", false, self.loading, p, o)
-                        .on_click(cx.listener(|v, _, _, cx| v.show(v.mode, cx)))
-                        .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                            if is_activate(e) {
-                                v.show(v.mode, cx);
-                                cx.stop_propagation();
-                            }
-                        })),
+                        .on_click(cx.listener(|v, _, _, cx| v.show(v.mode, cx))),
                 ),
             );
         }
@@ -1387,15 +1359,7 @@ impl Render for FileBrowser {
                             o,
                         )
                         .flex_shrink_0()
-                        .on_click(cx.listener(|v, _, _, cx| v.page(-1, cx)))
-                        .on_key_down(cx.listener(
-                            |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.page(-1, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        )),
+                        .on_click(cx.listener(|v, _, _, cx| v.page(-1, cx))),
                     )
                     // The counter gives way first so both page buttons stay whole.
                     .child(
@@ -1432,15 +1396,7 @@ impl Render for FileBrowser {
                             o,
                         )
                         .flex_shrink_0()
-                        .on_click(cx.listener(|v, _, _, cx| v.page(1, cx)))
-                        .on_key_down(cx.listener(
-                            |v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.page(1, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        )),
+                        .on_click(cx.listener(|v, _, _, cx| v.page(1, cx))),
                     ),
             );
         } else {
@@ -1490,22 +1446,11 @@ impl Render for FileBrowser {
                                             p,
                                             o,
                                         )
-                                        .on_click({
-                                            let sha = sha.clone();
+                                        .on_click(
                                             cx.listener(move |_, _, _, cx| {
                                                 cx.emit(FileBrowserEvent::NavigateCommit(
                                                     sha.clone(),
                                                 ))
-                                            })
-                                        })
-                                        .on_key_down(
-                                            cx.listener(move |_, e: &KeyDownEvent, _, cx| {
-                                                if is_activate(e) {
-                                                    cx.emit(FileBrowserEvent::NavigateCommit(
-                                                        sha.clone(),
-                                                    ));
-                                                    cx.stop_propagation();
-                                                }
                                             }),
                                         ),
                                     ),
@@ -1556,13 +1501,7 @@ impl Render for FileBrowser {
                             .cursor_pointer()
                             .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .child(icon(IconName::X, 13., p.muted))
-                            .on_click(cx.listener(|v, _, _, cx| v.close_inspection(cx)))
-                            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.close_inspection(cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|v, _, _, cx| v.close_inspection(cx))),
                     );
                     root = root.child(inspection);
                 }
@@ -1581,9 +1520,6 @@ impl Render for FileBrowser {
     }
 }
 
-pub fn is_activate(event: &KeyDownEvent) -> bool {
-    matches!(event.keystroke.key.as_str(), "enter" | "space")
-}
 pub fn action(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -1702,8 +1638,8 @@ pub fn status_icon(status: &str, p: Palette) -> gpui_kit::component::Icon {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileBrowser, FilePresentation, FileTarget, FileView, PreparedDiff, PresentationChange,
-        line_counts, path_label, reading_label,
+        FileBrowser, FilePresentation, FileTarget, FileView, Highlights, PreparedDiff,
+        PresentationChange, line_counts, path_label, reading_label,
     };
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
     use mangrove_core::{
@@ -1733,8 +1669,8 @@ mod tests {
                 deletions: 0,
                 hunks: Vec::new(),
             }),
-            tokens: Arc::default(),
-            syntax_ready: true,
+            highlights: Highlights::default(),
+            highlights_ready: true,
         }
     }
 
@@ -1756,10 +1692,14 @@ mod tests {
             &source.prepared.as_ref().unwrap().diff,
             &old_patch.diff
         ));
-        assert!(Arc::ptr_eq(
-            &source.prepared.as_ref().unwrap().tokens,
-            &old_patch.tokens
-        ));
+        assert!(
+            source
+                .prepared
+                .as_ref()
+                .unwrap()
+                .highlights
+                .same(&old_patch.highlights)
+        );
         let selected = target("selected");
         let patch = prepared();
         assert!(
@@ -1773,10 +1713,14 @@ mod tests {
             &source.prepared.as_ref().unwrap().diff,
             &patch.diff
         ));
-        assert!(Arc::ptr_eq(
-            &source.prepared.as_ref().unwrap().tokens,
-            &patch.tokens
-        ));
+        assert!(
+            source
+                .prepared
+                .as_ref()
+                .unwrap()
+                .highlights
+                .same(&patch.highlights)
+        );
         assert!(
             source.accept(FilePresentation::loading(3, selected, None))
                 == PresentationChange::Replaced
@@ -1784,11 +1728,11 @@ mod tests {
     }
 
     #[test]
-    fn raw_source_has_no_completed_tokens_and_keeps_its_single_color_owner() {
+    fn raw_source_has_no_completed_highlights_and_keeps_its_single_color_owner() {
         let patch = prepared();
         let raw = PreparedDiff::raw(patch.diff.clone());
         let mut source = FilePresentation::ready(1, target("selected"), raw);
-        assert!(source.tokens().is_none());
+        assert!(source.highlights().is_none());
         assert!(source.owns_diff(&patch.diff));
         // A patch read for another revision must be colored by the browser,
         // including after leaving and returning to the Diff tab.
@@ -1800,8 +1744,7 @@ mod tests {
                 patch.clone()
             )) == PresentationChange::Updated
         );
-        assert!(source.tokens().is_some());
-        assert!(Arc::ptr_eq(&source.tokens().unwrap(), &patch.tokens));
+        assert!(source.highlights().unwrap().same(&patch.highlights));
     }
 
     #[test]
@@ -1967,5 +1910,109 @@ mod tests {
     #[test]
     fn displayed_sha_keeps_seven_characters() {
         assert_eq!(super::short_sha("0123456789abcdef"), "0123456");
+    }
+
+    /// The inspector shows the file browser through the view cache.
+    struct CachedHost {
+        browser: gpui_kit::Entity<FileBrowser>,
+    }
+
+    impl gpui_kit::Render for CachedHost {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            _: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{ParentElement, Styled, div};
+            div()
+                .size_full()
+                .child(crate::view_cache::render_cached_view(
+                    self.browser.clone(),
+                    window,
+                ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_layout_toggle_acts_once_per_key_press_and_keeps_the_focus(cx: &mut TestAppContext) {
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::test::TestWindowExt;
+        use mangrove_core::model::DiffLine;
+        let root = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Workspace::new(root.path().join("cache")).unwrap());
+        cx.update(gpui_kit::init);
+        let (window, host) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let browser = cx.new(|cx| FileBrowser::new(engine, Arc::default(), window, cx));
+                cx.new(|_| CachedHost { browser })
+            })
+            .unwrap()
+        });
+        let browser = cx.read(|cx| host.read(cx).browser.clone());
+        let line = |kind: &str, content: &str| DiffLine {
+            kind: kind.into(),
+            old_line: Some(1),
+            new_line: Some(1),
+            content: content.into(),
+        };
+        let edited = PreparedDiff {
+            diff: Arc::new(FileDiff {
+                hunks: vec![DiffHunk {
+                    header: "@@ -1,2 +1,2 @@".into(),
+                    lines: vec![
+                        line("context", "fn main() {}"),
+                        line("deletion", "let value = 1;"),
+                        line("addition", "let value = 2;"),
+                    ],
+                }],
+                ..FileDiff::default()
+            }),
+            highlights: Highlights::default(),
+            highlights_ready: true,
+        };
+        browser.update(cx, |view, cx| {
+            view.present(FilePresentation::ready(1, target("a"), edited), cx);
+            view.set_visible(true, cx);
+        });
+        // The application saves the asked layout and hands it back.
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = asked.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(
+                &browser,
+                move |browser, event: &super::FileBrowserEvent, cx| {
+                    if let super::FileBrowserEvent::LayoutChanged(layout) = event {
+                        recorded.borrow_mut().push(*layout);
+                        let preferences = Preferences {
+                            diff_layout: *layout,
+                            ..Preferences::default()
+                        };
+                        browser.update(cx, |view, cx| view.set_preferences(preferences, cx));
+                    }
+                },
+            )
+        });
+        cx.run_until_parked();
+        // The layout toggle is the first tab stop of the header.
+        let focused = cx
+            .update_window(window, |_, window, cx| {
+                window.focus_next(cx);
+                window.focused(cx)
+            })
+            .unwrap();
+        assert!(focused.is_some());
+        let press = |cx: &mut TestAppContext, key: &str| {
+            cx.update_window(window, |_, window, cx| {
+                window.press(key, cx);
+                window.focused(cx)
+            })
+            .unwrap()
+        };
+        assert_eq!(press(cx, "enter"), focused);
+        cx.run_until_parked();
+        assert_eq!(*asked.borrow(), [DiffLayout::Split]);
+        assert_eq!(press(cx, "space"), focused);
+        cx.run_until_parked();
+        assert_eq!(*asked.borrow(), [DiffLayout::Split, DiffLayout::Unified]);
     }
 }

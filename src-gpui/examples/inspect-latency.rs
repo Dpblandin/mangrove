@@ -1,4 +1,5 @@
-//! Measure Git reads and syntax analysis separately for a real commit.
+//! Measure Git reads, changed words and syntax analysis separately for a
+//! real commit.
 //! cargo run --release --locked --manifest-path src-gpui/Cargo.toml \
 //!   --example inspect-latency -- /path/to/repo COMMIT [FILE...]
 //! Excludes UI rendering, queueing, scrolling and network operations.
@@ -52,12 +53,19 @@ fn main() -> Result<(), String> {
         let cached_tokens =
             syntax::cached_diff_tokens_cancellable(&file.path, &diff, || false).unwrap_or_default();
         let syntax_cached_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = Instant::now();
+        let (kinds, texts) = diff::rows(&diff);
+        let pairs = diff::pairs(&kinds, &texts, || false).unwrap_or_default();
+        let words = diff::changed_words(&texts, &pairs, || false).unwrap_or_default();
+        let words_ms = started.elapsed().as_secs_f64() * 1000.;
         files.push(json!({
             "path": file.path,
             "read_ms": read_ms,
             "syntax_ms": syntax_ms,
             "syntax_cached_ms": syntax_cached_ms,
             "syntax_cache_reused": std::sync::Arc::ptr_eq(&tokens, &cached_tokens),
+            "words_ms": words_ms,
+            "changed_words": words.iter().map(Vec::len).sum::<usize>(),
             "hunks": diff.hunks.len(),
             "lines": diff.hunks.iter().map(|h| h.lines.len()).sum::<usize>(),
             "tokens": tokens.iter().map(Vec::len).sum::<usize>(),
@@ -73,7 +81,7 @@ fn main() -> Result<(), String> {
             "file_count": details.file_count,
             "details_ms": details_ms,
             "files": files,
-            "note": "Git read and syntax CPU latency only; excludes UI, scheduling and scrolling."
+            "note": "Git read, changed words and syntax CPU latency only; excludes UI, scheduling and scrolling."
         }))
         .map_err(|e| e.to_string())?
     );

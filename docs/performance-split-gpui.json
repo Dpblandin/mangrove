@@ -1,0 +1,339 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-10",
+  "question": "CPU draw cost of the side-by-side diff against the unified diff, while scrolling the same patch",
+  "criterion": "split draw_ms at most 1.5 times unified (issue #11)",
+  "source": {
+    "branch": "t3/issue-11-split-selection",
+    "src_gpui_tree": "ea062be442ddd3d9486ac203ce579bf6c44fef2c",
+    "note": "last commit of the stack, one-side selection included; a later rewrite changed documentation only"
+  },
+  "sha256": {
+    "benchmark_executable": "a5b4c8678e19a1863f74d98830788c00186e0ef0c106faae777fe8f5690c2dab"
+  },
+  "launch_method": "direct launch of the app-benchmark bundle executable, one process per launch; activation and display not attested",
+  "workload": {
+    "fixture": "node scripts/create-fixture.mjs --commits 10000 --large-change",
+    "history_total": 10007,
+    "changed_files": 46,
+    "heavy_file": "packages/core/src/search.ts",
+    "heavy_diff_rows": 1973,
+    "heavy_diff_colored": false,
+    "heavy_diff_colored_reason": "the patch exceeds the 20,000 token bound of syntax analysis; changed words are highlighted",
+    "selection_samples": 2,
+    "scroll_duration_ms": 3000,
+    "scroll_speed_px_s": 2400,
+    "viewport_width": 1440,
+    "viewport_height": 888,
+    "variable": "MANGROVE_BENCH_DIFF_LAYOUT=unified|split",
+    "cache": "SQLite cache per layout, reused after the first launch; new processes and in-memory caches"
+  },
+  "method": {
+    "statistics": "median of the five per-launch medians; median of the five per-launch p95 values",
+    "p95_rank": "floor(0.95 * (sample_count - 1)) on sorted frame samples, zero-based",
+    "frame_proxy": "GPUI platform submission intervals, not display scanout",
+    "draw_proxy": "GPUI CPU draw duration during the diff_scroll phase; excludes platform submission duration",
+    "order": "five pairs, alternating which layout runs first"
+  },
+  "launches": [
+    {
+      "launch": 1,
+      "pair": 1,
+      "layout": "unified",
+      "status": "ok",
+      "heavy_diff_split": false,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 360,
+          "median": 2.6194165,
+          "p95": 3.042208
+        },
+        "interval_ms": {
+          "count": 359,
+          "median": 8.316834000001109,
+          "p95": 9.092834000000039
+        }
+      }
+    },
+    {
+      "launch": 2,
+      "pair": 1,
+      "layout": "split",
+      "status": "ok",
+      "heavy_diff_split": true,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 361,
+          "median": 3.060167,
+          "p95": 3.474542
+        },
+        "interval_ms": {
+          "count": 360,
+          "median": 8.312834000000066,
+          "p95": 9.104167999999845
+        }
+      }
+    },
+    {
+      "launch": 3,
+      "pair": 2,
+      "layout": "split",
+      "status": "ok",
+      "heavy_diff_split": true,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 361,
+          "median": 3.038792,
+          "p95": 3.492917
+        },
+        "interval_ms": {
+          "count": 360,
+          "median": 8.309978999999885,
+          "p95": 9.063543000000209
+        }
+      }
+    },
+    {
+      "launch": 4,
+      "pair": 2,
+      "layout": "unified",
+      "status": "ok",
+      "heavy_diff_split": false,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 360,
+          "median": 2.6336250000000003,
+          "p95": 3.0964579999999997
+        },
+        "interval_ms": {
+          "count": 359,
+          "median": 8.301958000000923,
+          "p95": 9.103415000000041
+        }
+      }
+    },
+    {
+      "launch": 5,
+      "pair": 3,
+      "layout": "unified",
+      "status": "ok",
+      "heavy_diff_split": false,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 360,
+          "median": 2.6654375,
+          "p95": 3.032125
+        },
+        "interval_ms": {
+          "count": 359,
+          "median": 8.303500999999414,
+          "p95": 9.030375999999706
+        }
+      }
+    },
+    {
+      "launch": 6,
+      "pair": 3,
+      "layout": "split",
+      "status": "ok",
+      "heavy_diff_split": true,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 361,
+          "median": 3.123375,
+          "p95": 3.518958
+        },
+        "interval_ms": {
+          "count": 360,
+          "median": 8.30368700000031,
+          "p95": 8.863542000000507
+        }
+      }
+    },
+    {
+      "launch": 7,
+      "pair": 4,
+      "layout": "split",
+      "status": "ok",
+      "heavy_diff_split": true,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 360,
+          "median": 3.0231874999999997,
+          "p95": 3.4020420000000002
+        },
+        "interval_ms": {
+          "count": 359,
+          "median": 8.299666999999772,
+          "p95": 9.201500000000124
+        }
+      }
+    },
+    {
+      "launch": 8,
+      "pair": 4,
+      "layout": "unified",
+      "status": "ok",
+      "heavy_diff_split": false,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 361,
+          "median": 2.591167,
+          "p95": 3.0470829999999998
+        },
+        "interval_ms": {
+          "count": 360,
+          "median": 8.312250499999436,
+          "p95": 9.228876000000128
+        }
+      }
+    },
+    {
+      "launch": 9,
+      "pair": 5,
+      "layout": "unified",
+      "status": "ok",
+      "heavy_diff_split": false,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 361,
+          "median": 2.663042,
+          "p95": 3.076625
+        },
+        "interval_ms": {
+          "count": 360,
+          "median": 8.329061500000307,
+          "p95": 9.690084000000297
+        }
+      }
+    },
+    {
+      "launch": 10,
+      "pair": 5,
+      "layout": "split",
+      "status": "ok",
+      "heavy_diff_split": true,
+      "heavy_diff_rows": 1973,
+      "heavy_diff_colored": false,
+      "viewport": [
+        1440,
+        888
+      ],
+      "accessibility_active": false,
+      "metrics": {
+        "draw_ms": {
+          "count": 361,
+          "median": 3.039584,
+          "p95": 3.465083
+        },
+        "interval_ms": {
+          "count": 360,
+          "median": 8.31118699999979,
+          "p95": 9.143708000000515
+        }
+      }
+    }
+  ],
+  "summary_ms": {
+    "unified": {
+      "draw_ms": {
+        "median": 2.6336250000000003,
+        "p95": 3.0470829999999998
+      },
+      "interval_ms": {
+        "median": 8.312250499999436,
+        "p95": 9.103415000000041
+      }
+    },
+    "split": {
+      "draw_ms": {
+        "median": 3.039584,
+        "p95": 3.474542
+      },
+      "interval_ms": {
+        "median": 8.309978999999885,
+        "p95": 9.104167999999845
+      }
+    }
+  },
+  "ratio_split_to_unified": {
+    "draw_median": 1.1541445725948074,
+    "draw_p95": 1.1402846591313727
+  },
+  "excluded_launches": [],
+  "limitations": [
+    "Five launches per layout on one machine; background load was not neutralized.",
+    "Window activation and placement on the main display were not attested by the launch helper.",
+    "The scrolled patch is plain text with changed word highlights: syntax colors are not part of this comparison.",
+    "A CPU draw cost does not measure display latency or physical frame drops."
+  ],
+  "environment": {
+    "cpu": "Apple M4 Pro",
+    "memory_bytes": 51539607552,
+    "macos": "26.6.2",
+    "display": "built-in Retina main display (3024 x 1964), two external displays connected"
+  }
+}

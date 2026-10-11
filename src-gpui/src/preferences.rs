@@ -42,6 +42,15 @@ pub struct RecentRepository {
     pub name: String,
 }
 
+/// How central views lay out a diff; the compact diff stays unified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLayout {
+    #[default]
+    Unified,
+    Split,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
     Left,
@@ -71,6 +80,7 @@ pub struct Preferences {
     pub show_large_previews: bool,
     /// In mebibytes, between `MIN_PREVIEW_LIMIT` and `MAX_PREVIEW_LIMIT`.
     pub large_preview_limit: u32,
+    pub diff_layout: DiffLayout,
     pub recent: Vec<RecentRepository>,
 }
 
@@ -86,6 +96,7 @@ impl Default for Preferences {
             show_image_previews: true,
             show_large_previews: true,
             large_preview_limit: DEFAULT_PREVIEW_LIMIT,
+            diff_layout: DiffLayout::default(),
             recent: Vec::new(),
         }
     }
@@ -193,6 +204,9 @@ impl Preferences {
         if let Some(theme) = value.get("theme") {
             result.theme = ThemeId::deserialize(theme).unwrap_or_default();
         }
+        if let Some(layout) = value.get("diff_layout") {
+            result.diff_layout = DiffLayout::deserialize(layout).unwrap_or_default();
+        }
         let number = |name| value.get(name).and_then(Value::as_f64).map(|v| v as f32);
         if let Some(v) = number("font_size_offset") {
             result.set_font_size_offset(v);
@@ -254,12 +268,14 @@ impl Preferences {
     pub fn palette(&self) -> Palette {
         Palette::for_theme(self.theme)
     }
-    /// Whether views draw the same: text sizes, theme and image previews.
+    /// Whether views draw the same: text sizes, theme, image previews and
+    /// diff layout.
     pub fn same_appearance(&self, other: &Self) -> bool {
         self.font_size_offset == other.font_size_offset
             && self.diff_font_size == other.diff_font_size
             && self.show_image_previews == other.show_image_previews
             && self.theme == other.theme
+            && self.diff_layout == other.diff_layout
     }
     /// The largest file a diff or file opened by the user reads.
     pub fn preview_limit(&self) -> PreviewLimit {
@@ -452,6 +468,27 @@ mod tests {
         }
         let unknown = Preferences::from_value(serde_json::json!({"theme": "solarized"}));
         assert_eq!(unknown.theme, ThemeId::Classic);
+    }
+    #[test]
+    fn diff_layouts_survive_a_reload_and_unknown_layouts_stay_unified() {
+        let split = Preferences {
+            diff_layout: DiffLayout::Split,
+            ..Preferences::default()
+        };
+        let saved = serde_json::to_value(&split).unwrap();
+        assert_eq!(saved["diff_layout"], "split");
+        assert_eq!(Preferences::from_value(saved), split);
+        assert!(!split.same_appearance(&Preferences::default()));
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"diff_layout": "columns"}),
+            serde_json::json!({"diff_layout": true}),
+        ] {
+            assert_eq!(
+                Preferences::from_value(value).diff_layout,
+                DiffLayout::Unified
+            );
+        }
     }
     #[test]
     fn narrow_window_preserves_preferences_and_history_minimum() {

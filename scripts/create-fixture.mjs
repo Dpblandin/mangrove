@@ -244,6 +244,18 @@ function appendLargeChange() {
       '',
     ].join('\n')
   }
+  // About a thousand edited line pairs in blocks of 20, each block
+  // followed by an unchanged line: the patch stays under 2,000 lines.
+  function weights(edited) {
+    const [scale, label, enabled] = edited ? [2, 'Edited', true] : [1, 'Fixture', false]
+    const entry = (index) =>
+      '  { field: "item' + index + '", weight: ' + index * scale + ', label: "' + label +
+      ' entry ' + index + '", enabled: ' + enabled + ' },'
+    const lines = Array.from({ length: 48 * 21 }, (_, index) =>
+      index % 21 === 20 ? '  // group ' + (index + 1) / 21 : entry(index),
+    )
+    return 'export const weights = [\n' + lines.join('\n') + '\n]\n'
+  }
   const modified = [
     [
       'apps/frontend/src/components/RepositoryHeader.vue',
@@ -282,8 +294,9 @@ function appendLargeChange() {
     ],
     [
       'packages/core/src/search.ts',
-      'export const fields = ["message"]\n',
-      'export const fields = ["message", "author", "sha", "reference"]\nexport const debounceMs = 160\n',
+      'export const fields = ["message"]\n' + weights(false),
+      'export const fields = ["message", "author", "sha", "reference"]\nexport const debounceMs = 160\n' +
+        weights(true),
     ],
     [
       'config/viewer.yml',

@@ -2,15 +2,15 @@
 //! The bounded read lane keeps the native read alive until completion and retains
 //! only the latest queued foreground intent. Immutable snapshots publish together.
 use crate::{
-    code_view::{CodeView, CodeViewEvent, ReadingPosition, hunk_shortcut},
+    code_view::{CodeView, CodeViewEvent, Highlights, ReadingPosition, hunk_shortcut},
     file_browser::{
         FileBrowser, FileBrowserEvent, FilePresentation, FileTarget, FileView, PreparedDiff,
-        ReadGate, action, diff_counts, is_activate, line_counts, notice, path_label, path_title,
-        reading_label, status_icon,
+        ReadGate, action, diff_counts, line_counts, notice, path_label, path_title, reading_label,
+        status_icon,
     },
     format::{commit_date, format_count, initials, short_sha},
     image_preview::{ImagePreview, ImageTarget, supports_path},
-    preferences::Preferences,
+    preferences::{DiffLayout, Preferences},
     syntax,
     theme::{Palette, RADIUS_MD, RADIUS_SM, icon, scrollbar_theme},
     view_cache::render_cached_view,
@@ -45,6 +45,7 @@ pub enum InspectorEvent {
     },
     WorkingTreeCounts(Vec<(String, usize)>),
     DiffFontChanged(f32),
+    DiffLayoutChanged(DiffLayout),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,14 +217,19 @@ impl DiffCache {
         limit: PreviewLimit,
         background: bool,
     ) {
-        let tokens = prepared.tokens.iter().map(|line| line.len()).sum::<usize>();
+        let highlights = &prepared.highlights;
+        let tokens = highlights.tokens.iter().map(Vec::len).sum::<usize>();
+        let words = highlights.words.iter().map(Vec::len).sum::<usize>();
+        let pairs = highlights.pairs.as_ref().map_or(0, |pairs| pairs.len());
         let bytes = prepared
             .diff
             .hunks
             .iter()
             .map(|h| h.header.len() + h.lines.iter().map(|l| l.content.len()).sum::<usize>())
             .sum::<usize>()
-            + tokens * std::mem::size_of::<syntax::Token>();
+            + tokens * std::mem::size_of::<syntax::Token>()
+            + words * std::mem::size_of::<Range<usize>>()
+            + pairs * std::mem::size_of::<(usize, usize)>();
         if bytes > MAX_CACHE_BYTES || tokens > MAX_CACHE_TOKENS {
             if background {
                 self.background_full = true;
@@ -458,6 +464,11 @@ impl InspectorView {
         let browser = cx.new(|cx| FileBrowser::new(engine.clone(), gate.clone(), window, cx));
         let code_subscription = cx.subscribe(&viewer, |view, _, event, cx| match event {
             CodeViewEvent::FontSizeChanged(size) => cx.emit(InspectorEvent::DiffFontChanged(*size)),
+            CodeViewEvent::LayoutChanged(layout) => {
+                cx.emit(InspectorEvent::DiffLayoutChanged(*layout))
+            }
+            // The local and stash header shows the layout toggle.
+            CodeViewEvent::LayoutSwitched => cx.notify(),
             CodeViewEvent::NavigateCommit(sha) => {
                 cx.emit(InspectorEvent::NavigateCommit(sha.clone()))
             }
@@ -471,6 +482,9 @@ impl InspectorView {
             }
             FileBrowserEvent::FontSizeChanged(size) => {
                 cx.emit(InspectorEvent::DiffFontChanged(*size))
+            }
+            FileBrowserEvent::LayoutChanged(layout) => {
+                cx.emit(InspectorEvent::DiffLayoutChanged(*layout))
             }
             FileBrowserEvent::ShowLarge => view.show_large(cx),
         });
@@ -879,7 +893,7 @@ impl InspectorView {
         self.snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.prepared.as_ref())
-            .is_some_and(|prepared| !prepared.syntax_ready)
+            .is_some_and(|prepared| !prepared.highlights_ready)
     }
     #[cfg(feature = "app-benchmark")]
     pub fn is_loading(&self) -> bool {
@@ -915,6 +929,13 @@ impl InspectorView {
                 .map(|diff| diff.hunks.iter().map(|h| h.lines.len()).sum())
                 .unwrap_or(0),
         )
+    }
+    #[cfg(feature = "app-benchmark")]
+    pub fn benchmark_split(&self, cx: &App) -> bool {
+        if !self.compact && matches!(self.selection, Selection::Commit(_)) {
+            return self.browser.read(cx).benchmark_split(cx);
+        }
+        self.viewer.read(cx).is_split()
     }
     #[cfg(feature = "app-benchmark")]
     pub fn benchmark_scroll_to(&mut self, offset: f32, cx: &mut Context<Self>) {
@@ -1561,7 +1582,7 @@ impl InspectorView {
         background: bool,
         cx: &mut Context<Self>,
     ) {
-        if prepared.syntax_ready {
+        if prepared.highlights_ready {
             return;
         }
         self.color_pending = Some(ColorRequest {
@@ -1588,21 +1609,14 @@ impl InspectorView {
             let (request, colored) = cx
                 .background_executor()
                 .spawn(async move {
-                    #[cfg(feature = "app-benchmark")]
-                    let syntax_start = Instant::now();
-                    let tokens = syntax::cached_diff_tokens_cancellable(
-                        &request.file.path,
-                        &request.prepared.diff,
-                        || {
+                    let highlights =
+                        Highlights::of_diff(&request.file.path, &request.prepared.diff, || {
                             !request
                                 .current(*live_revision.lock().unwrap_or_else(|p| p.into_inner()))
-                        },
-                    );
-                    #[cfg(feature = "app-benchmark")]
-                    crate::perf::record_operation("syntax", syntax_start.elapsed());
-                    let colored = if let Some(tokens) = tokens {
-                        request.prepared.tokens = tokens;
-                        request.prepared.syntax_ready = true;
+                        });
+                    let colored = if let Some(highlights) = highlights {
+                        request.prepared.highlights = highlights;
+                        request.prepared.highlights_ready = true;
                         true
                     } else {
                         false
@@ -2047,7 +2061,7 @@ impl InspectorView {
         let prepare_start = Instant::now();
         self.viewer.update(cx, |view, cx| {
             if let Some(prepared) = prepared {
-                view.set_prepared_diff(prepared.diff, path, prepared.tokens, window, cx);
+                view.set_prepared_diff(prepared.diff, path, prepared.highlights, window, cx);
             } else {
                 view.clear(cx);
             }
@@ -2065,6 +2079,8 @@ impl InspectorView {
                 .child(render_cached_view(self.browser.clone(), window))
                 .into_any_element();
         }
+        // The local and stash diffs share the compact view's viewer.
+        self.viewer.update(cx, |v, cx| v.set_split_host(true, cx));
         self.sync_viewer(window, cx);
         let p = self.palette;
         let o = self.preferences.font_size_offset;
@@ -2075,8 +2091,13 @@ impl InspectorView {
             .or_else(|| self.intent.choice())
             .map(|file| path_label(&file.path, file.old_path.as_deref()))
             .unwrap_or_default();
-        let (hunks, controls) = self.viewer.update(cx, |v, cx| {
-            (v.hunk_controls(cx), v.font_controls(window, cx))
+        let image = self.image_preview.read(cx).has_target();
+        let (layout, hunks, controls) = self.viewer.update(cx, |v, cx| {
+            (
+                (!image).then(|| v.layout_controls(window, cx)).flatten(),
+                v.hunk_controls(cx),
+                v.font_controls(window, cx),
+            )
         });
         div()
             .size_full()
@@ -2102,6 +2123,7 @@ impl InspectorView {
                     .bg(rgb(p.panel))
                     .child(icon(IconName::FileText, 15., p.muted))
                     .child(path_title("local-path", path, o).flex_1())
+                    .children(layout)
                     .child(hunks)
                     .child(controls)
                     .child(
@@ -2116,13 +2138,7 @@ impl InspectorView {
                             .focus_visible(move |s| s.border_color(rgb(p.accent)))
                             .cursor_pointer()
                             .child(icon(IconName::X, 16., p.muted))
-                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx)))
-                            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.close_workspace(cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx))),
                     ),
             )
             .child(
@@ -2139,13 +2155,7 @@ impl InspectorView {
                         action("local-back", "", false, false, p, o)
                             .child(icon(IconName::ArrowLeft, 13., p.text))
                             .child("Historique")
-                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx)))
-                            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                                if is_activate(e) {
-                                    v.close_workspace(cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            .on_click(cx.listener(|v, _, _, cx| v.close_workspace(cx))),
                     )
                     .child(
                         div()
@@ -2221,23 +2231,11 @@ impl InspectorView {
             )
             .child(
                 mode_button("central-mode", "Vue centrale", !self.compact, p, o)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(false, cx)))
-                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                        if is_activate(e) {
-                            v.set_compact(false, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(false, cx))),
             )
             .child(
                 mode_button("compact-mode", "Vue compacte", self.compact, p, o)
-                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(true, cx)))
-                    .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                        if is_activate(e) {
-                            v.set_compact(true, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_click(cx.listener(|v, _, _, cx| v.set_compact(true, cx))),
             )
     }
     fn state(&self, title: &str, text: &str, name: IconName, error: bool) -> Div {
@@ -2503,6 +2501,7 @@ impl InspectorView {
         self.choose(files[target].clone(), cx);
     }
     fn compact_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.viewer.update(cx, |v, cx| v.set_split_host(false, cx));
         self.sync_viewer(window, cx);
         let p = self.palette;
         let o = self.preferences.font_size_offset;
@@ -2678,7 +2677,6 @@ impl InspectorView {
         // A new commit is being read: the retained content is dimmed and inert.
         let loading = self.details_loading;
         let sha = details.sha.clone();
-        let keyboard_sha = sha.clone();
         let copied = self.copied_sha.as_ref() == Some(&sha);
         let sha_bar = div()
             .id("commit-sha")
@@ -2737,12 +2735,6 @@ impl InspectorView {
                 }))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.copy_commit_sha(sha.clone(), cx);
-                }))
-                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if is_activate(event) {
-                        view.copy_commit_sha(keyboard_sha.clone(), cx);
-                        cx.stop_propagation();
-                    }
                 }))
         };
         panel = panel.child(
@@ -2834,7 +2826,6 @@ impl InspectorView {
                 })
                 .children(details.parents.iter().enumerate().map(|(index, parent)| {
                     let sha = parent.clone();
-                    let keyboard_sha = sha.clone();
                     let tooltip = if index == 0 && details.parents.len() > 1 {
                         format!("{sha} · Premier parent, utilisé pour le diff")
                     } else {
@@ -2854,14 +2845,6 @@ impl InspectorView {
                                 .focus_visible(|s| s.text_color(rgb(p.accent)).underline())
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.emit(InspectorEvent::NavigateCommit(sha.clone()));
-                                }))
-                                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
-                                    if is_activate(event) {
-                                        cx.emit(InspectorEvent::NavigateCommit(
-                                            keyboard_sha.clone(),
-                                        ));
-                                        cx.stop_propagation();
-                                    }
                                 }))
                         })
                 }))
@@ -3219,7 +3202,6 @@ impl InspectorView {
                 .border_color(rgb(p.border))
                 .children(stash.groups.iter().enumerate().map(|(index, group)| {
                     let area = group.area.clone();
-                    let keyboard_area = area.clone();
                     let label = match area.as_str() {
                         "index" => "Index",
                         "untracked" => "Non suivis",
@@ -3233,14 +3215,6 @@ impl InspectorView {
                         o,
                     )
                     .on_click(cx.listener(move |v, _, _, cx| v.change_stash_area(area.clone(), cx)))
-                    .on_key_down(cx.listener(
-                        move |v, e: &KeyDownEvent, _, cx| {
-                            if is_activate(e) {
-                                v.change_stash_area(keyboard_area.clone(), cx);
-                                cx.stop_propagation();
-                            }
-                        },
-                    ))
                 })),
         );
         if let Some(group) = stash.groups.iter().find(|g| g.area == self.stash_area) {
@@ -3397,8 +3371,8 @@ mod tests {
         });
         super::PreparedDiff {
             diff,
-            tokens: Arc::default(),
-            syntax_ready: true,
+            highlights: super::Highlights::default(),
+            highlights_ready: true,
         }
     }
     #[gpui_kit::test]
@@ -3808,8 +3782,8 @@ mod tests {
         assert_eq!(first.path, details.files[0].path);
         assert_eq!(first.path, "a.rs");
         assert_eq!(raw.diff.additions, 1);
-        assert!(!raw.syntax_ready);
-        assert!(raw.tokens.is_empty());
+        assert!(!raw.highlights_ready);
+        assert!(raw.highlights.tokens.is_empty() && raw.highlights.words.is_empty());
         let mut intent = FileIntent::default();
         intent.restore_commit(None, Some(&first));
         assert!(intent.choice().is_none());
@@ -3840,10 +3814,28 @@ mod tests {
     }
 
     #[test]
+    fn cached_patches_count_the_bytes_of_their_changed_words_and_pairs() {
+        let mut cache = DiffCache::default();
+        cache.remember("plain".into(), diff(10), PreviewLimit::MIN, false);
+        let plain = cache.bytes;
+        let mut prepared = diff(10);
+        prepared.highlights.words = Arc::new(vec![Vec::new(), vec![0..2, 4..6, 8..10]]);
+        prepared.highlights.pairs = Some(Arc::new(vec![(1, 2)]));
+        cache.remember("plain".into(), prepared, PreviewLimit::MIN, false);
+        assert_eq!(
+            cache.bytes,
+            plain
+                + 3 * std::mem::size_of::<std::ops::Range<usize>>()
+                + std::mem::size_of::<(usize, usize)>()
+        );
+        assert_eq!(cache.tokens, 0);
+    }
+
+    #[test]
     fn token_cache_budget_stops_prefetch_before_retaining_unbounded_color_data() {
         let mut cache = DiffCache::default();
         let mut prepared = diff(1);
-        prepared.tokens = Arc::new(vec![vec![
+        prepared.highlights.tokens = Arc::new(vec![vec![
             crate::syntax::Token {
                 range: 0..1,
                 kind: crate::syntax::Kind::Keyword

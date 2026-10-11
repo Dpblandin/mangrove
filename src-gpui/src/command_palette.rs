@@ -3,7 +3,7 @@
 use crate::{
     file_browser::FileView,
     history::fold,
-    preferences::Pane,
+    preferences::{DiffLayout, Pane},
     settings::SettingsSection,
     theme::{Palette, RADIUS_LG, RADIUS_SM, icon, scrollbar_theme},
 };
@@ -49,6 +49,7 @@ pub enum Command {
     Theme(crate::theme::ThemeId),
     Zoom(Option<i32>),
     DiffZoom(i32),
+    DiffLayout(DiffLayout),
     ResetPane(Pane),
     ToggleImagePreviews,
     ToggleLargePreviews,

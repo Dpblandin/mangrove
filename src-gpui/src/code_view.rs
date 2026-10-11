@@ -1,7 +1,10 @@
 //! Read-only, virtualized code and patch viewer. Selection is expressed in
 //! snapshot byte positions, so unmounted lines still participate in copying.
+mod selection;
+mod split;
+
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     ops::Range,
     rc::Rc,
@@ -19,21 +22,29 @@ use gpui_kit::{assets::IconName, prelude::*, *};
 use mangrove_core::model::{FileBlame, FileContent, FileDiff, Oversized, PreviewLimit};
 
 use crate::{
-    diff,
+    diff::{self, LineKind},
     format::{
         alt_shortcut_label, byte_size, byte_size_above, commit_date, compact_date, short_sha,
         shortcut_label,
     },
-    preferences::{DEFAULT_DIFF_FONT_SIZE, MAX_DIFF_FONT_SIZE, MIN_DIFF_FONT_SIZE, Preferences},
-    syntax::{self, Kind, Token},
+    preferences::{
+        DEFAULT_DIFF_FONT_SIZE, DiffLayout, MAX_DIFF_FONT_SIZE, MIN_DIFF_FONT_SIZE, Preferences,
+    },
+    syntax::{self, Kind},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, SANS, icon, scrollbar_theme},
     virtual_scroll::{RowGeometry, VirtualScrollHandle},
 };
+use selection::{Position, Selection, Side};
+use split::{SplitLayout, SplitRow};
 
 #[derive(Clone, Debug)]
 pub enum CodeViewEvent {
     NavigateCommit(String),
     FontSizeChanged(f32),
+    LayoutChanged(DiffLayout),
+    /// The diff switched between unified and side by side: the header's
+    /// toggle shows another state.
+    LayoutSwitched,
     Parent,
     /// Read the shown file again up to `PreviewLimit::MAX`.
     ShowLarge,
@@ -97,40 +108,6 @@ pub(crate) fn blame_unavailable(content: &FileContent) -> Option<String> {
             byte_size(bound)
         )
     })
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct Position {
-    row: usize,
-    byte: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Selection {
-    anchor: Position,
-    head: Position,
-}
-impl Selection {
-    fn ordered(self) -> (Position, Position) {
-        if self.anchor <= self.head {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        }
-    }
-    fn range_in_row(self, row: usize, length: usize) -> Option<Range<usize>> {
-        let (start, end) = self.ordered();
-        if row < start.row || row > end.row || start == end {
-            return None;
-        }
-        Some(
-            (if row == start.row { start.byte } else { 0 })..(if row == end.row {
-                end.byte
-            } else {
-                length
-            }),
-        )
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -257,14 +234,14 @@ impl DisplayLine {
 
 #[derive(Clone, Debug)]
 struct Row {
-    kind: String,
+    kind: LineKind,
     old_number: String,
     new_number: String,
     original: Arc<str>,
     display: DisplayLine,
 }
 impl Row {
-    fn new(kind: String, old_number: String, new_number: String, text: &str) -> Self {
+    fn new(kind: LineKind, old_number: String, new_number: String, text: &str) -> Self {
         let original: Arc<str> = text.into();
         let display = DisplayLine::new(original.clone());
         Self {
@@ -275,28 +252,51 @@ impl Row {
             display,
         }
     }
-    fn height_tenths(&self, index: usize, font_size: f32) -> f64 {
-        f64::from(font_size) * 17.
-            + if self.kind == "hunk" {
-                100. + if index > 0 { 10. } else { 0. }
-            } else {
-                0.
-            }
+}
+
+/// Width of the column holding a diff line's sign.
+const SIGN_WIDTH: f32 = 20.;
+/// Space after the text of a diff line.
+const DIFF_PADDING: f32 = 15.;
+const DIVIDER_WIDTH: f32 = 1.;
+/// Each side of a split diff shows at least this many characters.
+const MIN_SPLIT_COLUMNS: f32 = 40.;
+
+/// Why the diff shown cannot be laid out side by side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitBlocker {
+    NoText,
+    OneSide,
+    Narrow,
+}
+
+impl SplitBlocker {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::NoText => "Côte à côte indisponible : aucun diff texte à afficher",
+            Self::OneSide => "Côte à côte indisponible : fichier ajouté ou supprimé",
+            Self::Narrow => "Côte à côte indisponible : vue trop étroite",
+        }
     }
 }
 
 struct CodeLineLayout {
     line: ShapedLine,
     bounds: Bounds<Pixels>,
+    /// The part of the line its clipping shows, such as one split column.
+    visible: Bounds<Pixels>,
 }
 impl CodeLineLayout {
+    /// A pointer beyond the visible part of the line stops at its edge, so a
+    /// drag into the other column selects no hidden text.
     fn byte_at(&self, point: Point<Pixels>) -> usize {
         if point.y < self.bounds.top() {
             0
         } else if point.y > self.bounds.bottom() {
             self.line.len()
         } else {
-            self.line.closest_index_for_x(point.x - self.bounds.left())
+            let x = point.x.max(self.visible.left()).min(self.visible.right());
+            self.line.closest_index_for_x(x - self.bounds.left())
         }
     }
 }
@@ -355,64 +355,120 @@ fn visible_shaped_line(
     visible
 }
 
-fn row_geometry(rows: &[Row], font_size: f32, scale_factor: f32) -> RowGeometry {
+/// Exact heights of the shown rows: hunk headers are taller, with a top
+/// border after the first row.
+fn row_geometry(
+    hunks: impl IntoIterator<Item = bool>,
+    font_size: f32,
+    scale_factor: f32,
+) -> RowGeometry {
     RowGeometry::from_tenths(
-        rows.iter()
-            .enumerate()
-            .map(|(index, row)| row.height_tenths(index, font_size)),
+        hunks.into_iter().enumerate().map(|(index, hunk)| {
+            f64::from(font_size) * 17.
+                + if hunk {
+                    100. + if index > 0 { 10. } else { 0. }
+                } else {
+                    0.
+                }
+        }),
         scale_factor,
     )
 }
 
-fn selected_rows_text(rows: &[Row], selection: Option<Selection>, final_newline: bool) -> String {
-    let Some(selection) = selection else {
-        return String::new();
-    };
-    let (start, end) = selection.ordered();
-    if start == end {
-        return String::new();
-    }
-    let mut text = String::new();
-    for (index, row) in rows
-        .iter()
-        .enumerate()
-        .take(end.row.saturating_add(1))
-        .skip(start.row)
-    {
-        let range = selection
-            .range_in_row(index, row.original.len())
-            .unwrap_or(0..0);
-        if index > start.row {
-            text.push('\n');
-        }
-        text.push_str(&row.original[range]);
-    }
-    if final_newline
-        && start == Position::default()
-        && end.row + 1 == rows.len()
-        && end.byte == rows[end.row].original.len()
-    {
-        text.push('\n');
-    }
-    text
+/// Syntax tokens and changed words of each row, published together.
+#[derive(Clone, Default)]
+pub struct Highlights {
+    pub tokens: syntax::Tokens,
+    pub words: diff::Words,
+    /// The paired rows of a prepared patch, which the side-by-side layout
+    /// reuses instead of pairing them again on the UI thread.
+    pub pairs: Option<diff::Pairs>,
 }
 
+impl Highlights {
+    /// Pairs and changed words, then syntax, of a patch: the inspector and
+    /// the file browser publish them all or none. `None` means cancellation.
+    pub fn of_diff(path: &str, diff: &FileDiff, should_cancel: impl Fn() -> bool) -> Option<Self> {
+        #[cfg(feature = "app-benchmark")]
+        let words_start = std::time::Instant::now();
+        let (kinds, texts) = diff::rows(diff);
+        let pairs = diff::pairs(&kinds, &texts, &should_cancel)?;
+        let words = diff::changed_words(&texts, &pairs, &should_cancel)?;
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_operation("inline", words_start.elapsed());
+        #[cfg(feature = "app-benchmark")]
+        let syntax_start = std::time::Instant::now();
+        let tokens = syntax::cached_diff_tokens_cancellable(path, diff, &should_cancel)?;
+        #[cfg(feature = "app-benchmark")]
+        crate::perf::record_operation("syntax", syntax_start.elapsed());
+        Some(Self {
+            tokens,
+            words,
+            pairs: Some(Arc::new(pairs)),
+        })
+    }
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.tokens, &other.tokens)
+            && Arc::ptr_eq(&self.words, &other.words)
+            && self.pairs.as_ref().map(Arc::as_ptr) == other.pairs.as_ref().map(Arc::as_ptr)
+    }
+}
+
+/// A header row per hunk, then a row per line: the indexing of `Highlights`.
+fn diff_rows(diff: &FileDiff) -> Vec<Row> {
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| {
+            std::iter::once(Row::new(
+                LineKind::Hunk,
+                String::new(),
+                String::new(),
+                hunk.header.trim_end(),
+            ))
+            .chain(hunk.lines.iter().map(|line| {
+                Row::new(
+                    LineKind::of(&line.kind),
+                    line.old_line.map(|n| n.to_string()).unwrap_or_default(),
+                    line.new_line.map(|n| n.to_string()).unwrap_or_default(),
+                    diff::strip_line_ending(&line.content),
+                )
+            }))
+        })
+        .collect()
+}
+
+/// The row read at the top of the view, as a unified row: it is the same
+/// line whether the diff is shown unified or side by side.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadingPosition {
     /// Whether the position is in the diff, and the file path.
     source: (bool, String),
-    top: Pixels,
+    row: usize,
+    offset: Pixels,
 }
 
 pub struct CodeView {
     rows: Arc<Vec<Row>>,
+    /// Shown instead of `rows` while the diff is laid out side by side.
+    split: Option<SplitLayout>,
+    layout: DiffLayout,
+    /// The host shows this view centrally, where side by side is offered.
+    split_host: bool,
+    both_sides: bool,
+    /// Whether two columns fit the last two-sided diff: it sets the width
+    /// threshold of the next decision, whatever the files shown in between.
+    split_fits: bool,
+    /// The text of the layout toggle's tooltip, for its current state.
+    layout_tooltip: Rc<RefCell<SharedString>>,
+    /// Measured at each paint; unknown before the first one in a host.
+    viewport_width: Rc<Cell<f32>>,
     scroll: VirtualScrollHandle,
     geometry_scale: f32,
     diff_source: Option<(Arc<FileDiff>, String)>,
     content_source: Option<Arc<FileContent>>,
     /// Reading position to apply once the same diff or file is shown again.
     restored_position: Option<ReadingPosition>,
-    tokens: Arc<Vec<Vec<Token>>>,
+    highlights: Highlights,
     generation: u64,
     live_generation: Arc<AtomicU64>,
     syntax_task: Option<Task<()>>,
@@ -420,11 +476,15 @@ pub struct CodeView {
     focus: FocusHandle,
     list: ListState,
     horizontal: ScrollHandle,
-    layouts: Rc<RefCell<BTreeMap<usize, CodeLineLayout>>>,
+    /// Laid out text of the visible rows, by row and side.
+    layouts: Rc<RefCell<BTreeMap<(usize, Side), CodeLineLayout>>>,
     palette: Palette,
     font_size: f32,
     ui_offset: f32,
     text_width: f32,
+    /// The widest text of the old and new sides, measured for a split diff.
+    side_widths: [f32; 2],
+    char_width: f32,
     number_width: f32,
     is_diff: bool,
     hunk_rows: Vec<usize>,
@@ -460,12 +520,19 @@ impl CodeView {
             VirtualScrollHandle::exact(list.clone(), horizontal.clone(), RowGeometry::default());
         Self {
             rows: Arc::new(Vec::new()),
+            split: None,
+            layout: DiffLayout::default(),
+            split_host: false,
+            both_sides: false,
+            split_fits: false,
+            layout_tooltip: Rc::default(),
+            viewport_width: Rc::new(Cell::new(0.)),
             scroll,
             geometry_scale: window.scale_factor(),
             diff_source: None,
             content_source: None,
             restored_position: None,
-            tokens: Arc::new(Vec::new()),
+            highlights: Highlights::default(),
             generation: 0,
             live_generation: Arc::new(AtomicU64::new(0)),
             syntax_task: None,
@@ -478,6 +545,8 @@ impl CodeView {
             font_size: DEFAULT_DIFF_FONT_SIZE,
             ui_offset: 1.,
             text_width: 0.,
+            side_widths: [0.; 2],
+            char_width: 7.,
             number_width: 32.,
             is_diff: false,
             hunk_rows: Vec::new(),
@@ -503,14 +572,20 @@ impl CodeView {
         self.live_generation
             .store(self.generation, Ordering::Release);
     }
-    fn reset(&mut self, rows: Vec<Row>, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset(
+        &mut self,
+        rows: Vec<Row>,
+        highlights: Highlights,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.invalidate_syntax();
         self.syntax_task = None;
         self.syntax_pending = false;
         self.rows = Arc::new(rows);
         self.diff_source = None;
         self.content_source = None;
-        self.tokens = Arc::new(Vec::new());
+        self.highlights = highlights;
         self.selection = None;
         self.dragging = false;
         self.drag_point = None;
@@ -521,20 +596,128 @@ impl CodeView {
         self.notice = None;
         self.error = None;
         self.loading = None;
-        self.hunk_rows.clear();
         self.blame = None;
         self.blame_indices.clear();
-        self.layouts.borrow_mut().clear();
         self.geometry_scale = window.scale_factor();
-        self.scroll.set_geometry(row_geometry(
-            &self.rows,
-            self.font_size,
-            self.geometry_scale,
-        ));
-        self.list.reset(self.rows.len());
         self.horizontal.set_offset(point(px(0.), px(0.)));
+        self.both_sides = split::has_both_sides(self.rows.iter().map(|row| row.kind));
         self.measure(window);
+        self.refresh_split_fit();
+        self.lay_out(self.wants_split(), window);
         cx.notify();
+    }
+    fn item_count(&self) -> usize {
+        self.split
+            .as_ref()
+            .map_or(self.rows.len(), |split| split.rows.len())
+    }
+    fn geometry(&self, scale_factor: f32) -> RowGeometry {
+        match &self.split {
+            Some(split) => row_geometry(
+                split
+                    .rows
+                    .iter()
+                    .map(|row| matches!(row, SplitRow::Hunk(_))),
+                self.font_size,
+                scale_factor,
+            ),
+            None => row_geometry(
+                self.rows.iter().map(|row| row.kind == LineKind::Hunk),
+                self.font_size,
+                scale_factor,
+            ),
+        }
+    }
+    /// Shows the rows unified or side by side, from the top.
+    fn lay_out(&mut self, split: bool, window: &Window) {
+        self.split = split.then(|| {
+            let kinds: Vec<_> = self.rows.iter().map(|row| row.kind).collect();
+            // A patch shown before its preparation is paired here, with the
+            // same function.
+            let pairs = self.highlights.pairs.clone().unwrap_or_else(|| {
+                let texts: Vec<_> = self.rows.iter().map(|row| &*row.original).collect();
+                Arc::new(diff::pairs(&kinds, &texts, || false).unwrap_or_default())
+            });
+            SplitLayout::new(&kinds, &pairs)
+        });
+        if split {
+            self.measure_sides(window);
+        }
+        self.hunk_rows = match &self.split {
+            Some(split) => (0..split.rows.len())
+                .filter(|&index| matches!(split.rows[index], SplitRow::Hunk(_)))
+                .collect(),
+            None => hunk_rows(&self.rows),
+        };
+        self.layouts.borrow_mut().clear();
+        self.scroll.set_geometry(self.geometry(self.geometry_scale));
+        self.list.reset(self.item_count());
+    }
+    fn wants_split(&self) -> bool {
+        self.layout == DiffLayout::Split && self.split_host && self.split_blocker().is_none()
+    }
+    fn split_blocker(&self) -> Option<SplitBlocker> {
+        if !self.is_diff || self.rows.is_empty() {
+            Some(SplitBlocker::NoText)
+        } else if !self.both_sides {
+            Some(SplitBlocker::OneSide)
+        } else if !self.split_fits {
+            Some(SplitBlocker::Narrow)
+        } else {
+            None
+        }
+    }
+    /// Decides again whether two columns fit, for a two-sided diff in a
+    /// central view. The last decision sets the threshold.
+    fn refresh_split_fit(&mut self) {
+        if self.split_host && self.is_diff && self.both_sides {
+            self.split_fits = split::fits(
+                self.viewport_width.get(),
+                self.split_minimum(),
+                self.split_fits,
+            );
+        }
+    }
+    /// Switches between unified and side by side once the preference, the
+    /// host or the width allows another layout, keeping the line read at the
+    /// top. A selection does not survive the change.
+    fn update_layout(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.refresh_split_fit();
+        let split = self.wants_split();
+        if split == self.split.is_some() {
+            return;
+        }
+        let anchor = self.anchor();
+        let active = self.unified_row(self.active_line);
+        self.selection = None;
+        self.dragging = false;
+        self.drag_point = None;
+        self.lay_out(split, window);
+        self.active_line = self.display_row(active);
+        self.horizontal.set_offset(point(px(0.), px(0.)));
+        self.scroll_to_anchor(anchor);
+        cx.notify();
+        cx.emit(CodeViewEvent::LayoutSwitched);
+    }
+    /// The unified row shown on a displayed row, and back.
+    fn unified_row(&self, index: usize) -> usize {
+        self.split
+            .as_ref()
+            .map_or(index, |split| split.unified_of(index))
+    }
+    fn display_row(&self, row: usize) -> usize {
+        self.split.as_ref().map_or(row, |split| split.row_of(row))
+    }
+    /// The unified row at the top of the view, and how far it is scrolled.
+    fn anchor(&self) -> (usize, Pixels) {
+        let top = self.list.logical_scroll_top();
+        (self.unified_row(top.item_ix), top.offset_in_item)
+    }
+    fn scroll_to_anchor(&mut self, (row, offset): (usize, Pixels)) {
+        self.list.scroll_to(ListOffset {
+            item_ix: self.display_row(row),
+            offset_in_item: offset,
+        });
     }
     fn measure(&mut self, window: &Window) {
         let largest = self
@@ -556,29 +739,43 @@ impl CodeView {
             underline: None,
             strikethrough: None,
         };
-        let char_width: f32 = window
+        self.char_width = window
             .text_system()
             .shape_line("0".into(), px(self.font_size), &[run], None)
             .width()
             .into();
-        self.number_width = (largest.to_string().len() + 2) as f32 * char_width;
-        let widest = self.rows.iter().max_by_key(|row| row.display.columns);
-        self.text_width = widest.map_or(0., |row| {
-            let run = TextRun {
-                len: row.display.text.len(),
-                font: font(MONO),
-                color: rgb(self.palette.text).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let width: f32 = window
-                .text_system()
-                .shape_line(row.display.text.clone(), px(self.font_size), &[run], None)
-                .width()
-                .into();
-            width
+        self.number_width = (largest.to_string().len() + 2) as f32 * self.char_width;
+        self.text_width = self.widest(self.rows.iter(), window);
+    }
+    /// Each side of a split diff shows every line but the other side's.
+    fn measure_sides(&mut self, window: &Window) {
+        self.side_widths = [LineKind::Addition, LineKind::Deletion].map(|other| {
+            self.widest(
+                self.rows
+                    .iter()
+                    .filter(|row| row.kind != other && row.kind != LineKind::Hunk),
+                window,
+            )
         });
+    }
+    /// The shaped width of the line with the most columns.
+    fn widest<'a>(&self, rows: impl Iterator<Item = &'a Row>, window: &Window) -> f32 {
+        rows.max_by_key(|row| row.display.columns)
+            .map_or(0., |row| {
+                let run = TextRun {
+                    len: row.display.text.len(),
+                    font: font(MONO),
+                    color: rgb(self.palette.text).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window
+                    .text_system()
+                    .shape_line(row.display.text.clone(), px(self.font_size), &[run], None)
+                    .width()
+                    .into()
+            })
     }
     fn blame_width(&self) -> f32 {
         // Short SHA and compact date stay whole; the author takes the rest.
@@ -587,7 +784,7 @@ impl CodeView {
     /// Line numbers, diff signs and blame stay visible during horizontal scroll.
     fn gutter_width(&self) -> f32 {
         if self.is_diff {
-            self.number_width * 2. + 20.
+            self.number_width * 2. + SIGN_WIDTH
         } else {
             self.number_width
                 + 12.
@@ -598,8 +795,22 @@ impl CodeView {
                 }
         }
     }
+    /// A split diff scrolls both sides together, as far as its widest side.
     fn content_width(&self) -> f32 {
-        self.text_width + self.gutter_width() + if self.is_diff { 15. } else { 20. }
+        if self.split.is_some() {
+            let viewport = self.viewport_width.get();
+            let widest = self.side_widths[0].max(self.side_widths[1]);
+            return viewport + (widest - self.side_text_width(viewport)).max(0.);
+        }
+        self.text_width + self.gutter_width() + if self.is_diff { DIFF_PADDING } else { 20. }
+    }
+    /// The text area of each side of a split view `viewport` wide.
+    fn side_text_width(&self, viewport: f32) -> f32 {
+        (viewport - DIVIDER_WIDTH) / 2. - self.number_width - SIGN_WIDTH - DIFF_PADDING
+    }
+    fn split_minimum(&self) -> f32 {
+        2. * (self.number_width + SIGN_WIDTH + DIFF_PADDING + MIN_SPLIT_COLUMNS * self.char_width)
+            + DIVIDER_WIDTH
     }
     fn append_line_notice(&mut self) {
         if self.rows.iter().any(|row| row.display.truncated()) {
@@ -617,17 +828,13 @@ impl CodeView {
     }
     fn rebuild_row_geometry(&mut self, scale_factor: f32) {
         let top = self.list.logical_scroll_top();
-        let old_height = self
-            .rows
-            .get(top.item_ix)
-            .map(|_| self.row_height(top.item_ix));
+        let old_height = (top.item_ix < self.item_count()).then(|| self.row_height(top.item_ix));
         self.geometry_scale = scale_factor;
-        self.scroll
-            .set_geometry(row_geometry(&self.rows, self.font_size, scale_factor));
+        self.scroll.set_geometry(self.geometry(scale_factor));
         let scale = old_height.map_or(1., |old| {
             f32::from(self.row_height(top.item_ix)) / f32::from(old)
         });
-        self.list.reset(self.rows.len());
+        self.list.reset(self.item_count());
         self.list.scroll_to(ListOffset {
             item_ix: top.item_ix,
             offset_in_item: top.offset_in_item * scale,
@@ -637,7 +844,7 @@ impl CodeView {
         &mut self,
         diff: Arc<FileDiff>,
         path: String,
-        tokens: syntax::Tokens,
+        highlights: Highlights,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -650,28 +857,7 @@ impl CodeView {
         if !unchanged {
             self.is_diff = true;
             self.ends_with_newline = false;
-            let rows = diff
-                .hunks
-                .iter()
-                .flat_map(|hunk| {
-                    std::iter::once(Row::new(
-                        "hunk".into(),
-                        String::new(),
-                        String::new(),
-                        hunk.header.trim_end(),
-                    ))
-                    .chain(hunk.lines.iter().map(|line| {
-                        Row::new(
-                            line.kind.clone(),
-                            line.old_line.map(|n| n.to_string()).unwrap_or_default(),
-                            line.new_line.map(|n| n.to_string()).unwrap_or_default(),
-                            diff::strip_line_ending(&line.content),
-                        )
-                    }))
-                })
-                .collect();
-            self.reset(rows, window, cx);
-            self.hunk_rows = hunk_rows(&self.rows);
+            self.reset(diff_rows(&diff), highlights.clone(), window, cx);
             self.diff_source = Some((diff.clone(), path.clone()));
             self.apply_reading_position();
             if let Some(oversized) = diff.oversized {
@@ -690,8 +876,8 @@ impl CodeView {
         self.invalidate_syntax();
         self.syntax_task = None;
         self.syntax_pending = false;
-        if !Arc::ptr_eq(&self.tokens, &tokens) {
-            self.tokens = tokens;
+        if !self.highlights.same(&highlights) {
+            self.highlights = highlights;
             cx.notify();
         }
     }
@@ -716,14 +902,14 @@ impl CodeView {
             .enumerate()
             .map(|(index, text)| {
                 Row::new(
-                    "content".into(),
+                    LineKind::Content,
                     String::new(),
                     (index + 1).to_string(),
                     text,
                 )
             })
             .collect();
-        self.reset(rows, window, cx);
+        self.reset(rows, Highlights::default(), window, cx);
         self.content_source = Some(content.clone());
         self.apply_reading_position();
         self.blame_unavailable = blame_unavailable(&content);
@@ -779,7 +965,10 @@ impl CodeView {
                 if view.generation == generation
                     && let Some(tokens) = tokens
                 {
-                    view.tokens = tokens;
+                    view.highlights = Highlights {
+                        tokens,
+                        ..Highlights::default()
+                    };
                     view.syntax_pending = false;
                     view.syntax_task = None;
                     cx.notify();
@@ -790,9 +979,11 @@ impl CodeView {
     }
     /// The shown diff or file and how far it was scrolled.
     pub fn reading_position(&self) -> Option<ReadingPosition> {
+        let (row, offset) = self.anchor();
         Some(ReadingPosition {
             source: self.source_key()?,
-            top: self.scroll.vertical_offset(),
+            row,
+            offset,
         })
     }
     /// Scrolls back to `position` when its diff or file is shown next.
@@ -816,7 +1007,7 @@ impl CodeView {
             return;
         };
         if source == position.source {
-            self.scroll.scroll_vertical_to(position.top);
+            self.scroll_to_anchor((position.row, position.offset));
         } else if source.1 == position.source.1 {
             self.restored_position = Some(position);
         }
@@ -848,6 +1039,7 @@ impl CodeView {
     pub fn set_preferences(&mut self, preferences: Preferences, cx: &mut Context<Self>) {
         let old = self.font_size;
         self.ui_offset = preferences.font_size_offset;
+        self.layout = preferences.diff_layout;
         self.palette = Palette::for_theme(preferences.theme);
         self.font_size = if preferences.diff_font_size.is_finite() {
             preferences
@@ -858,21 +1050,35 @@ impl CodeView {
             DEFAULT_DIFF_FONT_SIZE
         };
         if old != self.font_size {
-            self.text_width *= self.font_size / old;
-            self.number_width *= self.font_size / old;
+            let ratio = self.font_size / old;
+            self.text_width *= ratio;
+            self.side_widths = self.side_widths.map(|width| width * ratio);
+            self.char_width *= ratio;
+            self.number_width *= ratio;
             self.rebuild_row_geometry(self.geometry_scale);
         }
         cx.notify();
+    }
+    /// Only central views offer the side-by-side layout. A width measured
+    /// in another host does not decide the first layout in this one.
+    pub fn set_split_host(&mut self, central: bool, cx: &mut Context<Self>) {
+        if self.split_host != central {
+            self.split_host = central;
+            self.viewport_width.set(0.);
+            cx.notify();
+        }
     }
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.invalidate_syntax();
         self.syntax_task = None;
         self.syntax_pending = false;
         self.rows = Arc::new(Vec::new());
+        self.split = None;
+        self.both_sides = false;
         self.scroll.set_geometry(RowGeometry::default());
         self.diff_source = None;
         self.content_source = None;
-        self.tokens = Arc::new(Vec::new());
+        self.highlights = Highlights::default();
         self.selection = None;
         self.dragging = false;
         self.drag_point = None;
@@ -911,8 +1117,13 @@ impl CodeView {
         self.loading.is_none() && !self.syntax_pending
     }
     #[cfg(feature = "app-benchmark")]
+    pub fn is_split(&self) -> bool {
+        self.split.is_some()
+    }
+    #[cfg(feature = "app-benchmark")]
     pub fn syntax_colored(&self) -> bool {
-        self.tokens
+        self.highlights
+            .tokens
             .iter()
             .flatten()
             .any(|token| token.kind != Kind::Plain)
@@ -938,14 +1149,8 @@ impl CodeView {
                     ));
                 }
             };
-            icon_button(id, name, label, label.into(), enabled, palette)
+            icon_button(id, name, label, move || label.into(), enabled, palette)
                 .on_click(cx.listener(move |view, _, _, cx| change(view, cx)))
-                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if is_activation(event) {
-                        change(view, cx);
-                        cx.stop_propagation();
-                    }
-                }))
         };
         div()
             .flex()
@@ -980,15 +1185,9 @@ impl CodeView {
         let enabled = !self.hunk_rows.is_empty();
         let button = |id: &'static str, name: IconName, label: &'static str, forward: bool| {
             let key = if forward { "↓" } else { "↑" };
-            let tooltip = format!("{label} ({})", alt_shortcut_label(key));
-            icon_button(id, name, label, tooltip.into(), enabled, palette)
+            let tooltip = SharedString::from(format!("{label} ({})", alt_shortcut_label(key)));
+            icon_button(id, name, label, move || tooltip.clone(), enabled, palette)
                 .on_click(cx.listener(move |view, _, _, cx| view.jump_hunk(forward, cx)))
-                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                    if is_activation(event) {
-                        view.jump_hunk(forward, cx);
-                        cx.stop_propagation();
-                    }
-                }))
         };
         div()
             .flex()
@@ -1008,6 +1207,65 @@ impl CodeView {
             ))
             .into_any_element()
     }
+    /// Whether the diff is shown side by side, and else why it cannot be:
+    /// the state of the header's toggle, `None` where it is hidden. Hosts
+    /// build their header before this view renders, so the layout is
+    /// brought up to date first.
+    fn layout_state(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(bool, Option<SplitBlocker>)> {
+        if !self.split_host || !self.is_diff {
+            return None;
+        }
+        self.update_layout(window, cx);
+        let split = self.split.is_some();
+        Some((split, if split { None } else { self.split_blocker() }))
+    }
+    /// The unified / side-by-side switch of a central diff header, disabled
+    /// with its reason while this diff stays unified whatever the preference.
+    pub fn layout_controls(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (split, blocker) = self.layout_state(window, cx)?;
+        let (name, label, target) = if split {
+            (
+                IconName::Rows2,
+                "Afficher le diff unifié",
+                DiffLayout::Unified,
+            )
+        } else {
+            (
+                IconName::Columns2,
+                "Afficher le diff côte à côte",
+                DiffLayout::Split,
+            )
+        };
+        let enabled = blocker.is_none();
+        // A shown tooltip keeps its view while hovered: it reads this text.
+        *self.layout_tooltip.borrow_mut() = blocker.map_or(label, SplitBlocker::reason).into();
+        let tooltip = self.layout_tooltip.clone();
+        let change = move |cx: &mut Context<Self>| {
+            if enabled {
+                cx.emit(CodeViewEvent::LayoutChanged(target));
+            }
+        };
+        Some(
+            icon_button(
+                "diff-layout",
+                name,
+                label,
+                move || tooltip.borrow().clone(),
+                enabled,
+                self.palette,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| change(cx)))
+            .into_any_element(),
+        )
+    }
     /// Scroll the previous or next hunk header to the top and move the caret there.
     pub fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
         let viewport = self.list.viewport_bounds();
@@ -1025,12 +1283,12 @@ impl CodeView {
         let Some(row) = hunk_target(&self.hunk_rows, current, forward) else {
             return;
         };
-        let caret = Position { row, byte: 0 };
         self.active_line = row;
-        self.selection = Some(Selection {
-            anchor: caret,
-            head: caret,
-        });
+        // Hunk headers belong to both sides: the caret keeps its side.
+        self.selection = Some(Selection::caret(
+            self.caret_side(),
+            Position { row, byte: 0 },
+        ));
         let start = (0..row)
             .filter_map(|index| self.scroll.row_height(index))
             .fold(px(0.), |start, height| start + height);
@@ -1038,56 +1296,135 @@ impl CodeView {
         cx.notify();
     }
 
-    fn position_from_layout(&self, index: usize, position: Point<Pixels>) -> Position {
-        let byte = self
-            .layouts
-            .borrow()
-            .get(&index)
-            .map_or(0, |layout| layout.byte_at(position));
-        let row = &self.rows[index];
+    /// The row whose text a displayed row shows on `side`, none in an empty
+    /// cell. Hunk headers belong to both sides of a split diff.
+    fn text_row(&self, index: usize, side: Side) -> Option<&Row> {
+        let row = match self.split.as_ref().map(|split| split.rows.get(index)) {
+            None => index,
+            Some(None) => return None,
+            Some(Some(SplitRow::Hunk(row))) => *row,
+            Some(Some(SplitRow::Pair { old, new })) => {
+                if side == Side::Old {
+                    (*old)?
+                } else {
+                    (*new)?
+                }
+            }
+        };
+        self.rows.get(row)
+    }
+    fn text_of(&self, index: usize, side: Side) -> Option<&str> {
+        self.text_row(index, side).map(|row| &*row.original)
+    }
+    /// The first displayed row from `from`, included, with text on `side`.
+    fn text_row_from(&self, from: usize, side: Side, forward: bool) -> Option<usize> {
+        let has_text = |index: &usize| self.text_row(*index, side).is_some();
+        if forward {
+            (from..self.item_count()).find(has_text)
+        } else {
+            (0..=from.min(self.item_count().saturating_sub(1)))
+                .rev()
+                .find(has_text)
+        }
+    }
+    /// The side read by the keyboard: the selection's, or the new side of a
+    /// split diff.
+    fn caret_side(&self) -> Side {
+        match (&self.split, self.selection) {
+            (None, _) => Side::Unified,
+            (Some(_), Some(selection)) if selection.side != Side::Unified => selection.side,
+            (Some(_), _) => Side::New,
+        }
+    }
+    /// The selection, when it reads `side`. Hunk headers, read from either
+    /// side, pass `None`.
+    fn selection_on(&self, side: Option<Side>) -> Option<Selection> {
+        self.selection
+            .filter(|selection| side.is_none_or(|side| side == selection.side))
+    }
+    fn selected_range(
+        &self,
+        index: usize,
+        side: Option<Side>,
+        length: usize,
+    ) -> Option<Range<usize>> {
+        self.selection_on(side)?.range_in_row(index, length)
+    }
+    /// Whether the selection continues past the end of a displayed row.
+    fn selects_line_end(&self, index: usize, side: Option<Side>) -> bool {
+        self.selection_on(side).is_some_and(|selection| {
+            let (start, end) = selection.ordered();
+            start.row <= index && index < end.row
+        })
+    }
+
+    /// The position under `point` in the text of a displayed row on `side`.
+    fn position_from_layout(
+        &self,
+        index: usize,
+        side: Side,
+        point: Point<Pixels>,
+    ) -> Option<Position> {
+        let row = self.text_row(index, side)?;
+        let layouts = self.layouts.borrow();
+        // Unified rows and shared hunk headers are laid out once.
+        let byte = layouts
+            .get(&(index, side))
+            .or_else(|| layouts.get(&(index, Side::Unified)))
+            .map_or(0, |layout| layout.byte_at(point));
         let mut byte = row.display.original_byte(byte).min(row.original.len());
         while !row.original.is_char_boundary(byte) {
             byte = byte.saturating_sub(1);
         }
-        Position { row: index, byte }
+        Some(Position { row: index, byte })
     }
     fn begin_selection(
         &mut self,
         index: usize,
+        side: Side,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        let position = self.position_from_layout(index, event.position);
         self.active_line = index;
-        let row = &self.rows[index];
-        if event.click_count >= 3 {
-            self.selection = Some(Selection {
+        cx.stop_propagation();
+        cx.notify();
+        // An empty cell of a split diff has nothing to select.
+        let (Some(position), Some(line)) = (
+            self.position_from_layout(index, side, event.position),
+            self.text_row(index, side).map(|row| row.original.clone()),
+        ) else {
+            return;
+        };
+        let selection = if event.click_count >= 3 {
+            Selection {
+                side,
                 anchor: Position {
                     row: index,
                     byte: 0,
                 },
                 head: Position {
                     row: index,
-                    byte: row.original.len(),
+                    byte: line.len(),
                 },
-            });
+            }
         } else if event.click_count == 2 {
             let word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
-            let start = row.original[..position.byte]
+            let start = line[..position.byte]
                 .char_indices()
                 .rev()
                 .take_while(|(_, ch)| word(*ch))
                 .last()
                 .map_or(position.byte, |(offset, _)| offset);
             let end = position.byte
-                + row.original[position.byte..]
+                + line[position.byte..]
                     .chars()
                     .take_while(|ch| word(*ch))
                     .map(char::len_utf8)
                     .sum::<usize>();
-            self.selection = Some(Selection {
+            Selection {
+                side,
                 anchor: Position {
                     row: index,
                     byte: start,
@@ -1096,25 +1433,24 @@ impl CodeView {
                     row: index,
                     byte: end,
                 },
-            });
+            }
         } else if event.modifiers.shift {
-            self.selection = Some(Selection {
+            Selection {
+                side,
                 anchor: self
                     .selection
+                    .filter(|selection| selection.side == side)
                     .map_or(position, |selection| selection.anchor),
                 head: position,
-            });
+            }
         } else {
-            self.selection = Some(Selection {
-                anchor: position,
-                head: position,
-            });
-        }
+            Selection::caret(side, position)
+        };
+        self.selection = Some(selection);
         self.dragging = true;
         self.drag_point = Some(event.position);
-        cx.stop_propagation();
-        cx.notify();
     }
+    /// Dragging extends the selection on its own side only.
     fn drag_selection(
         &mut self,
         event: &MouseMoveEvent,
@@ -1133,30 +1469,29 @@ impl CodeView {
         self.drag_point = Some(event.position);
         let viewport = self.list.viewport_bounds();
         let point = event.position;
-        let mut target = None;
-        for index in self.layouts.borrow().keys() {
-            if let Some(bounds) = self.list.bounds_for_item(*index)
-                && point.y >= bounds.top()
-                && point.y <= bounds.bottom()
-            {
-                target = Some(*index);
-                break;
-            }
-        }
+        let target = self
+            .layouts
+            .borrow()
+            .keys()
+            .map(|(index, _)| *index)
+            .find(|index| {
+                self.list
+                    .bounds_for_item(*index)
+                    .is_some_and(|bounds| point.y >= bounds.top() && point.y <= bounds.bottom())
+            });
         if point.y < viewport.top() || point.y > viewport.bottom() {
             // Only the animation loop changes scroll position; event frequency
             // must not add a second source of scrolling during a drag.
             window.request_animation_frame();
             return;
         }
-        if let Some(index) = target {
-            let head = self.position_from_layout(index, point);
-            if let Some(selection) = &mut self.selection
-                && selection.head != head
-            {
-                selection.head = head;
-                cx.notify();
-            }
+        let side = self.caret_side();
+        if let Some(head) = target.and_then(|index| self.position_from_layout(index, side, point))
+            && let Some(selection) = &mut self.selection
+            && selection.head != head
+        {
+            selection.head = head;
+            cx.notify();
         }
     }
     fn autoscroll_selection(&mut self, window: &mut Window) {
@@ -1185,7 +1520,7 @@ impl CodeView {
             .layouts
             .borrow()
             .keys()
-            .copied()
+            .map(|(index, _)| *index)
             .filter(|index| {
                 self.list.bounds_for_item(*index).is_some_and(|bounds| {
                     bounds.bottom() >= viewport.top() && bounds.top() <= viewport.bottom()
@@ -1204,27 +1539,28 @@ impl CodeView {
                 .copied()
                 .unwrap_or(top.item_ix)
                 .saturating_add(1)
-                .min(self.rows.len() - 1)
+                .min(self.item_count() - 1)
         };
         self.scroll
             .scroll_vertical_by(px(direction * self.font_size * 1.7));
-        if let Some(selection) = &mut self.selection {
+        let side = self.caret_side();
+        if let Some(length) = self.text_of(index, side).map(str::len)
+            && let Some(selection) = &mut self.selection
+        {
             selection.head = Position {
                 row: index,
-                byte: if direction < 0. {
-                    0
-                } else {
-                    self.rows[index].original.len()
-                },
+                byte: if direction < 0. { 0 } else { length },
             };
         }
         // Frame requests exist only during an active drag beyond the viewport.
         window.request_animation_frame();
     }
     pub fn selected_text(&self) -> String {
-        selected_rows_text(
-            &self.rows,
+        let side = self.caret_side();
+        selection::selected_text(
             self.selection,
+            self.item_count(),
+            |index| self.text_of(index, side),
             !self.is_diff && self.ends_with_newline,
         )
     }
@@ -1235,20 +1571,114 @@ impl CodeView {
         }
         cx.stop_propagation();
     }
+    /// Selects every line of the caret's side.
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        if self.rows.is_empty() {
+        let side = self.caret_side();
+        let (Some(first), Some(last)) = (
+            self.text_row_from(0, side, true),
+            self.text_row_from(self.item_count().saturating_sub(1), side, false),
+        ) else {
             return;
-        }
-        let row = self.rows.len() - 1;
+        };
+        let length = self.text_of(last, side).map_or(0, str::len);
         self.selection = Some(Selection {
-            anchor: Position::default(),
+            side,
+            anchor: Position {
+                row: first,
+                byte: 0,
+            },
             head: Position {
-                row,
-                byte: self.rows[row].original.len(),
+                row: last,
+                byte: length,
             },
         });
         cx.stop_propagation();
         cx.notify();
+    }
+    /// Where a key moves the caret on `side`; up and down skip the empty
+    /// cells of that side. `None` for a key that does not move it.
+    fn moved_caret(
+        &self,
+        current: Position,
+        side: Side,
+        key: &str,
+        page: usize,
+        jump: bool,
+    ) -> Option<Position> {
+        let last = self.item_count().checked_sub(1)?;
+        let length = |row: usize| self.text_of(row, side).map_or(0, str::len);
+        let near = |target: usize, forward: bool| {
+            self.text_row_from(target, side, forward)
+                .or_else(|| self.text_row_from(target, side, !forward))
+                .unwrap_or(current.row)
+        };
+        let mut next = current;
+        match key {
+            "down" if current.row < last => {
+                next.row = self
+                    .text_row_from(current.row + 1, side, true)
+                    .unwrap_or(current.row)
+            }
+            "up" if current.row > 0 => {
+                next.row = self
+                    .text_row_from(current.row - 1, side, false)
+                    .unwrap_or(current.row)
+            }
+            "down" | "up" => {}
+            "pagedown" => next.row = near((current.row + page).min(last), true),
+            "pageup" => next.row = near(current.row.saturating_sub(page), false),
+            "home" => {
+                next.byte = 0;
+                if jump {
+                    next.row = near(0, true);
+                }
+            }
+            "end" => {
+                if jump {
+                    next.row = near(last, false);
+                }
+                next.byte = length(next.row);
+            }
+            "left" => {
+                if next.byte > 0 {
+                    next.byte = self.text_of(next.row, side).map_or(0, |line| {
+                        line[..next.byte.min(line.len())]
+                            .char_indices()
+                            .next_back()
+                            .map_or(0, |(offset, _)| offset)
+                    });
+                } else if let Some(row) = current
+                    .row
+                    .checked_sub(1)
+                    .and_then(|row| self.text_row_from(row, side, false))
+                {
+                    next = Position {
+                        row,
+                        byte: length(row),
+                    };
+                }
+            }
+            "right" => {
+                if let Some(ch) = self
+                    .text_of(next.row, side)
+                    .and_then(|line| line.get(next.byte..)?.chars().next())
+                {
+                    next.byte += ch.len_utf8();
+                } else if let Some(row) = (current.row < last)
+                    .then(|| self.text_row_from(current.row + 1, side, true))
+                    .flatten()
+                {
+                    next = Position { row, byte: 0 };
+                }
+            }
+            _ => return None,
+        }
+        let line = self.text_of(next.row, side).unwrap_or_default();
+        next.byte = next.byte.min(line.len());
+        while !line.is_char_boundary(next.byte) {
+            next.byte -= 1;
+        }
+        Some(next)
     }
     fn keydown(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
@@ -1276,7 +1706,9 @@ impl CodeView {
             }
             return;
         }
-        let current = self.selection.map_or(
+        let side = self.caret_side();
+        let selection = self.selection;
+        let current = selection.map_or(
             Position {
                 row: self.active_line,
                 byte: 0,
@@ -1285,65 +1717,20 @@ impl CodeView {
         );
         let viewport_height: f32 = self.list.viewport_bounds().size.height.into();
         let page = (viewport_height / (self.font_size * 1.7)).floor() as usize;
-        let mut next = current;
-        match key {
-            "down" => next.row = (current.row + 1).min(self.rows.len() - 1),
-            "up" => next.row = current.row.saturating_sub(1),
-            "pagedown" => next.row = (current.row + page.max(1)).min(self.rows.len() - 1),
-            "pageup" => next.row = current.row.saturating_sub(page.max(1)),
-            "home" => {
-                next.byte = 0;
-                if modifiers.platform || modifiers.control {
-                    next.row = 0;
-                }
-            }
-            "end" => {
-                if modifiers.platform || modifiers.control {
-                    next.row = self.rows.len() - 1;
-                }
-                next.byte = self.rows[next.row].original.len();
-            }
-            "left" => {
-                if next.byte > 0 {
-                    next.byte = self.rows[next.row].original[..next.byte]
-                        .char_indices()
-                        .next_back()
-                        .map_or(0, |(offset, _)| offset);
-                } else if next.row > 0 {
-                    next.row -= 1;
-                    next.byte = self.rows[next.row].original.len();
-                }
-            }
-            "right" => {
-                if next.byte < self.rows[next.row].original.len() {
-                    next.byte += self.rows[next.row].original[next.byte..]
-                        .chars()
-                        .next()
-                        .unwrap()
-                        .len_utf8();
-                } else if next.row + 1 < self.rows.len() {
-                    next.row += 1;
-                    next.byte = 0;
-                }
-            }
-            _ => return,
-        }
-        next.byte = next.byte.min(self.rows[next.row].original.len());
-        while !self.rows[next.row].original.is_char_boundary(next.byte) {
-            next.byte -= 1;
-        }
-        self.active_line = next.row;
-        self.selection = if modifiers.shift {
-            Some(Selection {
-                anchor: self.selection.map_or(current, |selection| selection.anchor),
-                head: next,
-            })
-        } else {
-            Some(Selection {
-                anchor: next,
-                head: next,
-            })
+        let jump = modifiers.platform || modifiers.control;
+        let Some(next) = self.moved_caret(current, side, key, page.max(1), jump) else {
+            return;
         };
+        self.active_line = next.row;
+        self.selection = Some(if modifiers.shift {
+            Selection {
+                side,
+                anchor: selection.map_or(current, |selection| selection.anchor),
+                head: next,
+            }
+        } else {
+            Selection::caret(side, next)
+        });
         self.scroll.reveal_row(next.row);
         window.focus(&self.focus, cx);
         cx.stop_propagation();
@@ -1353,16 +1740,36 @@ impl CodeView {
         let index = self.blame_indices.get(row).copied().flatten()?;
         self.blame.as_ref()?.groups.get(index)
     }
-    fn highlights(&self, index: usize, row: &Row) -> Vec<(Range<usize>, HighlightStyle)> {
-        let selection = self
-            .selection
-            .and_then(|selection| selection.range_in_row(index, row.original.len()));
-        let tokens = self.tokens.get(index).map(Vec::as_slice).unwrap_or(&[]);
+    /// Styles of a unified row: syntax colors, changed words and the
+    /// selected bytes, which take precedence over the changed words.
+    fn highlights(
+        &self,
+        index: usize,
+        row: &Row,
+        selection: Option<Range<usize>>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let tokens = self
+            .highlights
+            .tokens
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let words = self
+            .highlights
+            .words
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let word_background = match row.kind {
+            LineKind::Addition => Some(self.palette.addition_word_bg),
+            LineKind::Deletion => Some(self.palette.deletion_word_bg),
+            _ => None,
+        };
         let mut cuts = vec![0, row.display.original_end];
-        for token in tokens {
+        for range in tokens.iter().map(|token| &token.range).chain(words) {
             cuts.extend([
-                token.range.start.min(row.display.original_end),
-                token.range.end.min(row.display.original_end),
+                range.start.min(row.display.original_end),
+                range.end.min(row.display.original_end),
             ]);
         }
         if let Some(selected) = &selection {
@@ -1373,7 +1780,7 @@ impl CodeView {
         }
         cuts.sort_unstable();
         cuts.dedup();
-        let mut token_index = 0;
+        let (mut token_index, mut word_index) = (0, 0);
         let mut result = Vec::with_capacity(cuts.len());
         for boundaries in cuts.windows(2) {
             let range = boundaries[0]..boundaries[1];
@@ -1387,6 +1794,12 @@ impl CodeView {
                 .get(token_index)
                 .filter(|token| token.range.start <= range.start && token.range.end >= range.end)
                 .map_or(Kind::Plain, |token| token.kind);
+            while word_index < words.len() && words[word_index].end <= range.start {
+                word_index += 1;
+            }
+            let changed = words
+                .get(word_index)
+                .is_some_and(|word| word.start <= range.start && word.end >= range.end);
             let selected = selection
                 .as_ref()
                 .is_some_and(|selected| selected.start <= range.start && selected.end >= range.end);
@@ -1404,7 +1817,13 @@ impl CodeView {
                         kind.palette_index()
                             .map(|index| rgb(self.palette.syntax[index]).into())
                     },
-                    background_color: selected.then(|| rgb(self.palette.selection).into()),
+                    background_color: if selected {
+                        Some(rgb(self.palette.selection).into())
+                    } else {
+                        word_background
+                            .filter(|_| changed)
+                            .map(|color| rgb(color).into())
+                    },
                     ..Default::default()
                 },
             ));
@@ -1431,29 +1850,24 @@ impl CodeView {
         }
         result
     }
-    fn render_row(
+    /// The highlighted text of a unified row, shaped whole for hit testing
+    /// under `layout` but painted only where it is visible.
+    fn code_text(
         &self,
         index: usize,
-        first_visible_row: usize,
-        scroll_x: Pixels,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        layout: (usize, Side),
+        selection: Option<Range<usize>>,
+        window: &Window,
     ) -> AnyElement {
         let row = &self.rows[index];
-        let p = self.palette;
-        let hunk = row.kind == "hunk";
-        let background = match row.kind.as_str() {
-            "hunk" => p.hunk_bg,
-            "addition" => p.addition_bg,
-            "deletion" => p.deletion_bg,
-            _ if self.show_blame && index == self.active_line && self.focus.is_focused(window) => {
-                p.surface
-            }
-            _ => p.reading_bg,
-        };
-        let default_color = rgb(if hunk { p.accent } else { p.text }).into();
+        let default_color = rgb(if row.kind == LineKind::Hunk {
+            self.palette.accent
+        } else {
+            self.palette.text
+        })
+        .into();
         let runs = self
-            .highlights(index, row)
+            .highlights(index, row, selection)
             .into_iter()
             .map(|(range, highlight)| TextRun {
                 len: range.len(),
@@ -1473,13 +1887,14 @@ impl CodeView {
         let width = shaped.width().ceil();
         let layouts = self.layouts.clone();
         let line_height = window.pixel_snap(px(self.font_size * 1.7));
-        let text = canvas(
-            move |bounds, _, _| {
+        canvas(
+            move |bounds, window, _| {
                 layouts.borrow_mut().insert(
-                    index,
+                    layout,
                     CodeLineLayout {
                         line: shaped.clone(),
                         bounds,
+                        visible: window.content_mask().bounds,
                     },
                 );
                 shaped
@@ -1523,23 +1938,54 @@ impl CodeView {
         )
         .w(width)
         .h_full()
-        .flex_shrink_0();
-        let gutter = |value: String| {
-            div()
-                .w(px(self.number_width))
-                .h_full()
-                .flex_shrink_0()
-                .border_r_1()
-                .border_color(rgb(p.border))
-                .pr(px(if self.is_diff { 5. } else { 8. }))
-                .text_right()
-                .map(|gutter| match row.kind.as_str() {
-                    "addition" => gutter.bg(rgb(p.addition_gutter)).text_color(rgb(p.text)),
-                    "deletion" => gutter.bg(rgb(p.deletion_gutter)).text_color(rgb(p.text)),
-                    _ => gutter.text_color(rgb(p.muted)),
-                })
-                .child(value)
+        .flex_shrink_0()
+        .into_any_element()
+    }
+    fn render_row(
+        &self,
+        index: usize,
+        first_visible_row: usize,
+        scroll_x: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match self.split.as_ref().map(|split| split.rows[index]) {
+            None => self.render_line(index, index, first_visible_row, scroll_x, window, cx),
+            Some(SplitRow::Hunk(row)) => {
+                self.render_line(index, row, first_visible_row, scroll_x, window, cx)
+            }
+            Some(SplitRow::Pair { old, new }) => {
+                self.render_pair(index, [old, new], scroll_x, window, cx)
+            }
+        }
+    }
+    /// A unified row, or a hunk header across a split diff, at `index`.
+    fn render_line(
+        &self,
+        index: usize,
+        row_index: usize,
+        first_visible_row: usize,
+        scroll_x: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = &self.rows[row_index];
+        let p = self.palette;
+        let hunk = row.kind == LineKind::Hunk;
+        let background = match row.kind {
+            LineKind::Hunk => p.hunk_bg,
+            LineKind::Addition => p.addition_bg,
+            LineKind::Deletion => p.deletion_bg,
+            _ if self.show_blame && index == self.active_line && self.focus.is_focused(window) => {
+                p.surface
+            }
+            _ => p.reading_bg,
         };
+        // A hunk header across a split diff is read from either side.
+        let side = self.split.is_none().then_some(Side::Unified);
+        let selection = self.selected_range(index, side, row.original.len());
+        let text = self.code_text(row_index, (index, Side::Unified), selection, window);
+        let gutter = |value: String| self.number_cell(row.kind, value);
         let mut line = div()
             .id(("code-row", index))
             .role(if self.show_blame && !self.is_diff {
@@ -1581,10 +2027,19 @@ impl CodeView {
             .text_color(rgb(if hunk { p.accent } else { p.text }))
             .bg(rgb(background));
         let mut sticky = None;
+        let mut header = None;
         if hunk {
-            line = line.px(px(13.)).py(px(5.)).when(index > 0, |line| {
+            // The header text stays in view while the code scrolls beneath.
+            line = line.relative().when(index > 0, |line| {
                 line.border_t_1().border_color(rgb(p.border))
             });
+            header = Some(
+                self.pinned(scroll_x)
+                    .flex()
+                    .px(px(13.))
+                    .py(px(5.))
+                    .overflow_hidden(),
+            );
         } else {
             // The gutter is painted last, over the code that scrolls beneath it.
             let mut cells = div()
@@ -1596,22 +2051,10 @@ impl CodeView {
                 .bg(rgb(background))
                 .block_mouse_except_scroll();
             if self.is_diff {
-                let (sign, color) = match row.kind.as_str() {
-                    "addition" => ("+", p.success),
-                    "deletion" => ("−", p.danger),
-                    _ => (" ", p.muted),
-                };
                 cells = cells
                     .child(gutter(row.old_number.clone()))
                     .child(gutter(row.new_number.clone()))
-                    .child(
-                        div()
-                            .w(px(20.))
-                            .flex_shrink_0()
-                            .text_center()
-                            .text_color(rgb(color))
-                            .child(sign),
-                    );
+                    .child(self.sign_cell(row.kind));
             } else {
                 cells = cells
                     .children(
@@ -1631,30 +2074,186 @@ impl CodeView {
             .flex()
             .flex_1()
             .h_full()
-            .pr(px(if self.is_diff { 15. } else { 20. }))
+            .pr(px(if self.is_diff { DIFF_PADDING } else { 20. }))
             .cursor(CursorStyle::IBeam)
             .child(text)
-            .when(
-                self.selection.is_some_and(|selection| {
-                    let (start, end) = selection.ordered();
-                    start.row <= index && index < end.row
-                }),
-                |view| {
-                    view.child(
-                        div()
-                            .w(px(self.font_size * 0.6))
-                            .h_full()
-                            .bg(rgb(p.selection)),
-                    )
-                },
-            )
+            .when(self.selects_line_end(index, side), |view| {
+                view.child(self.line_end_selection())
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event, window, cx| {
-                    view.begin_selection(index, event, window, cx)
+                    let side = side.unwrap_or_else(|| view.caret_side());
+                    view.begin_selection(index, side, event, window, cx)
                 }),
             );
-        line.child(code).children(sticky).into_any_element()
+        match header {
+            Some(header) => line.child(header.child(code)),
+            None => line.child(code).children(sticky),
+        }
+        .into_any_element()
+    }
+    /// A box laid over the viewport, which the rows scroll beneath.
+    fn pinned(&self, scroll_x: Pixels) -> Div {
+        let viewport = self.viewport_width.get();
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(scroll_x)
+            .map(|pinned| {
+                if viewport > 0. {
+                    pinned.w(px(viewport))
+                } else {
+                    pinned.right_0()
+                }
+            })
+    }
+    /// A side-by-side row. Both cells stay in the viewport while their text
+    /// scrolls horizontally beneath them by the same distance.
+    fn render_pair(
+        &self,
+        index: usize,
+        cells: [Option<usize>; 2],
+        scroll_x: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.palette;
+        let window: &Window = window;
+        let cell = |row_index: Option<usize>, side: Side| {
+            let cell = div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, event, window, cx| {
+                        view.begin_selection(index, side, event, window, cx)
+                    }),
+                );
+            let Some(row_index) = row_index else {
+                return cell.bg(rgb(p.panel));
+            };
+            let row = &self.rows[row_index];
+            let background = match row.kind {
+                LineKind::Deletion => p.deletion_bg,
+                LineKind::Addition => p.addition_bg,
+                _ => p.reading_bg,
+            };
+            let number = if side == Side::Old {
+                &row.old_number
+            } else {
+                &row.new_number
+            };
+            let selection = self.selected_range(index, Some(side), row.original.len());
+            cell.bg(rgb(background))
+                .child(self.number_cell(row.kind, number.clone()))
+                .child(self.sign_cell(row.kind))
+                .child(
+                    div().flex_1().min_w_0().h_full().overflow_hidden().child(
+                        div()
+                            .flex()
+                            .h_full()
+                            .ml(-scroll_x)
+                            .child(self.code_text(row_index, (index, side), selection, window))
+                            .when(self.selects_line_end(index, Some(side)), |text| {
+                                text.child(self.line_end_selection())
+                            }),
+                    ),
+                )
+        };
+        let columns = self
+            .pinned(scroll_x)
+            .flex()
+            .child(cell(cells[0], Side::Old))
+            .child(
+                div()
+                    .w(px(DIVIDER_WIDTH))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(rgb(p.border)),
+            )
+            .child(cell(cells[1], Side::New));
+        div()
+            .id(("code-row", index))
+            .role(Role::Paragraph)
+            .when(window.is_a11y_active(), |line| {
+                line.aria_label(self.pair_label(cells))
+            })
+            .relative()
+            .w_full()
+            .min_w(px(self.content_width()))
+            .h(self.row_height(index))
+            .font_family(MONO)
+            .text_size(px(self.font_size))
+            .line_height(px(self.font_size * 1.7))
+            .text_color(rgb(p.text))
+            .bg(rgb(p.reading_bg))
+            .child(columns)
+            .into_any_element()
+    }
+    /// Marks a selected line end, copied as a newline.
+    fn line_end_selection(&self) -> Div {
+        div()
+            .w(px(self.font_size * 0.6))
+            .h_full()
+            .bg(rgb(self.palette.selection))
+    }
+    /// A line number, tinted on added and deleted lines.
+    fn number_cell(&self, kind: LineKind, number: String) -> Div {
+        let p = self.palette;
+        div()
+            .w(px(self.number_width))
+            .h_full()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .pr(px(if self.is_diff { 5. } else { 8. }))
+            .text_right()
+            .map(|cell| match kind {
+                LineKind::Addition => cell.bg(rgb(p.addition_gutter)).text_color(rgb(p.text)),
+                LineKind::Deletion => cell.bg(rgb(p.deletion_gutter)).text_color(rgb(p.text)),
+                _ => cell.text_color(rgb(p.muted)),
+            })
+            .child(number)
+    }
+    fn sign_cell(&self, kind: LineKind) -> Div {
+        let p = self.palette;
+        let (sign, color) = match kind {
+            LineKind::Addition => ("+", p.success),
+            LineKind::Deletion => ("−", p.danger),
+            _ => (" ", p.muted),
+        };
+        div()
+            .w(px(SIGN_WIDTH))
+            .flex_shrink_0()
+            .text_center()
+            .text_color(rgb(color))
+            .child(sign)
+    }
+    /// « Avant, ligne 12 : … ; Après, ligne 13 : … » for assistive technologies.
+    fn pair_label(&self, cells: [Option<usize>; 2]) -> String {
+        cells
+            .into_iter()
+            .zip([("Avant", true), ("Après", false)])
+            .filter_map(|(cell, (side, old))| {
+                let row = &self.rows[cell?];
+                let number = if old {
+                    &row.old_number
+                } else {
+                    &row.new_number
+                };
+                Some(if number.is_empty() {
+                    format!("{side} : {}", row.original)
+                } else {
+                    format!("{side}, ligne {number} : {}", row.original)
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(" ; ")
     }
     fn blame_cell(
         &self,
@@ -1732,6 +2331,7 @@ impl Render for CodeView {
         if self.geometry_scale != window.scale_factor() {
             self.rebuild_row_geometry(window.scale_factor());
         }
+        self.update_layout(window, cx);
         let p = self.palette;
         self.autoscroll_selection(window);
         let on_move = cx.listener(Self::drag_selection);
@@ -1862,13 +2462,7 @@ impl Render for CodeView {
                                 .cursor_pointer()
                                 .focus_visible(move |style| style.border_color(rgb(p.accent)))
                                 .child(action.label())
-                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(action.event())))
-                                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
-                                    if is_activation(event) {
-                                        cx.emit(action.event());
-                                        cx.stop_propagation();
-                                    }
-                                })),
+                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(action.event()))),
                         )
                     }),
             );
@@ -1887,6 +2481,20 @@ impl Render for CodeView {
                     let _ = wheel_view.update(cx, |_, cx| cx.notify());
                 }
             });
+            // The layout depends on the viewport width, known once painted:
+            // a new width renders the view again with it.
+            let viewport_width = self.viewport_width.clone();
+            let measure = canvas(
+                move |bounds, window, _| {
+                    let width = f32::from(bounds.size.width);
+                    if viewport_width.replace(width) != width {
+                        window.request_animation_frame();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0();
             let code = list(self.list.clone(), move |index, window, cx| {
                 entity.update(cx, |view, cx| {
                     view.render_row(index, first_visible_row, scroll_x, window, cx)
@@ -1903,6 +2511,7 @@ impl Render for CodeView {
                 .min_w_0()
                 .w_full()
                 .overflow_hidden()
+                .child(measure)
                 .child(wheel_capture)
                 .child(
                     div()
@@ -1962,10 +2571,6 @@ impl Render for CodeView {
     }
 }
 
-fn is_activation(event: &KeyDownEvent) -> bool {
-    matches!(event.keystroke.key.as_str(), "enter" | "space")
-}
-
 /// Alt+↓ moves to the next hunk and Alt+↑ to the previous one.
 pub fn hunk_shortcut(event: &KeyDownEvent) -> Option<bool> {
     let modifiers = event.keystroke.modifiers;
@@ -1982,7 +2587,7 @@ pub fn hunk_shortcut(event: &KeyDownEvent) -> Option<bool> {
 fn hunk_rows(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter_map(|(index, row)| (row.kind == "hunk").then_some(index))
+        .filter_map(|(index, row)| (row.kind == LineKind::Hunk).then_some(index))
         .collect()
 }
 
@@ -1995,14 +2600,17 @@ fn hunk_target(hunks: &[usize], current: usize, forward: bool) -> Option<usize> 
     }
 }
 
+/// `tooltip` is read whenever a shown tooltip renders, so it follows the
+/// button's state while the pointer stays over it.
 fn icon_button(
     id: &'static str,
     name: IconName,
     label: &'static str,
-    tooltip: SharedString,
+    tooltip: impl Fn() -> SharedString + 'static,
     enabled: bool,
     palette: Palette,
 ) -> Stateful<Div> {
+    let tooltip = Rc::new(tooltip);
     div()
         .id(id)
         .role(Role::Button)
@@ -2023,17 +2631,23 @@ fn icon_button(
         .when(!enabled, |view| view.opacity(0.4))
         .focus_visible(move |style| style.border_color(rgb(palette.accent)))
         .child(icon(name, 14., palette.muted))
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .tooltip(move |window, cx| {
+            let tooltip = tooltip.clone();
+            Tooltip::element(move |_, _| tooltip()).build(window, cx)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CodeLineLayout, DisplayLine, MAX_DISPLAY_BYTES, OMITTED_LINE, Position, Row, Selection,
-        StateAction, blame_unavailable, hunk_rows, hunk_target, oversized_state, row_geometry,
-        selected_rows_text, visible_shaped_line,
+        Side, StateAction, blame_unavailable, hunk_rows, hunk_target, oversized_state,
+        row_geometry, visible_shaped_line,
     };
-    use crate::virtual_scroll::VirtualScrollHandle;
+    use crate::{
+        diff::LineKind,
+        virtual_scroll::{RowGeometry, VirtualScrollHandle},
+    };
     use gpui_kit::component::scroll::ScrollbarHandle;
     use gpui_kit::{
         Bounds, FontId, GlyphId, LineLayout, ListAlignment, ListState, ScrollHandle, ShapedGlyph,
@@ -2102,23 +2716,50 @@ mod tests {
         assert_eq!(blame_unavailable(&content("binary", 20 << 20)), None);
     }
 
-    fn row(kind: &str) -> Row {
-        Row::new(kind.into(), String::new(), String::new(), "line")
+    fn row(kind: LineKind) -> Row {
+        Row::new(kind, String::new(), String::new(), "line")
+    }
+
+    /// What copying `selection` over unified `rows` gives.
+    fn copied(rows: &[Row], selection: Selection, final_newline: bool) -> String {
+        super::selection::selected_text(
+            Some(selection),
+            rows.len(),
+            |index| rows.get(index).map(|row| &*row.original),
+            final_newline,
+        )
+    }
+
+    fn geometry(rows: &[Row], font_size: f32, scale: f32) -> RowGeometry {
+        row_geometry(
+            rows.iter().map(|row| row.kind == LineKind::Hunk),
+            font_size,
+            scale,
+        )
     }
 
     fn near(value: gpui_kit::Pixels, expected: f32) {
-        assert!((f32::from(value) - expected).abs() < 0.01);
+        near_within(value, expected, 0.01);
+    }
+
+    fn near_within(value: gpui_kit::Pixels, expected: f32, tolerance: f32) {
+        assert!(
+            (f32::from(value) - expected).abs() <= tolerance,
+            "{value:?} instead of {expected}"
+        );
     }
 
     #[test]
     fn unmeasured_hunks_keep_exact_scroll_targets_after_reset_and_zoom() {
-        let rows = [row("hunk"), row("context"), row("hunk"), row("addition")];
+        let rows = [
+            row(LineKind::Hunk),
+            row(LineKind::Context),
+            row(LineKind::Hunk),
+            row(LineKind::Addition),
+        ];
         let list = ListState::new(rows.len(), ListAlignment::Top, px(150.));
-        let handle = VirtualScrollHandle::exact(
-            list.clone(),
-            ScrollHandle::new(),
-            row_geometry(&rows, 11., 1.),
-        );
+        let handle =
+            VirtualScrollHandle::exact(list.clone(), ScrollHandle::new(), geometry(&rows, 11., 1.));
         near(handle.content_size().height, 96.);
         handle.set_offset(point(px(0.), px(-60.)));
         assert_eq!(list.logical_scroll_top().item_ix, 2);
@@ -2135,7 +2776,7 @@ mod tests {
         assert_eq!(list.logical_scroll_top().item_ix, 1);
         near(list.logical_scroll_top().offset_in_item, 8.7);
 
-        handle.set_geometry(row_geometry(&rows, 20., 1.));
+        handle.set_geometry(geometry(&rows, 20., 1.));
         let zoomed = handle;
         near(zoomed.content_size().height, 157.);
         zoomed.set_offset(point(px(0.), px(-100.)));
@@ -2146,7 +2787,7 @@ mod tests {
 
     #[test]
     fn scroll_targets_clamp_and_keep_content_blame_rows_uniform() {
-        let offsets = row_geometry(&[row("content"), row("content"), row("content")], 11., 1.);
+        let offsets = geometry(&[LineKind::Content; 3].map(row), 11., 1.);
         let target = offsets.list_offset(px(19.), px(0.));
         assert_eq!(target.item_ix, 1);
         near(target.offset_in_item, 0.);
@@ -2158,17 +2799,17 @@ mod tests {
             assert_eq!(target.item_ix, 0);
             near(target.offset_in_item, 0.);
         }
-        let empty = crate::virtual_scroll::RowGeometry::default().list_offset(px(100.), px(0.));
+        let empty = RowGeometry::default().list_offset(px(100.), px(0.));
         assert_eq!(empty.item_ix, 0);
         near(empty.offset_in_item, 0.);
     }
 
     #[test]
     fn physical_row_boundaries_keep_css_height_at_one_and_two_times_scale() {
-        let rows: Vec<_> = (0..1_000).map(|_| row("content")).collect();
+        let rows: Vec<_> = (0..1_000).map(|_| row(LineKind::Content)).collect();
         for scale in [1., 2.] {
             for font_size in [9., 11., 20.] {
-                let offsets = row_geometry(&rows, font_size, scale);
+                let offsets = geometry(&rows, font_size, scale);
                 near(offsets.total(), font_size * 1_700.);
                 // Every rendered row's explicit height is a whole physical
                 // pixel, so GPUI's layout snapping leaves it unchanged.
@@ -2177,8 +2818,13 @@ mod tests {
                     assert_eq!(physical.fract(), 0.);
                 }
             }
-            let mixed = row_geometry(
-                &[row("hunk"), row("context"), row("hunk"), row("addition")],
+            let mixed = geometry(
+                &[
+                    row(LineKind::Hunk),
+                    row(LineKind::Context),
+                    row(LineKind::Hunk),
+                    row(LineKind::Addition),
+                ],
                 11.,
                 scale,
             );
@@ -2197,9 +2843,9 @@ mod tests {
 
     #[test]
     fn wheel_after_far_drag_moves_exact_pixels_without_measured_rows() {
-        let rows: Vec<_> = (0..2_000).map(|_| row("content")).collect();
+        let rows: Vec<_> = (0..2_000).map(|_| row(LineKind::Content)).collect();
         for scale in [1., 2.] {
-            let offsets = row_geometry(&rows, 11., scale);
+            let offsets = geometry(&rows, 11., scale);
             let list = ListState::new(rows.len(), ListAlignment::Top, px(150.));
             let handle = VirtualScrollHandle::exact(list, ScrollHandle::new(), offsets.clone());
             handle.scroll_vertical_to(offsets.start(1_500));
@@ -2213,14 +2859,15 @@ mod tests {
     #[test]
     fn hunk_navigation_moves_between_headers_and_stops_at_the_ends() {
         let rows = [
-            row("hunk"),
-            row("context"),
-            row("addition"),
-            row("hunk"),
-            row("deletion"),
-            row("hunk"),
-            row("context"),
-        ];
+            LineKind::Hunk,
+            LineKind::Context,
+            LineKind::Addition,
+            LineKind::Hunk,
+            LineKind::Deletion,
+            LineKind::Hunk,
+            LineKind::Context,
+        ]
+        .map(row);
         let hunks = hunk_rows(&rows);
         assert_eq!(hunks, [0, 3, 5]);
         assert_eq!(hunk_target(&hunks, 0, true), Some(3));
@@ -2232,17 +2879,6 @@ mod tests {
         assert_eq!(hunk_target(&hunks, 4, false), Some(3));
         assert_eq!(hunk_target(&hunks, 0, false), None);
         assert_eq!(hunk_target(&[], 2, true), None);
-    }
-    #[test]
-    fn selection_across_virtual_rows_excludes_gutters() {
-        let selection = Selection {
-            anchor: Position { row: 1, byte: 2 },
-            head: Position { row: 3, byte: 1 },
-        };
-        assert_eq!(selection.range_in_row(0, 9), None);
-        assert_eq!(selection.range_in_row(1, 9), Some(2..9));
-        assert_eq!(selection.range_in_row(2, 9), Some(0..9));
-        assert_eq!(selection.range_in_row(3, 9), Some(0..1));
     }
     #[test]
     fn tabs_render_with_columns_but_copy_keeps_original_bytes() {
@@ -2262,7 +2898,7 @@ mod tests {
             "\t".repeat(512 * 1024),
             "\télève🦀".repeat(50_000),
         ] {
-            let row = Row::new("content".into(), String::new(), "1".into(), &original);
+            let row = Row::new(LineKind::Content, String::new(), "1".into(), &original);
             let line = &row.display;
             assert!(line.truncated());
             assert!(line.text.len() <= MAX_DISPLAY_BYTES);
@@ -2280,31 +2916,28 @@ mod tests {
             assert_eq!(line.original_byte(line.text.len()), original.len());
             assert_eq!(line.display_byte(original.len()), line.text.len());
             let selection = Selection {
+                side: Side::Unified,
                 anchor: Position::default(),
                 head: Position {
                     row: 0,
                     byte: original.len(),
                 },
             };
-            assert_eq!(
-                selected_rows_text(std::slice::from_ref(&row), Some(selection), false),
-                original
-            );
-            assert_eq!(
-                selected_rows_text(&[row], Some(selection), true),
-                format!("{original}\n")
-            );
+            let rows = [row];
+            assert_eq!(copied(&rows, selection, false), original);
+            assert_eq!(copied(&rows, selection, true), format!("{original}\n"));
         }
     }
 
     #[test]
     fn bounded_utf8_prefix_and_cross_row_selection_copy_hidden_bytes() {
         let original = "🦀".repeat(100_000);
-        let first = Row::new("deletion".into(), "1".into(), String::new(), &original);
-        let second = Row::new("addition".into(), String::new(), "1".into(), "\télève");
+        let first = Row::new(LineKind::Deletion, "1".into(), String::new(), &original);
+        let second = Row::new(LineKind::Addition, String::new(), "1".into(), "\télève");
         let start = first.display.original_end;
         let rows = [first, second];
         let selection = Selection {
+            side: Side::Unified,
             anchor: Position {
                 row: 0,
                 byte: start,
@@ -2312,7 +2945,7 @@ mod tests {
             head: Position { row: 1, byte: 3 },
         };
         assert_eq!(
-            selected_rows_text(&rows, Some(selection), false),
+            copied(&rows, selection, false),
             format!("{}\n\té", &original[start..])
         );
     }
@@ -2368,11 +3001,18 @@ mod tests {
         let layout = CodeLineLayout {
             line: shaped,
             bounds: Bounds::new(point(px(-1_000.), px(300.)), size(px(10_000.), px(19.))),
+            visible: Bounds::new(point(px(0.), px(0.)), size(px(600.), px(800.))),
         };
         // Screen coordinates retain the full line's scrolled origin, independent
         // of the much smaller foreground glyph set.
         let byte = layout.byte_at(point(px(200.), px(310.)));
         assert_eq!(layout.line.x_for_index(byte), px(1_200.));
+        // Beyond its column, the pointer stops at what the column shows,
+        // within half of a 6 px glyph.
+        for (x, edge) in [(900., 1_600.), (-50., 1_000.)] {
+            let byte = layout.byte_at(point(px(x), px(310.)));
+            near_within(layout.line.x_for_index(byte), edge, 3.);
+        }
         assert_eq!(layout.byte_at(point(px(200.), px(299.))), 0);
         assert_eq!(layout.byte_at(point(px(200.), px(320.))), layout.line.len());
         let original = display.original_byte(byte);
@@ -2397,9 +3037,113 @@ mod tests {
         assert_eq!(visible.runs[0].glyphs.len(), shaped.runs[0].glyphs.len());
     }
 
+    fn edited_patch() -> mangrove_core::model::FileDiff {
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, content: &str| DiffLine {
+            kind: kind.into(),
+            old_line: Some(1),
+            new_line: Some(1),
+            content: content.into(),
+        };
+        FileDiff {
+            binary: false,
+            oversized: None,
+            truncated: false,
+            additions: 2,
+            deletions: 2,
+            hunks: vec![
+                DiffHunk {
+                    header: "@@ -1,2 +1,2 @@".into(),
+                    lines: vec![
+                        line("deletion", "\tlet total = 1;\n"),
+                        line("annotation", "\\ No newline at end of file"),
+                        line("addition", "\tlet total = 2;\n"),
+                        line("context", "fn main() {}\n"),
+                    ],
+                },
+                DiffHunk {
+                    header: "@@ -9 +9 @@".into(),
+                    lines: vec![
+                        line("deletion", "let a = old;\n"),
+                        line("addition", "let a = new;\n"),
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn highlights_index_the_rows_of_a_patch_and_leave_other_rows_plain() {
+        let diff = edited_patch();
+        let rows = super::diff_rows(&diff);
+        let highlights = super::Highlights::of_diff("a.rs", &diff, || false).unwrap();
+        let (words, tokens) = (&highlights.words, &highlights.tokens);
+        assert_eq!((words.len(), tokens.len()), (rows.len(), rows.len()));
+        for (row, ranges) in rows.iter().zip(words.iter()) {
+            let changed = matches!(row.kind, LineKind::Addition | LineKind::Deletion);
+            assert_eq!(!ranges.is_empty(), changed, "{:?}", row.kind);
+        }
+        // The pairs the side-by-side layout reuses, by row.
+        assert_eq!(highlights.pairs.as_deref(), Some(&vec![(1, 3), (6, 7)]));
+    }
+
+    #[gpui_kit::test]
+    fn changed_words_paint_under_their_tab_columns_and_give_way_to_the_selection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{CodeView, Highlights};
+        use gpui_kit::{AppContext, Hsla, WindowOptions, rgb};
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let diff = Arc::new(edited_patch());
+        let highlights = Highlights::of_diff("a.txt", &diff, || false).unwrap();
+        cx.update_window(cx.windows()[0], |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_prepared_diff(diff, "a.rs".into(), highlights, window, cx)
+            })
+        })
+        .unwrap();
+        view.update(cx, |view, _| {
+            let background = |view: &CodeView, index: usize, display: std::ops::Range<usize>| {
+                let row = &view.rows[index];
+                let selection = view
+                    .selection
+                    .and_then(|selection| selection.range_in_row(index, row.original.len()));
+                view.highlights(index, row, selection)
+                    .into_iter()
+                    .find(|(range, _)| *range == display)
+                    .and_then(|(_, style)| style.background_color)
+            };
+            let color = |value: u32| -> Option<Hsla> { Some(rgb(value).into()) };
+            // « 1 » is byte 13 of the deletion, column 20 after its tab.
+            assert_eq!(view.rows[1].original.find('1'), Some(13));
+            assert_eq!(
+                background(view, 1, 20..21),
+                color(view.palette.deletion_word_bg)
+            );
+            assert_eq!(
+                background(view, 3, 20..21),
+                color(view.palette.addition_word_bg)
+            );
+            assert_eq!(background(view, 1, 0..20), None);
+            view.selection = Some(Selection {
+                side: Side::Unified,
+                anchor: Position { row: 1, byte: 0 },
+                head: Position { row: 1, byte: 16 },
+            });
+            assert_eq!(background(view, 1, 20..21), color(view.palette.selection));
+        });
+    }
+
     #[gpui_kit::test]
     fn a_restored_reading_position_applies_only_to_its_own_diff(cx: &mut gpui_kit::TestAppContext) {
-        use super::CodeView;
+        use super::{CodeView, Highlights};
         use gpui_kit::{AppContext, WindowOptions, px};
         use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
         use std::sync::Arc;
@@ -2414,7 +3158,7 @@ mod tests {
                     header: "@@ -0,0 +1,400 @@".into(),
                     lines: (1..=400)
                         .map(|line| DiffLine {
-                            kind: "add".into(),
+                            kind: "addition".into(),
                             old_line: None,
                             new_line: Some(line),
                             content: format!("line {line}"),
@@ -2434,7 +3178,7 @@ mod tests {
         let show = |cx: &mut gpui_kit::TestAppContext, path: &'static str| {
             cx.update_window(cx.windows()[0], |_, window, cx| {
                 view.update(cx, |view, cx| {
-                    view.set_prepared_diff(diff(), path.into(), Arc::default(), window, cx)
+                    view.set_prepared_diff(diff(), path.into(), Highlights::default(), window, cx)
                 })
             })
             .unwrap();
@@ -2443,11 +3187,14 @@ mod tests {
             cx.read(|cx| view.read(cx).scroll.vertical_offset())
         };
         show(cx, "a.rs");
-        let position = view.update(cx, |view, _| {
+        let (position, read) = view.update(cx, |view, _| {
             view.scroll.scroll_vertical_to(px(900.));
-            view.reading_position().unwrap()
+            (
+                view.reading_position().unwrap(),
+                view.scroll.vertical_offset(),
+            )
         });
-        assert!(top(cx) > px(0.));
+        assert!(read > px(0.));
 
         // Another file shown first drops the position instead of moving it.
         view.update(cx, |view, _| {
@@ -2462,6 +3209,709 @@ mod tests {
             view.restore_reading_position(position.clone())
         });
         show(cx, "a.rs");
-        assert_eq!(top(cx), position.top);
+        assert_eq!(top(cx), read);
+    }
+
+    #[gpui_kit::test]
+    fn switching_layouts_keeps_the_line_read_and_leaves_one_sided_diffs_unified(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{CodeView, Highlights, SplitBlocker};
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::{AppContext, ListOffset, WindowOptions, px};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, content: String| DiffLine {
+            kind: kind.into(),
+            old_line: Some(1),
+            new_line: Some(1),
+            content,
+        };
+        // 200 blocks of two edited pairs, each followed by a context line:
+        // unified row 1 + 5n is a deletion shown on split row 1 + 3n.
+        let edited = Arc::new(FileDiff {
+            binary: false,
+            oversized: None,
+            truncated: false,
+            additions: 400,
+            deletions: 400,
+            hunks: vec![DiffHunk {
+                header: "@@ -1,600 +1,600 @@".into(),
+                lines: (0..200)
+                    .flat_map(|n| {
+                        [
+                            line("deletion", format!("let first_{n} = {n};")),
+                            line("deletion", format!("let second_{n} = {n};")),
+                            line("addition", format!("let first_{n} = {};", n + 1)),
+                            line("addition", format!("let second_{n} = {};", n + 1)),
+                            line("context", format!("// block {n}")),
+                        ]
+                    })
+                    .collect(),
+            }],
+        });
+        let added = Arc::new(FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -0,0 +1,2 @@".into(),
+                lines: vec![
+                    line("addition", "new".into()),
+                    line("addition", "file".into()),
+                ],
+            }],
+            ..FileDiff::default()
+        });
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let show = |cx: &mut gpui_kit::TestAppContext, diff: &Arc<FileDiff>| {
+            let diff = diff.clone();
+            cx.update_window(cx.windows()[0], |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.set_prepared_diff(diff, "a.rs".into(), Highlights::default(), window, cx)
+                })
+            })
+            .unwrap();
+        };
+        let update = |cx: &mut gpui_kit::TestAppContext,
+                      change: &dyn Fn(
+            &mut CodeView,
+            &mut gpui_kit::Window,
+            &mut gpui_kit::Context<CodeView>,
+        )| {
+            cx.update_window(cx.windows()[0], |_, window, cx| {
+                view.update(cx, |view, cx| change(view, window, cx))
+            })
+            .unwrap();
+        };
+        let prefer = |view: &mut CodeView,
+                      layout,
+                      window: &mut gpui_kit::Window,
+                      cx: &mut gpui_kit::Context<CodeView>| {
+            view.set_preferences(
+                Preferences {
+                    diff_layout: layout,
+                    ..Preferences::default()
+                },
+                cx,
+            );
+            view.update_layout(window, cx);
+        };
+        show(cx, &edited);
+        update(cx, &|view, window, cx| {
+            view.set_split_host(true, cx);
+            view.list.scroll_to(ListOffset {
+                item_ix: 301,
+                offset_in_item: px(4.),
+            });
+            view.selection = Some(Selection {
+                side: Side::Unified,
+                anchor: Position { row: 301, byte: 0 },
+                head: Position { row: 302, byte: 3 },
+            });
+            prefer(view, DiffLayout::Split, window, cx);
+            assert_eq!(view.item_count(), 601);
+            assert_eq!(view.list.logical_scroll_top().item_ix, 181);
+            near(view.list.logical_scroll_top().offset_in_item, 4.);
+            assert_eq!(view.anchor().0, 301);
+            assert!(view.selection.is_none());
+            assert_eq!(view.hunk_rows, [0]);
+            prefer(view, DiffLayout::Unified, window, cx);
+            assert_eq!(view.item_count(), 1_001);
+            assert_eq!(view.list.logical_scroll_top().item_ix, 301);
+            // The compact view keeps the unified layout.
+            view.set_split_host(false, cx);
+            prefer(view, DiffLayout::Split, window, cx);
+            assert!(view.split.is_none());
+            view.set_split_host(true, cx);
+            view.update_layout(window, cx);
+            assert!(view.split.is_some());
+        });
+        // A file added from nothing has a single side to show.
+        show(cx, &added);
+        view.update(cx, |view, _| {
+            assert!(view.split.is_none());
+            assert_eq!(view.split_blocker(), Some(SplitBlocker::OneSide));
+        });
+        show(cx, &edited);
+        view.update(cx, |view, _| assert!(view.split.is_some()));
+    }
+
+    /// A code view in a test window, showing `diff` centrally with the
+    /// side-by-side preference.
+    fn split_view(
+        cx: &mut gpui_kit::TestAppContext,
+        diff: Arc<mangrove_core::model::FileDiff>,
+    ) -> gpui_kit::Entity<super::CodeView> {
+        use super::{CodeView, Highlights};
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::{AppContext, WindowOptions};
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        in_window(cx, &view, |view, window, cx| {
+            view.set_split_host(true, cx);
+            view.set_preferences(
+                Preferences {
+                    diff_layout: DiffLayout::Split,
+                    ..Preferences::default()
+                },
+                cx,
+            );
+            view.set_prepared_diff(diff, "a.rs".into(), Highlights::default(), window, cx);
+        });
+        view
+    }
+
+    fn in_window<R>(
+        cx: &mut gpui_kit::TestAppContext,
+        view: &gpui_kit::Entity<super::CodeView>,
+        change: impl FnOnce(
+            &mut super::CodeView,
+            &mut gpui_kit::Window,
+            &mut gpui_kit::Context<super::CodeView>,
+        ) -> R,
+    ) -> R {
+        use gpui_kit::AppContext;
+        cx.update_window(cx.windows()[0], |_, window, cx| {
+            view.update(cx, |view, cx| change(view, window, cx))
+        })
+        .unwrap()
+    }
+
+    /// 20 numbered context lines around an edited pair, then an added file.
+    fn numbered_patches() -> (
+        Arc<mangrove_core::model::FileDiff>,
+        Arc<mangrove_core::model::FileDiff>,
+    ) {
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, number: u32, content: String| DiffLine {
+            kind: kind.into(),
+            old_line: (kind != "addition").then_some(number),
+            new_line: (kind != "deletion").then_some(number),
+            content,
+        };
+        let edited = FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -10,41 +10,41 @@".into(),
+                lines: (10..30)
+                    .map(|n| line("context", n, format!("context line {n}")))
+                    .chain([
+                        line("deletion", 30, "let value = 1;".into()),
+                        line("addition", 30, "let value = 2;".into()),
+                    ])
+                    .chain((31..50).map(|n| line("context", n, format!("context line {n}"))))
+                    .collect(),
+            }],
+            ..FileDiff::default()
+        };
+        let added = FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -0,0 +10,2 @@".into(),
+                lines: (10..12)
+                    .map(|n| line("addition", n, format!("added line {n}")))
+                    .collect(),
+            }],
+            ..FileDiff::default()
+        };
+        (Arc::new(edited), Arc::new(added))
+    }
+
+    #[gpui_kit::test]
+    fn the_header_toggle_follows_the_preference_and_the_width_at_once(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{CodeViewEvent, SplitBlocker};
+        use crate::preferences::{DiffLayout, Preferences};
+        let (edited, _) = numbered_patches();
+        let view = split_view(cx, edited);
+        let switches = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = switches.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &CodeViewEvent, _| {
+                if matches!(event, CodeViewEvent::LayoutSwitched) {
+                    counted.set(counted.get() + 1);
+                }
+            })
+        });
+        // The toggle's state, and the text its tooltip reads, even while it
+        // stays shown under the pointer.
+        let state = |cx: &mut gpui_kit::TestAppContext| {
+            in_window(cx, &view, |view, window, cx| {
+                let state = view.layout_state(window, cx);
+                view.layout_controls(window, cx);
+                (state, view.layout_tooltip.borrow().to_string())
+            })
+        };
+        let unified = "Afficher le diff unifié".to_owned();
+        assert_eq!(state(cx), (Some((true, None)), unified.clone()));
+        // A preference changed from the palette shows on the next header.
+        in_window(cx, &view, |view, _, cx| {
+            view.set_preferences(Preferences::default(), cx)
+        });
+        assert_eq!(
+            state(cx),
+            (Some((false, None)), "Afficher le diff côte à côte".into())
+        );
+        in_window(cx, &view, |view, _, cx| {
+            view.set_preferences(
+                Preferences {
+                    diff_layout: DiffLayout::Split,
+                    ..Preferences::default()
+                },
+                cx,
+            )
+        });
+        assert_eq!(state(cx), (Some((true, None)), unified.clone()));
+        // A narrow view falls back to unified, with the toggle disabled.
+        let minimum = view.read_with(cx, |view, _| view.split_minimum());
+        resize_window(cx, &view, minimum - 10.);
+        assert_eq!(
+            state(cx),
+            (
+                Some((false, Some(SplitBlocker::Narrow))),
+                SplitBlocker::Narrow.reason().into()
+            )
+        );
+        resize_window(cx, &view, minimum + 60.);
+        assert_eq!(state(cx), (Some((true, None)), unified));
+        cx.run_until_parked();
+        assert_eq!(switches.get(), 4);
+    }
+
+    /// Resizes the test window, then lets the view measure itself and lay
+    /// out again on its next frame.
+    fn resize_window(
+        cx: &mut gpui_kit::TestAppContext,
+        view: &gpui_kit::Entity<super::CodeView>,
+        width: f32,
+    ) -> bool {
+        use gpui_kit::{AppContext, px, size};
+        let window = cx.windows()[0];
+        cx.simulate_window_resize(window, size(px(width), px(800.)));
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+        }
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| view.split.is_some())
+    }
+
+    #[gpui_kit::test]
+    fn the_width_decision_survives_files_shown_unified_for_another_reason(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (edited, added) = numbered_patches();
+        let view = split_view(cx, edited.clone());
+        // Before its first paint, a view's width is unknown and does not decide.
+        assert!(view.read_with(cx, |view, _| view.split.is_some()));
+        // The layout of a newly shown file, before any later frame.
+        let show = |cx: &mut gpui_kit::TestAppContext,
+                    diff: Arc<mangrove_core::model::FileDiff>| {
+            in_window(cx, &view, |view, window, cx| {
+                view.set_prepared_diff(
+                    diff,
+                    "a.rs".into(),
+                    super::Highlights::default(),
+                    window,
+                    cx,
+                );
+                view.split.is_some()
+            })
+        };
+        // The view takes the window's width but its border: about 705 px are
+        // needed for two columns of 40 characters, 737 to enter them.
+        let minimum = view.read_with(cx, |view, _| view.split_minimum());
+        assert!((700. ..720.).contains(&minimum), "{minimum}");
+        let resize = |cx: &mut gpui_kit::TestAppContext, view_width: f32| {
+            resize_window(cx, &view, view_width + 2.)
+        };
+        assert!(resize(cx, minimum + 40.));
+        let measured = view.read_with(cx, |view, _| view.viewport_width.get());
+        assert!((measured - minimum - 40.).abs() < 1., "{measured}");
+        // Leaving needs to fall below the minimum; entering needs 32 px more.
+        assert!(resize(cx, minimum + 10.));
+        assert!(!resize(cx, minimum - 10.));
+        assert!(!resize(cx, minimum + 10.));
+        assert!(resize(cx, minimum + 40.));
+        // Inside that band, an added file between two edited ones does not
+        // reset the decision of the first.
+        assert!(resize(cx, minimum + 10.));
+        assert!(!show(cx, added));
+        assert!(show(cx, edited));
+        // A known narrow width keeps the next file unified from its first
+        // layout, without flashing side by side.
+        assert!(!resize(cx, minimum - 10.));
+        assert!(!show(cx, numbered_patches().0));
+    }
+
+    #[gpui_kit::test]
+    fn a_reading_position_restored_in_a_split_diff_finds_its_line(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{ListOffset, px};
+        let view = split_view(cx, numbered_patches().0);
+        let position = in_window(cx, &view, |view, _, _| {
+            assert!(view.split.is_some());
+            // Split row 21 shows the edited pair, unified rows 21 and 22:
+            // later split rows show the unified row after them.
+            view.list.scroll_to(ListOffset {
+                item_ix: 30,
+                offset_in_item: px(3.),
+            });
+            view.reading_position().unwrap()
+        });
+        assert_eq!((position.row, position.offset), (31, px(3.)));
+        // Shown again unified, then side by side, the same line is on top.
+        let show = |cx: &mut gpui_kit::TestAppContext, layout| {
+            let (diff, position) = (numbered_patches().0, position.clone());
+            in_window(cx, &view, |view, window, cx| {
+                view.set_preferences(
+                    crate::preferences::Preferences {
+                        diff_layout: layout,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                view.restore_reading_position(position);
+                view.set_prepared_diff(
+                    diff,
+                    "a.rs".into(),
+                    super::Highlights::default(),
+                    window,
+                    cx,
+                );
+                let top = view.list.logical_scroll_top();
+                (top.item_ix, top.offset_in_item)
+            })
+        };
+        assert_eq!(
+            show(cx, crate::preferences::DiffLayout::Unified),
+            (31, px(3.))
+        );
+        assert_eq!(
+            show(cx, crate::preferences::DiffLayout::Split),
+            (30, px(3.))
+        );
+    }
+
+    /// Presses then releases a key on the focused element. Unlike
+    /// `TestWindowExt::press`, the requests of the key down are applied and
+    /// drawn before the key up, as between two platform events.
+    fn press(cx: &mut gpui_kit::TestAppContext, window: gpui_kit::AnyWindowHandle, key: &str) {
+        use gpui_kit::{AppContext, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke};
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            let down = KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            window.dispatch_event(down.to_platform_input(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// A diff header that applies its buttons' requests, as the file
+    /// browser and the inspector do.
+    struct DiffHeader {
+        viewer: gpui_kit::Entity<super::CodeView>,
+    }
+
+    impl gpui_kit::Render for DiffHeader {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{ParentElement, Styled, div};
+            let (layout, hunks, font) = self.viewer.update(cx, |viewer, cx| {
+                (
+                    viewer.layout_controls(window, cx),
+                    viewer.hunk_controls(cx),
+                    viewer.font_controls(window, cx),
+                )
+            });
+            div()
+                .size_full()
+                .children(layout)
+                .child(hunks)
+                .child(font)
+                .child(self.viewer.clone())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn header_buttons_act_once_per_key_press_and_keep_the_focus(cx: &mut gpui_kit::TestAppContext) {
+        use super::{CodeView, CodeViewEvent, Highlights};
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::{AppContext, WindowOptions};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let hunk = |start: u32| DiffHunk {
+            header: format!("@@ -{start},2 +{start},2 @@"),
+            lines: [
+                ("context", "fn main() {}"),
+                ("deletion", "let a = 1;"),
+                ("addition", "let a = 2;"),
+            ]
+            .map(|(kind, content)| DiffLine {
+                kind: kind.into(),
+                old_line: (kind != "addition").then_some(start),
+                new_line: (kind != "deletion").then_some(start),
+                content: content.into(),
+            })
+            .into(),
+        };
+        let diff = Arc::new(FileDiff {
+            hunks: vec![hunk(10), hunk(40), hunk(70)],
+            ..FileDiff::default()
+        });
+        cx.update(gpui_kit::init);
+        let (window, header) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let viewer = cx.new(|cx| CodeView::new(window, cx));
+                cx.new(|_| DiffHeader { viewer })
+            })
+            .unwrap()
+        });
+        let viewer = cx.read(|cx| header.read(cx).viewer.clone());
+        let preferences = std::rc::Rc::new(std::cell::RefCell::new(Preferences {
+            diff_layout: DiffLayout::Split,
+            ..Preferences::default()
+        }));
+        cx.update_window(window, |_, window, cx| {
+            viewer.update(cx, |view, cx| {
+                view.set_split_host(true, cx);
+                view.set_preferences(preferences.borrow().clone(), cx);
+                view.set_prepared_diff(diff, "a.rs".into(), Highlights::default(), window, cx);
+            })
+        })
+        .unwrap();
+        let applied = preferences.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&viewer, move |viewer, event: &CodeViewEvent, cx| {
+                let preferences = {
+                    let mut preferences = applied.borrow_mut();
+                    match event {
+                        CodeViewEvent::LayoutChanged(layout) => preferences.diff_layout = *layout,
+                        CodeViewEvent::FontSizeChanged(size) => preferences.diff_font_size = *size,
+                        _ => return,
+                    }
+                    preferences.clone()
+                };
+                viewer.update(cx, |view, cx| view.set_preferences(preferences, cx));
+            })
+        });
+        cx.run_until_parked();
+        let split = |cx: &mut gpui_kit::TestAppContext| {
+            viewer.read_with(cx, |view, _| view.split.is_some())
+        };
+        assert!(split(cx));
+        // Tab reaches the layout toggle first; each press switches once.
+        let focused = cx
+            .update_window(window, |_, window, cx| {
+                window.focus_next(cx);
+                window.focused(cx)
+            })
+            .unwrap();
+        assert!(focused.is_some());
+        let focus = |cx: &mut gpui_kit::TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.focused(cx))
+                .unwrap()
+        };
+        press(cx, window, "enter");
+        assert!(!split(cx));
+        assert_eq!(focus(cx), focused);
+        press(cx, window, "space");
+        assert!(split(cx));
+        assert_eq!(focus(cx), focused);
+        // The next hunk and font buttons also take one step per press.
+        let tab = |cx: &mut gpui_kit::TestAppContext, stops: usize| {
+            cx.update_window(window, |_, window, cx| {
+                for _ in 0..stops {
+                    window.focus_next(cx);
+                }
+            })
+            .unwrap()
+        };
+        tab(cx, 2);
+        press(cx, window, "enter");
+        let (line, second) = viewer.read_with(cx, |view, _| (view.active_line, view.hunk_rows[1]));
+        assert_eq!(line, second);
+        let size = preferences.borrow().diff_font_size;
+        tab(cx, 2);
+        press(cx, window, "enter");
+        assert_eq!(preferences.borrow().diff_font_size, size + 1.);
+    }
+
+    #[gpui_kit::test]
+    fn a_split_diff_selects_and_copies_one_side_without_its_empty_cells(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{CodeView, Highlights};
+        use crate::preferences::{DiffLayout, Preferences};
+        use gpui_kit::{AppContext, KeyDownEvent, Keystroke, WindowOptions};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, old: Option<u32>, new: Option<u32>, content: &str| DiffLine {
+            kind: kind.into(),
+            old_line: old,
+            new_line: new,
+            content: content.into(),
+        };
+        // Split rows: the header, context, the edited pair, the added line
+        // beside an empty cell, context.
+        let diff = Arc::new(FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -1,3 +1,4 @@".into(),
+                lines: vec![
+                    line("context", Some(1), Some(1), "fn main() {"),
+                    line("deletion", Some(2), None, "    let total = 1;"),
+                    line("addition", None, Some(2), "    let total = 2;"),
+                    line("addition", None, Some(3), "    println!(\"{total}\");"),
+                    line("context", Some(3), Some(4), "}"),
+                ],
+            }],
+            ..FileDiff::default()
+        });
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| CodeView::new(window, cx))
+            })
+            .unwrap()
+            .1
+        });
+        let window = cx.windows()[0];
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_split_host(true, cx);
+                view.set_preferences(
+                    Preferences {
+                        diff_layout: DiffLayout::Split,
+                        ..Preferences::default()
+                    },
+                    cx,
+                );
+                view.set_prepared_diff(diff, "a.rs".into(), Highlights::default(), window, cx);
+            })
+        })
+        .unwrap();
+        let press = |cx: &mut gpui_kit::TestAppContext, keys: &str| {
+            let event = KeyDownEvent {
+                keystroke: Keystroke::parse(keys).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            };
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| view.keydown(&event, window, cx))
+            })
+            .unwrap();
+        };
+        let copied =
+            |cx: &mut gpui_kit::TestAppContext| cx.read(|cx| view.read(cx).selected_text());
+        view.update(cx, |view, _| assert_eq!(view.item_count(), 5));
+        // Select all reads the new side unless the caret is on the old one.
+        press(cx, "cmd-a");
+        assert_eq!(
+            copied(cx),
+            "@@ -1,3 +1,4 @@\nfn main() {\n    let total = 2;\n    println!(\"{total}\");\n}"
+        );
+        view.update(cx, |view, _| {
+            view.selection = Some(Selection::caret(Side::Old, Position { row: 1, byte: 0 }));
+        });
+        // Arrows skip the old side's empty cell beside the added line.
+        press(cx, "shift-down");
+        press(cx, "shift-down");
+        view.update(cx, |view, _| {
+            assert_eq!(view.selection.unwrap().head, Position { row: 4, byte: 0 });
+            assert_eq!(view.active_line, 4);
+        });
+        assert_eq!(copied(cx), "fn main() {\n    let total = 1;\n");
+        press(cx, "cmd-a");
+        assert_eq!(
+            copied(cx),
+            "@@ -1,3 +1,4 @@\nfn main() {\n    let total = 1;\n}"
+        );
+        // Changing the layout drops a selection of one side.
+        in_window(cx, &view, |view, window, cx| {
+            view.set_split_host(false, cx);
+            view.update_layout(window, cx);
+            assert!(view.selection.is_none());
+        });
+    }
+    #[gpui_kit::test]
+    fn a_drag_from_the_old_column_selects_only_the_text_it_shows(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, point, px};
+        use mangrove_core::model::{DiffHunk, DiffLine, FileDiff};
+        let line = |kind: &str, content: String| DiffLine {
+            kind: kind.into(),
+            old_line: (kind == "deletion").then_some(1),
+            new_line: (kind == "addition").then_some(1),
+            content,
+        };
+        // Lines longer than a column: the old side's text continues hidden.
+        let words = "word ".repeat(120);
+        let diff = Arc::new(FileDiff {
+            hunks: vec![DiffHunk {
+                header: "@@ -1 +1 @@".into(),
+                lines: vec![
+                    line("deletion", format!("old {words}")),
+                    line("addition", format!("new {words}")),
+                ],
+            }],
+            ..FileDiff::default()
+        });
+        let view = split_view(cx, diff);
+        // Drawn in a real window, the pair on split row 1 has a layout per side.
+        assert!(resize_window(cx, &view, 1_200.));
+        let (bounds, visible, advance) = view.read_with(cx, |view, _| {
+            let layouts = view.layouts.borrow();
+            let old = &layouts[&(1, Side::Old)];
+            (old.bounds, old.visible, old.line.x_for_index(1))
+        });
+        assert!(visible.right() < bounds.right());
+        let y = bounds.center().y;
+        in_window(cx, &view, |view, window, cx| {
+            let down = MouseDownEvent {
+                position: point(visible.left() + px(1.), y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            };
+            view.begin_selection(1, Side::Old, &down, window, cx);
+            // The pointer goes far into the new column.
+            let drag = MouseMoveEvent {
+                position: point(visible.right() + px(300.), y),
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::default(),
+            };
+            view.drag_selection(&drag, window, cx);
+        });
+        let copied = view.read_with(cx, |view, _| view.selected_text());
+        assert!(copied.starts_with("old word"), "{copied}");
+        let shown = (visible.size.width / advance).round() as usize;
+        assert!(
+            copied.chars().count() <= shown + 1,
+            "{} > {shown}",
+            copied.len()
+        );
     }
 }

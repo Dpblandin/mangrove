@@ -1073,6 +1073,10 @@ impl Mangrove {
                 chrome.preferences.set_diff_font_size(*size);
                 chrome.prefs_changed(window, cx);
             }),
+            InspectorEvent::DiffLayoutChanged(layout) => self.chrome.update(cx, |chrome, cx| {
+                chrome.preferences.diff_layout = *layout;
+                chrome.prefs_changed(window, cx);
+            }),
             InspectorEvent::WorkingTreeCounts(counts) => self.history.update(cx, |view, cx| {
                 view.set_working_tree_counts(counts.clone(), cx)
             }),
@@ -1287,6 +1291,7 @@ impl Mangrove {
                     .as_ref()
                     .is_some_and(|perf| path.ends_with(perf.heavy_file()))
             }),
+            diff_split: inspector.benchmark_split(cx),
             file_count: inspector.details().map_or(0, |details| details.files.len()),
             history_total: history.total(),
             diff_rows,
