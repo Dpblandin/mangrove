@@ -118,6 +118,17 @@ fn whole_number(number: f64, minimum: u32, maximum: u32) -> Option<u32> {
     .then_some(number as u32)
 }
 
+/// Writes `value` beside `path` first, so that a reader never sees half a file.
+pub(crate) fn save_json(value: &impl Serialize, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&temporary, data)?;
+    fs::rename(&temporary, path)
+}
+
 fn bounded(value: f32, minimum: f32, maximum: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value.round().clamp(minimum, maximum)
@@ -257,13 +268,7 @@ impl Preferences {
         result
     }
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let data = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        fs::write(&temporary, data)?;
-        fs::rename(&temporary, path)
+        save_json(self, path)
     }
     pub fn palette(&self) -> Palette {
         Palette::for_theme(self.theme)
