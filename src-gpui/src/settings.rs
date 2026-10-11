@@ -9,6 +9,7 @@ use crate::{
         MIN_FONT_SIZE_OFFSET, MIN_PREVIEW_LIMIT, Preferences, parse_whole_number,
     },
     theme::{Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, scrollbar_theme},
+    updates::{UpdateStatus, Updater},
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
@@ -27,8 +28,8 @@ use gpui_kit::{
 use mangrove_core::model::PreviewLimit;
 use std::time::Duration;
 use ui::{
-    CONTENT_MAX_WIDTH, NAV_WIDTH, PAGE_GAP, PAGE_PADDING, Tone, card, card_title, field_border,
-    link_action, nav_item, note, page_header,
+    CONTENT_MAX_WIDTH, NAV_WIDTH, PAGE_GAP, PAGE_PADDING, Tone, action, card, card_title,
+    field_border, footnote, link_action, nav_item, note, page_header, primary_action, progress_bar,
 };
 
 /// A typing pause after which a valid number draft is applied.
@@ -47,13 +48,16 @@ pub enum SettingsEvent {
     PreviewLimitChanged(u32),
     FontSizeChanged(f32),
     DiffFontSizeChanged(f32),
+    UpdateChecksChanged(bool),
+    UpdateInstallsChanged(bool),
+    RestartToUpdate,
 }
 
 impl SettingsEvent {
     /// The control whose change this event saves.
     pub fn field(&self) -> Option<SettingsField> {
         match self {
-            Self::Back => None,
+            Self::Back | Self::RestartToUpdate => None,
             Self::ThemeChanged(_) => Some(SettingsField::Theme),
             Self::IntervalChanged(_) => Some(SettingsField::Interval),
             Self::ImagePreviewsChanged(_) => Some(SettingsField::ImagePreviews),
@@ -61,6 +65,8 @@ impl SettingsEvent {
             Self::PreviewLimitChanged(_) => Some(SettingsField::PreviewLimit),
             Self::FontSizeChanged(_) => Some(SettingsField::FontSize),
             Self::DiffFontSizeChanged(_) => Some(SettingsField::DiffFontSize),
+            Self::UpdateChecksChanged(_) => Some(SettingsField::UpdateChecks),
+            Self::UpdateInstallsChanged(_) => Some(SettingsField::UpdateInstalls),
         }
     }
 }
@@ -74,6 +80,8 @@ pub enum SettingsField {
     LargePreviews,
     PreviewLimit,
     Interval,
+    UpdateChecks,
+    UpdateInstalls,
 }
 
 /// A whole number typed in a field with − and + steps.
@@ -185,10 +193,17 @@ pub enum SettingsSection {
     Profiles,
     Ssh,
     Integrations,
+    Updates,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 4] = [Self::General, Self::Profiles, Self::Ssh, Self::Integrations];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Profiles,
+        Self::Ssh,
+        Self::Integrations,
+        Self::Updates,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -196,6 +211,7 @@ impl SettingsSection {
             Self::Profiles => "Profils",
             Self::Ssh => "SSH",
             Self::Integrations => "Intégrations",
+            Self::Updates => "Mises à jour",
         }
     }
 
@@ -205,6 +221,7 @@ impl SettingsSection {
             Self::Profiles => IconName::Users,
             Self::Ssh => IconName::KeyRound,
             Self::Integrations => IconName::Plug,
+            Self::Updates => IconName::CircleFadingArrowUp,
         }
     }
 
@@ -214,6 +231,7 @@ impl SettingsSection {
             Self::Profiles => "profiles",
             Self::Ssh => "ssh",
             Self::Integrations => "integrations",
+            Self::Updates => "updates",
         }
     }
 
@@ -223,11 +241,17 @@ impl SettingsSection {
             .position(|section| *section == self)
             .unwrap_or(0)
     }
+
+    /// The integrations view draws the other sections.
+    fn own_page(self) -> bool {
+        matches!(self, Self::General | Self::Updates)
+    }
 }
 
 pub struct SettingsView {
     section: SettingsSection,
     integrations: Option<Entity<IntegrationsView>>,
+    updater: Option<Entity<Updater>>,
     interval: NumberField,
     preview_limit: NumberField,
     show_image_previews: bool,
@@ -236,7 +260,7 @@ pub struct SettingsView {
     theme_select: Entity<SelectState<SearchableVec<&'static str>>>,
     scroll: ScrollHandle,
     focus_handle: FocusHandle,
-    navigation: [FocusHandle; 4],
+    navigation: [FocusHandle; SettingsSection::ALL.len()],
     palette: Palette,
     font_size_offset: f32,
     /// The last saved control, or why it could not be saved.
@@ -294,6 +318,7 @@ impl SettingsView {
         Self {
             section: SettingsSection::General,
             integrations: None,
+            updater: None,
             interval,
             preview_limit,
             show_image_previews: preferences.show_image_previews,
@@ -320,6 +345,13 @@ impl SettingsView {
         cx.notify();
     }
 
+    pub fn set_updater(&mut self, updater: Entity<Updater>, cx: &mut Context<Self>) {
+        self._subscriptions
+            .push(cx.observe(&updater, |_, _, cx| cx.notify()));
+        self.updater = Some(updater);
+        cx.notify();
+    }
+
     /// Shows `section` and gives the keyboard to its navigation entry, so
     /// that opening a section never lands in a field further down the page.
     pub fn select_section(
@@ -334,7 +366,7 @@ impl SettingsView {
             self.scroll.set_offset(point(px(0.), px(0.)));
             self.saved = None;
         }
-        if section == SettingsSection::General {
+        if section.own_page() {
             self.leave(window, cx);
         } else if let Some(integrations) = &self.integrations {
             integrations.update(cx, |view, cx| {
@@ -984,27 +1016,12 @@ impl SettingsView {
         let auto_fetch = card(p)
             .child(card_title("Auto-fetch", offset))
             .child(setting_row("Intervalle", None, interval, p, offset))
-            .child(
-                div()
-                    .pt(px(16.))
-                    .border_t_1()
-                    .border_color(rgb(p.border))
-                    .flex()
-                    .items_start()
-                    .gap(px(8.))
-                    .text_size(px(11. + offset))
-                    .line_height(relative(1.6))
-                    .text_color(rgb(p.muted))
-                    .child(
-                        div()
-                            .flex_none()
-                            .mt(px(2.))
-                            .child(icon(IconName::TriangleAlert, 13., p.muted)),
-                    )
-                    .child(div().flex_1().min_w_0().whitespace_normal().child(
-                        "De nombreux remotes peuvent ralentir l’application. Les objets LFS ne sont pas récupérés automatiquement.",
-                    )),
-            );
+            .child(footnote(
+                IconName::TriangleAlert,
+                "De nombreux remotes peuvent ralentir l’application. Les objets LFS ne sont pas récupérés automatiquement.",
+                p,
+                offset,
+            ));
         div()
             .w_full()
             .min_w_0()
@@ -1024,6 +1041,168 @@ impl SettingsView {
             .child(appearance)
             .child(previews)
             .child(auto_fetch)
+    }
+
+    fn updates_content(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.palette;
+        let offset = self.font_size_offset;
+        let Some(updater) = self.updater.as_ref().map(|updater| updater.read(cx)) else {
+            return div();
+        };
+        let settings = updater.settings();
+        let (tone, message) = update_feedback(updater);
+        let status = updater.status().clone();
+        let installable = updater.installable().map(|release| release.version);
+        let (busy, current) = (updater.busy(), updater.current());
+        let not_installable = updater.not_installable();
+        let release = status.release().cloned();
+        let ready = matches!(status, UpdateStatus::Ready(_));
+        let progress = match status {
+            UpdateStatus::Downloading {
+                received, total, ..
+            } if total > 0 => Some(received as f32 / total as f32),
+            _ => None,
+        };
+        let main_action = if ready {
+            Some(
+                primary_action("update-restart", "Redémarrer maintenant", p, offset)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::RestartToUpdate))),
+            )
+        } else if matches!(status, UpdateStatus::Downloading { .. }) {
+            Some(
+                action("update-cancel", "Annuler le téléchargement", p, offset).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.update_with(cx, |updater, _| updater.cancel())
+                    }),
+                ),
+            )
+        } else {
+            installable.map(|version| {
+                primary_action(
+                    "update-install",
+                    &format!("Installer Mangrove {version}"),
+                    p,
+                    offset,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.update_with(cx, |updater, cx| updater.install(cx))
+                }))
+            })
+        };
+        let notes = release.map(|release| {
+            link_action("update-notes", "Notes de version", p, offset)
+                .on_click(move |_, _, cx| cx.open_url(release.page.as_str()))
+        });
+        let has_actions = main_action.is_some() || notes.is_some();
+        let version = card(p)
+            .child(card_title("Version", offset))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(240.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(px(15. + offset))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(format!("Mangrove {current}")),
+                            )
+                            .child(ui::feedback(tone, message, p, offset)),
+                    )
+                    .child(
+                        action("update-check", "Rechercher les mises à jour", p, offset)
+                            .disabled(busy || ready)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_with(cx, |updater, cx| updater.check(cx))
+                            })),
+                    ),
+            )
+            .when_some(progress, |card, fraction| {
+                card.child(progress_bar(fraction, p))
+            })
+            .when(has_actions, |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .children(main_action)
+                        .children(notes),
+                )
+            });
+        let checks = self.switch_row(
+            "update-checks",
+            "Rechercher automatiquement",
+            "Au lancement de Mangrove, puis toutes les six heures, dans les releases GitHub de Mangrove.",
+            (settings.check_automatically, SettingsField::UpdateChecks),
+            |_, checked| SettingsEvent::UpdateChecksChanged(checked),
+            cx,
+        );
+        let installs = self.switch_row(
+            "update-installs",
+            "Installer automatiquement",
+            "Télécharge la nouvelle version en arrière-plan, vérifie sa signature puis remplace l’application. Elle s’ouvre au prochain lancement, ou tout de suite avec Redémarrer.",
+            (settings.install_automatically, SettingsField::UpdateInstalls),
+            |_, checked| SettingsEvent::UpdateInstallsChanged(checked),
+            cx,
+        );
+        let automation = card(p)
+            .gap(px(20.))
+            .child(card_title("Automatisation", offset))
+            .child(checks)
+            .child(installs)
+            .when_some(not_installable, |card, reason| {
+                card.child(footnote(
+                    IconName::Info,
+                    format!("{reason} Les nouvelles versions restent signalées, avec leur page."),
+                    p,
+                    offset,
+                ))
+            })
+            .when(cfg!(target_os = "macos") && not_installable.is_none(), |card| {
+                card.child(footnote(
+                    IconName::TriangleAlert,
+                    "Chaque version a sa propre signature ad hoc : après une mise à jour, macOS peut redemander l’accès aux jetons des intégrations enregistrés dans le trousseau.",
+                    p,
+                    offset,
+                ))
+            });
+        div()
+            .w_full()
+            .min_w_0()
+            .max_w(px(CONTENT_MAX_WIDTH))
+            .mx_auto()
+            .flex()
+            .flex_col()
+            .gap(px(PAGE_GAP))
+            .child(page_header(
+                "Mises à jour",
+                "Communes à tous les profils. Une archive n’est installée qu’après la vérification de sa signature.",
+                p,
+                offset,
+            ))
+            .child(version)
+            .child(automation)
+    }
+
+    fn update_with(
+        &self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Updater, &mut Context<Updater>),
+    ) {
+        if let Some(updater) = &self.updater {
+            updater.update(cx, change);
+        }
     }
 }
 
@@ -1185,7 +1364,7 @@ impl Render for SettingsView {
                         .min_w_0()
                         .min_h_0()
                         .overflow_hidden()
-                        .when(self.section == SettingsSection::General, |view| {
+                        .when(self.section.own_page(), |view| {
                             view.child(
                                 div()
                                     .id("settings-scroll-area")
@@ -1195,13 +1374,17 @@ impl Render for SettingsView {
                                     .p(px(PAGE_PADDING))
                                     // The same body size as the other sections.
                                     .text_size(px(12. + offset))
-                                    .child(self.general_content(window, cx)),
+                                    .child(if self.section == SettingsSection::Updates {
+                                        self.updates_content(cx)
+                                    } else {
+                                        self.general_content(window, cx)
+                                    }),
                             )
                             .child(scrollbar_theme(
                                 Scrollbar::vertical(&self.scroll).id("settings-scrollbar"),
                             ))
                         })
-                        .when(self.section != SettingsSection::General, |view| {
+                        .when(!self.section.own_page(), |view| {
                             view.when_some(self.integrations.clone(), |view, integrations| {
                                 view.child(integrations)
                             })
@@ -1238,6 +1421,76 @@ fn setting_row(
                 }),
         )
         .child(div().flex_1().min_w(px(240.)).child(control))
+}
+
+/// Where the update stands, in one sentence.
+fn update_feedback(updater: &Updater) -> (Tone, String) {
+    match updater.status() {
+        UpdateStatus::Idle if updater.settings().check_automatically => (
+            Tone::Info,
+            "Première recherche quelques secondes après le lancement.".into(),
+        ),
+        UpdateStatus::Idle => (Tone::Info, "Aucune recherche depuis le lancement.".into()),
+        UpdateStatus::Checking => (Tone::Progress, "Recherche d’une nouvelle version…".into()),
+        UpdateStatus::UpToDate(time) => (
+            Tone::Success,
+            format!("Mangrove est à jour. Dernière recherche à {time}."),
+        ),
+        UpdateStatus::Available(release) => (
+            Tone::Info,
+            if updater.can_install(release) {
+                format!("Mangrove {} est disponible.", release.version)
+            } else if updater.not_installable().is_some() {
+                format!(
+                    "Mangrove {} est disponible : installez-le depuis sa page.",
+                    release.version
+                )
+            } else {
+                format!(
+                    "Mangrove {} est disponible, sans archive signée pour cette plateforme : installez-le depuis sa page.",
+                    release.version
+                )
+            },
+        ),
+        UpdateStatus::Downloading {
+            release,
+            received,
+            total,
+        } => (
+            Tone::Progress,
+            format!(
+                "Téléchargement de Mangrove {} : {} sur {}.",
+                release.version,
+                byte_size(*received),
+                byte_size(*total)
+            ),
+        ),
+        UpdateStatus::Installing(release) => (
+            Tone::Progress,
+            format!("Installation de Mangrove {}…", release.version),
+        ),
+        UpdateStatus::Ready(release) => (
+            Tone::Success,
+            format!(
+                "Mangrove {} est installé. Il s’ouvrira au prochain lancement.",
+                release.version
+            ),
+        ),
+        UpdateStatus::Failed {
+            error,
+            release: Some(release),
+        } => (
+            Tone::Error,
+            format!(
+                "Mangrove {} n’a pas pu être installé. {error}",
+                release.version
+            ),
+        ),
+        UpdateStatus::Failed {
+            error,
+            release: None,
+        } => (Tone::Error, format!("Recherche impossible. {error}")),
+    }
 }
 
 /// The interface text size relative to the default, in percent.
@@ -1471,9 +1724,9 @@ mod tests {
         keys(cx, window, &["down"]);
         assert_eq!(focus(cx), (Some(1), false));
         keys(cx, window, &["end"]);
-        assert_eq!(focus(cx), (Some(3), false));
+        assert_eq!(focus(cx), (Some(4), false));
         keys(cx, window, &["down"]);
-        assert_eq!(focus(cx), (Some(3), false));
+        assert_eq!(focus(cx), (Some(4), false));
         keys(cx, window, &["home"]);
         assert_eq!(focus(cx), (Some(0), false));
         assert_eq!(

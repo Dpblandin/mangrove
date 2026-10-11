@@ -9,6 +9,7 @@ use crate::{
     settings::SettingsSection,
     tabs::HOME,
     theme::ThemeId,
+    updates::UpdateStatus,
 };
 
 impl Mangrove {
@@ -27,6 +28,8 @@ impl Mangrove {
         let prefs = &chrome.preferences;
         let blocked = (!chrome.can_show_settings(cx))
             .then_some("Un sélecteur ou un redimensionnement est actif");
+        let updater = chrome.updater.read(cx);
+        let ready = matches!(updater.status(), UpdateStatus::Ready(_));
         let mut entries = vec![
             CommandEntry::new(
                 Command::OpenRepository,
@@ -81,6 +84,11 @@ impl Mangrove {
                 SettingsSection::Integrations,
                 "Paramètres : Intégrations",
                 "settings github gitlab bitbucket connexion oauth token",
+            ),
+            (
+                SettingsSection::Updates,
+                "Paramètres : Mises à jour",
+                "settings update version release installer",
             ),
         ] {
             entries.push(
@@ -203,6 +211,28 @@ impl Mangrove {
             } else {
                 format!("Intervalle actuel : {} min", prefs.auto_fetch_interval)
             }),
+            CommandEntry::new(
+                Command::CheckForUpdates,
+                "Rechercher les mises à jour",
+                "Application",
+                "update version release nouvelle installer",
+            )
+            .unavailable(
+                blocked
+                    .or(updater.busy().then_some("Mise à jour en cours"))
+                    .or(ready.then_some("Une mise à jour attend le redémarrage")),
+            ),
+            CommandEntry::new(
+                Command::RestartToUpdate,
+                "Redémarrer pour mettre à jour",
+                "Application",
+                "update restart relancer version mise",
+            )
+            .detail(match updater.status() {
+                UpdateStatus::Ready(release) => format!("Ouvre Mangrove {}", release.version),
+                _ => "Aucune mise à jour installée".into(),
+            })
+            .unavailable((!ready).then_some("Aucune mise à jour installée")),
             CommandEntry::new(
                 Command::Quit,
                 "Quitter Mangrove",
@@ -615,15 +645,13 @@ impl Mangrove {
             Command::BrowseRepositories => {
                 self.chrome_event(&ChromeEvent::BrowseRepositories, window, cx)
             }
-            Command::Settings(section) => {
-                self.chrome_event(&ChromeEvent::ShowSettings, window, cx);
-                if let Some(section) = section {
-                    self.chrome
-                        .read(cx)
-                        .settings
-                        .clone()
-                        .update(cx, |view, cx| view.select_section(*section, window, cx));
-                }
+            Command::Settings(None) => self.chrome_event(&ChromeEvent::ShowSettings, window, cx),
+            Command::Settings(Some(section)) => {
+                self.show_settings_section(*section, window, cx);
+            }
+            Command::CheckForUpdates => self.check_for_updates(window, cx),
+            Command::RestartToUpdate => {
+                self.chrome_event(&ChromeEvent::RestartToUpdate, window, cx)
             }
             Command::Theme(theme) => self
                 .chrome

@@ -55,6 +55,8 @@ pub enum Command {
     ToggleLargePreviews,
     ToggleAutoFetch,
     DismissError,
+    CheckForUpdates,
+    RestartToUpdate,
     Quit,
 }
 

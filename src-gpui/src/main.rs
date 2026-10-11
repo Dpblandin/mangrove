@@ -26,6 +26,7 @@ mod sidebar;
 mod syntax;
 mod tabs;
 mod theme;
+mod updates;
 mod view_cache;
 mod virtual_scroll;
 

@@ -9,7 +9,7 @@ use crate::{
     inspector::{InspectorEvent, InspectorView, InspectorViewState},
     preferences::{Pane, Preferences},
     repository_open::{OpenIntent, RepositoryOpenLane},
-    settings::SettingsView,
+    settings::{SettingsSection, SettingsView},
     sidebar::{SidebarEvent, SidebarView, SidebarViewState},
     tabs::Tabs,
     view_cache::render_cached_view,
@@ -35,6 +35,7 @@ actions!(
         NextTab,
         PreviousTab,
         ShowSettings,
+        CheckForUpdates,
         ShowCommandPalette,
         Escape,
         Search,
@@ -102,6 +103,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.set_menus([
         Menu::new("Mangrove").items([
             MenuItem::action("Paramètres…", ShowSettings),
+            MenuItem::action("Rechercher les mises à jour…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Quitter Mangrove", Quit),
         ]),
@@ -328,6 +330,13 @@ impl Mangrove {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::new(engine, preferences, path, window, cx);
+        if benchmark.is_some() {
+            this.chrome
+                .read(cx)
+                .updater
+                .clone()
+                .update(cx, |updater, _| updater.suspend());
+        }
         this.perf = match benchmark
             .map(|configuration| PerfSession::new(configuration, started))
             .transpose()
@@ -416,6 +425,35 @@ impl Mangrove {
         }
         self.settings = false;
         self.settings_from_clone = false;
+    }
+    /// Opens the settings at `section`, even when they are already shown;
+    /// returns false while a native picker or a resize holds the window.
+    fn show_settings_section(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.chrome.read(cx).can_show_settings(cx) {
+            return false;
+        }
+        self.chrome_event(&ChromeEvent::ShowSettings, window, cx);
+        self.chrome
+            .read(cx)
+            .settings
+            .clone()
+            .update(cx, |view, cx| view.select_section(section, window, cx));
+        true
+    }
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_settings_section(SettingsSection::Updates, window, cx) {
+            let updater = self.chrome.read(cx).updater.clone();
+            updater.update(cx, |updater, cx| updater.check(cx));
+        }
+    }
+    fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        let updater = self.chrome.read(cx).updater.clone();
+        updater.update(cx, |updater, cx| updater.restart(cx));
     }
     /// Shows the settings in place of the workspace or of the clone screen.
     fn enter_settings(
@@ -1159,6 +1197,14 @@ impl Mangrove {
                 cx.notify();
             }
             ChromeEvent::Fetch => self.fetch(true, window, cx),
+            ChromeEvent::ShowUpdates => {
+                self.show_settings_section(SettingsSection::Updates, window, cx);
+            }
+            ChromeEvent::RestartToUpdate => {
+                if !self.confirm_leave_clone(window, cx, |view, _, cx| view.restart_to_update(cx)) {
+                    self.restart_to_update(cx);
+                }
+            }
             ChromeEvent::PreferencesChanged => self.apply_preferences(window, cx),
             ChromeEvent::ProfileChanged => {
                 self.recent_task = None;
@@ -1430,6 +1476,7 @@ impl Render for Mangrove {
             .capture_action(cx.listener(Self::guard_palette::<PreviousTab>))
             .capture_action(cx.listener(Self::guard_palette::<SelectTab>))
             .capture_action(cx.listener(Self::guard_palette::<ShowSettings>))
+            .capture_action(cx.listener(Self::guard_palette::<CheckForUpdates>))
             .capture_action(cx.listener(Self::guard_palette::<Search>))
             .capture_action(cx.listener(Self::guard_palette::<ZoomIn>))
             .capture_action(cx.listener(Self::guard_palette::<ZoomOut>))
@@ -1467,6 +1514,9 @@ impl Render for Mangrove {
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .on_action(cx.listener(|view, _: &ShowSettings, window, cx| {
                 view.chrome_event(&ChromeEvent::ShowSettings, window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &CheckForUpdates, window, cx| {
+                view.check_for_updates(window, cx)
             }))
             .on_action(cx.listener(|view, _: &Search, window, cx| {
                 if view.repository.is_none()

@@ -8,6 +8,7 @@ use crate::{
     settings::{SettingsEvent, SettingsView},
     tabs::{HOME, wrapped_index},
     theme::{MONO, Palette, RADIUS_MD, RADIUS_SM, ThemeId, icon, mix, scrollbar_theme},
+    updates::{UpdateBadge, Updater},
 };
 use accesskit::{Orientation, Role};
 use gpui_kit::{
@@ -75,6 +76,9 @@ pub enum ChromeEvent {
     BackToWorkspace,
     Fetch,
     DismissError,
+    /// Opens the update settings.
+    ShowUpdates,
+    RestartToUpdate,
     PreferencesChanged,
     ProfileChanged,
     PaneResized(Pane, f32),
@@ -109,6 +113,8 @@ pub struct Chrome {
     /// The interval that re-enabling the auto-fetch restores.
     resumed_interval: u32,
     pub settings: Entity<SettingsView>,
+    pub updater: Entity<Updater>,
+    update_shown: (Option<UpdateBadge>, bool),
     tabs: Vec<ChromeTab>,
     active_tab: Option<u64>,
     tab_focus: HashMap<u64, FocusHandle>,
@@ -160,17 +166,43 @@ impl Chrome {
         let recent_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Rechercher un dépôt récent…"));
         let settings = cx.new(|cx| SettingsView::new(&preferences, window, cx));
+        // Tests never reach GitHub.
+        let updater = cx.new(|cx| Updater::new(!cfg!(test), cx));
         settings.update(cx, |view, cx| {
-            view.set_integrations(integrations.clone(), cx)
+            view.set_integrations(integrations.clone(), cx);
+            view.set_updater(updater.clone(), cx);
         });
         let subscriptions = vec![
             cx.subscribe_in(&integrations, window, |this, _, event, window, cx| {
                 this.integration_event(event, window, cx)
             }),
             cx.subscribe(&recent_filter, |_, _, _: &InputEvent, cx| cx.notify()),
+            // Downloads report their progress five times a second; the top
+            // bar and the palette only follow the badge and running work.
+            cx.observe(&updater, |this, updater, cx| {
+                let updater = updater.read(cx);
+                let shown = (updater.badge(), updater.busy());
+                if this.update_shown != shown {
+                    this.update_shown = shown;
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&settings, |this, settings, event, cx| {
+                // Update settings are saved apart from the profile preferences.
+                let mut saved = None;
                 match event {
                     SettingsEvent::Back => return cx.emit(ChromeEvent::BackToWorkspace),
+                    SettingsEvent::RestartToUpdate => return cx.emit(ChromeEvent::RestartToUpdate),
+                    SettingsEvent::UpdateChecksChanged(enabled) => {
+                        saved = Some(this.updater.update(cx, |updater, cx| {
+                            updater.set_check_automatically(*enabled, cx).is_ok()
+                        }))
+                    }
+                    SettingsEvent::UpdateInstallsChanged(enabled) => {
+                        saved = Some(this.updater.update(cx, |updater, cx| {
+                            updater.set_install_automatically(*enabled, cx).is_ok()
+                        }))
+                    }
                     SettingsEvent::ThemeChanged(theme) => this.preferences.theme = *theme,
                     SettingsEvent::IntervalChanged(value) => {
                         this.preferences.auto_fetch_interval = *value;
@@ -195,7 +227,7 @@ impl Chrome {
                         this.preferences.set_diff_font_size(*value)
                     }
                 }
-                let saved = this.preferences_changed(cx);
+                let saved = saved.unwrap_or_else(|| this.preferences_changed(cx));
                 if let Some(field) = event.field() {
                     settings.update(cx, |view, cx| {
                         view.confirm_saved(
@@ -221,6 +253,8 @@ impl Chrome {
             applied_theme,
             resumed_interval,
             settings,
+            updater,
+            update_shown: (None, false),
             tabs: Vec::new(),
             active_tab: None,
             tab_focus: HashMap::new(),
@@ -882,6 +916,9 @@ impl Chrome {
                     .gap(px(22.))
                     .when(self.busy_visible, |view| {
                         view.child(icon(IconName::LoaderCircle, 16., p.accent))
+                    })
+                    .when_some(self.updater.read(cx).badge(), |view, badge| {
+                        view.child(update_badge(badge, p, offset, cx))
                     })
                     .when(self.has_remotes, |view| {
                         view.child(
@@ -1937,6 +1974,63 @@ struct RepositoryRow {
     open: ChromeEvent,
     open_label: String,
     nested: bool,
+}
+
+/// A newer version, installed or available, beside the top bar's buttons.
+fn update_badge(
+    badge: UpdateBadge,
+    p: Palette,
+    offset: f32,
+    cx: &mut Context<Chrome>,
+) -> NativeButton {
+    let (id, glyph, label, tooltip, event) = match badge {
+        UpdateBadge::Ready(version) => (
+            "update-restart",
+            IconName::RotateCw,
+            "Redémarrer pour mettre à jour".to_string(),
+            format!("Mangrove {version} est installé"),
+            ChromeEvent::RestartToUpdate,
+        ),
+        UpdateBadge::Available(version) => (
+            "update-available",
+            IconName::CircleFadingArrowUp,
+            format!("Mangrove {version} disponible"),
+            "Ouvrir les mises à jour".to_string(),
+            ChromeEvent::ShowUpdates,
+        ),
+    };
+    let ready = matches!(badge, UpdateBadge::Ready(_));
+    let (fill, text) = if ready {
+        (p.accent, p.on_accent)
+    } else {
+        (p.bg, p.accent)
+    };
+    NativeButton::new(id)
+        .h(px(28.))
+        .px(px(10.))
+        .gap(px(6.))
+        .flex_none()
+        .rounded(RADIUS_MD)
+        .border_1()
+        .border_color(rgb(if ready { p.accent } else { p.border }))
+        .bg(rgb(fill))
+        .text_size(px(11. + offset))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(text))
+        .cursor_pointer()
+        .hover(move |style| {
+            style.bg(rgb(if ready {
+                mix(p.accent, p.text, 0.85)
+            } else {
+                p.hover
+            }))
+        })
+        .focus_visible(move |style| style.border_color(rgb(if ready { p.text } else { p.accent })))
+        .accessibility_label(label.clone())
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(icon(glyph, 14., text))
+        .child(label)
+        .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())))
 }
 
 fn version_label() -> String {
