@@ -1,4 +1,5 @@
 use crate::{
+    branch_tracking::{Badge, TrackingState, text_width},
     format::{commit_date, count_label, format_count, shortcut_label},
     graph::{self, ROW_HEIGHT},
     history::{
@@ -44,6 +45,10 @@ pub struct HistoryView {
     references: HashMap<String, Arc<ReferenceGroup>>,
     solo_banner: Option<SharedString>,
     head_label: SharedString,
+    tracking: Entity<TrackingState>,
+    /// The current branch's ahead/behind badge, shown in the HEAD chip.
+    head_badge: Option<Badge>,
+    _tracking_subscription: Subscription,
     pages: HistoryCache,
     page_requests: PageRequests,
     position_requests: PositionRequests,
@@ -246,9 +251,11 @@ impl HistoryView {
         engine: Arc<Workspace>,
         palette: Palette,
         font_size: f32,
+        tracking: Entity<TrackingState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let tracking_subscription = cx.observe(&tracking, |view, _, cx| view.sync_head_badge(cx));
         let search = cx
             .new(|cx| InputState::new(window, cx).placeholder("Message, auteur, SHA, référence…"));
         let search_subscription = cx.subscribe_in(&search, window, |view, input, event, _, cx| {
@@ -263,6 +270,9 @@ impl HistoryView {
             references: HashMap::new(),
             solo_banner: None,
             head_label: "HEAD".into(),
+            tracking,
+            head_badge: None,
+            _tracking_subscription: tracking_subscription,
             pages: HistoryCache::default(),
             page_requests: PageRequests::new(read_slots.clone()),
             position_requests: PositionRequests::new(read_slots),
@@ -478,6 +488,7 @@ impl HistoryView {
         self.references.clear();
         self.solo_banner = None;
         self.head_label = "HEAD".into();
+        self.head_badge = None;
         self.total = 0;
         self.retired_index_run = None;
         self.progress = IndexProgress {
@@ -525,6 +536,7 @@ impl HistoryView {
         self.menu = None;
         if same_session {
             self.repository = Some(info.clone());
+            self.sync_head_badge(cx);
             let recovered = !self.failed.is_empty();
             self.failed.clear();
             if recovered {
@@ -569,6 +581,7 @@ impl HistoryView {
         self.debounce_pending = false;
         self.set_filter(normalized_query(&self.query));
         self.repository = Some(info.clone());
+        self.sync_head_badge(cx);
         self.progress = info.index.clone();
         self.retired_index_run = None;
         if self.filter.is_empty() {
@@ -603,6 +616,19 @@ impl HistoryView {
         }
         self.start_polling(cx);
         self.changed(cx);
+    }
+
+    /// Counts of other branches arrive without rendering the history again.
+    fn sync_head_badge(&mut self, cx: &mut Context<Self>) {
+        let badge = self.repository.as_ref().and_then(|info| {
+            self.tracking
+                .read(cx)
+                .badge(&format!("refs/heads/{}", info.head_name))
+        });
+        if badge != self.head_badge {
+            self.head_badge = badge;
+            cx.notify();
+        }
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -2253,6 +2279,17 @@ impl Render for HistoryView {
                 .update(cx, |input, cx| input.set_value(query, window, cx));
         }
         let narrow = self.columns().sha.is_none();
+        let head_tracking = self.head_badge.as_ref().map(Badge::description);
+        let head_text = self.head_badge.as_ref().and_then(|badge| badge.text(false));
+        // The chip widens by its values and their gap.
+        let head_extra = head_text
+            .as_deref()
+            .map_or(0., |text| text_width(text, 11. + self.font_size) + 6.);
+        let head_badge = self
+            .head_badge
+            .as_ref()
+            .zip(head_text)
+            .map(|(badge, text)| badge.element(&palette).child(text));
         let mut root = div()
             .id("history-view")
             .size_full()
@@ -2341,9 +2378,19 @@ impl Render for HistoryView {
                             .when(window.is_a11y_active(), |style| {
                                 style.aria_label(self.head_label.clone())
                             })
-                            .max_w(px(if narrow { 120. } else { 180. }))
+                            .when_some(head_tracking, |style, description| {
+                                style.aria_description(description.clone()).tooltip(
+                                    move |window, cx| {
+                                        Tooltip::new(description.clone()).build(window, cx)
+                                    },
+                                )
+                            })
+                            .max_w(px(if narrow { 120. } else { 180. } + head_extra))
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
                             .px(px(8.))
                             .py(px(3.))
                             .rounded(RADIUS_SM)
@@ -2352,7 +2399,9 @@ impl Render for HistoryView {
                             .bg(rgb(palette.accent_soft))
                             .text_size(px(11. + self.font_size))
                             .text_color(rgb(palette.accent))
-                            .child(self.head_label.clone()),
+                            .child(div().min_w_0().truncate().child(self.head_label.clone()))
+                            // The values shrink the branch name, never the reverse.
+                            .children(head_badge),
                     )
                     .when(!narrow || self.filtered(), |style| {
                         style.child(

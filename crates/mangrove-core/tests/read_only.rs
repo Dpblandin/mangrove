@@ -10,7 +10,8 @@ use std::{
 use git2::{Oid, Repository, Signature, Time};
 use mangrove_core::{
     model::{
-        FileImageData, FileImageSource, GraphEdgeKind, PreviewLimit, Reference, RepositoryInfo,
+        AheadBehind, FileImageData, FileImageSource, GraphEdgeKind, PreviewLimit, Reference,
+        RepositoryInfo,
     },
     Workspace,
 };
@@ -284,6 +285,64 @@ fn inspecting_commits_search_and_diffs_preserves_all_source_bytes_and_mtimes() {
         1
     );
     assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn reading_upstreams_and_counts_preserves_all_source_bytes_and_mtimes() {
+    let fixture = Fixture::new();
+    let first = commit(&fixture.repository, "first", &[], &[], Some("HEAD"));
+    let second = commit(&fixture.repository, "second", &[first], &[], Some("HEAD"));
+    fixture
+        .repository
+        .remote("origin", "git@github.com:example/private.git")
+        .unwrap();
+    fixture
+        .repository
+        .reference("refs/remotes/origin/main", first, false, "test")
+        .unwrap();
+    let mut config = fixture.repository.config().unwrap();
+    config.set_str("branch.main.remote", "origin").unwrap();
+    config
+        .set_str("branch.main.merge", "refs/heads/main")
+        .unwrap();
+    let workspace = fixture.workspace();
+    let read = |path: &Path| {
+        let info = workspace.open_repository(path.to_str().unwrap()).unwrap();
+        let tracking = workspace.branch_tracking(&info.id).unwrap();
+        assert_eq!(tracking.branches[0].label, "origin/main");
+        let counts = workspace
+            .ahead_behind(
+                &info.id,
+                &[(second.to_string(), first.to_string())],
+                Instant::now() + Duration::from_secs(60),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(
+            counts,
+            [Some(AheadBehind::Counts {
+                ahead: 1,
+                behind: 0
+            })]
+        );
+        finish(&workspace, &info.id);
+    };
+    let before = snapshot(&fixture.source);
+    read(&fixture.source);
+    assert_eq!(before, snapshot(&fixture.source));
+
+    // A packed repository with a commit-graph, read from a linked worktree too.
+    git_at(&fixture.source, &["repack", "-adq"]);
+    git_at(&fixture.source, &["commit-graph", "write", "--reachable"]);
+    let linked = fixture.root.path().join("linked");
+    fixture
+        .repository
+        .worktree("linked", &linked, None)
+        .unwrap();
+    let before = (snapshot(&fixture.source), snapshot(&linked));
+    read(&fixture.source);
+    read(&linked);
+    assert_eq!(before, (snapshot(&fixture.source), snapshot(&linked)));
 }
 
 #[test]

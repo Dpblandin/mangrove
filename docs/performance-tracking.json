@@ -1,0 +1,166 @@
+{
+  "measuredAt": "2026-10-10",
+  "platform": "Apple M4 Pro, 48 GiB RAM, macOS ARM",
+  "profile": "Rust release, ThinLTO",
+  "fixture": "node scripts/create-tracking-fixture.mjs: 121 227 indexed commits (104 799 reachable from main), 5 000 tracked local branches: 80 % close to their upstream, 15 % 1 000 to 10 000 behind, 2.5 % about 50 000 behind, 2.5 % on a history without common ancestor; octopus merges in the last 20 000 commits; pack rewritten as by git gc",
+  "method": "tracking_benchmark after full indexing, warm OS filesystem cache, temporary application cache outside source; one process per fixture; peak RSS includes indexing and both libgit2 repositories",
+  "results": {
+    "withoutCommitGraph": {
+      "chunkedAfterFetch": {
+        "calls": 4,
+        "longestCallMs": 207.214166,
+        "totalMs": 566.9357080000001
+      },
+      "chunkedCold": {
+        "calls": 87,
+        "longestCallMs": 231.73908300000002,
+        "totalMs": 10184.438916
+      },
+      "chunkedWarm": {
+        "calls": 1,
+        "longestCallMs": 0.44829199999999997,
+        "totalMs": 0.641375
+      },
+      "commits": 121227,
+      "countedPairs": 5000,
+      "localBranches": 5000,
+      "perPair": {
+        "all": {
+          "maxMs": 168.747834,
+          "over100Ms": 1,
+          "over1s": 0,
+          "p50Ms": 0.021417,
+          "p95Ms": 16.683834,
+          "p99Ms": 41.614375,
+          "pairs": 5000,
+          "totalMs": 10279.560187999998
+        },
+        "over10000": {
+          "maxMs": 168.747834,
+          "over100Ms": 1,
+          "over1s": 0,
+          "p50Ms": 19.930042,
+          "p95Ms": 44.707667,
+          "p99Ms": 50.218582999999995,
+          "pairs": 409,
+          "totalMs": 9050.626474000004
+        },
+        "upTo10000": {
+          "maxMs": 11.242917,
+          "over100Ms": 0,
+          "over1s": 0,
+          "p50Ms": 1.147541,
+          "p95Ms": 3.455958,
+          "p99Ms": 3.870042,
+          "pairs": 876,
+          "totalMs": 1169.4946220000006
+        },
+        "upTo50": {
+          "maxMs": 0.294708,
+          "over100Ms": 0,
+          "over1s": 0,
+          "p50Ms": 0.014417,
+          "p95Ms": 0.037625,
+          "p99Ms": 0.049458,
+          "pairs": 3715,
+          "totalMs": 59.43909200000023
+        }
+      },
+      "resolution": {
+        "maxMs": 49.086417,
+        "over100Ms": 0,
+        "over1s": 0,
+        "p50Ms": 40.441792,
+        "p95Ms": 41.595708,
+        "p99Ms": 49.086417,
+        "pairs": 30,
+        "totalMs": 1223.3146680000004
+      },
+      "shallow": false,
+      "tracked": 5000,
+      "peakRssBytes": 254459904
+    },
+    "withCommitGraph": {
+      "chunkedAfterFetch": {
+        "calls": 4,
+        "longestCallMs": 202.392708,
+        "totalMs": 580.259792
+      },
+      "chunkedCold": {
+        "calls": 91,
+        "longestCallMs": 225.527875,
+        "totalMs": 10374.605917
+      },
+      "chunkedWarm": {
+        "calls": 1,
+        "longestCallMs": 0.444792,
+        "totalMs": 0.652167
+      },
+      "commits": 121227,
+      "countedPairs": 5000,
+      "localBranches": 5000,
+      "perPair": {
+        "all": {
+          "maxMs": 180.507584,
+          "over100Ms": 1,
+          "over1s": 0,
+          "p50Ms": 0.021875,
+          "p95Ms": 16.747,
+          "p99Ms": 41.249542,
+          "pairs": 5000,
+          "totalMs": 10218.611678999994
+        },
+        "over10000": {
+          "maxMs": 180.507584,
+          "over100Ms": 1,
+          "over1s": 0,
+          "p50Ms": 19.995667,
+          "p95Ms": 44.563792,
+          "p99Ms": 48.939958,
+          "pairs": 409,
+          "totalMs": 8983.990175000004
+        },
+        "upTo10000": {
+          "maxMs": 11.545667,
+          "over100Ms": 0,
+          "over1s": 0,
+          "p50Ms": 1.108291,
+          "p95Ms": 3.475334,
+          "p99Ms": 3.792125,
+          "pairs": 876,
+          "totalMs": 1174.767034999997
+        },
+        "upTo50": {
+          "maxMs": 0.349959,
+          "over100Ms": 0,
+          "over1s": 0,
+          "p50Ms": 0.014416,
+          "p95Ms": 0.037833,
+          "p99Ms": 0.049458,
+          "pairs": 3715,
+          "totalMs": 59.854469000000265
+        }
+      },
+      "resolution": {
+        "maxMs": 51.584792,
+        "over100Ms": 0,
+        "over1s": 0,
+        "p50Ms": 41.177959,
+        "p95Ms": 50.246875,
+        "p99Ms": 51.584792,
+        "pairs": 30,
+        "totalMs": 1259.5209610000002
+      },
+      "shallow": false,
+      "tracked": 5000,
+      "peakRssBytes": 250003456
+    }
+  },
+  "note": "Backend only; index complete before counting, warm filesystem cache, temporary application cache outside source. Resolution: 30 samples. perPair: libgit2 graph_ahead_behind per pair on one repository, grouped by ahead + behind. Chunked: Workspace::ahead_behind in 100 ms calls; after fetch, one upstream in fifty replaced by its parent; no source identifiers or content.",
+  "reopenedRepository": {
+    "chunkedColdMs": 76230.959959,
+    "calls": 265,
+    "longestCallMs": 593.452041,
+    "note": "Earlier version reopening the repository for each 100 ms call, on the fast-import pack before repacking. Keeping the repository open, the same fixture took 10 630 ms in 89 calls."
+  }
+}

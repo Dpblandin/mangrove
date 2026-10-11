@@ -288,6 +288,11 @@ impl Palette {
         palette
     }
 
+    /// `color` for a stale value, still at least 3:1 on every row background.
+    pub fn dimmed(&self, color: u32) -> u32 {
+        mix(color, self.panel, 0.75)
+    }
+
     /// Theme Kit's editable controls and menus with the application's colors.
     pub fn apply(self, _font_size_offset: f32, cx: &mut App) {
         Theme::change(ThemeMode::Dark, None, cx);
@@ -426,6 +431,34 @@ mod tests {
                     "{}: {ratio:.2}:1 on {background:06x}",
                     theme.label()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn ahead_behind_badges_stay_readable_on_every_branch_row_background() {
+        for theme in ThemeId::ALL {
+            let p = Palette::for_theme(theme);
+            // Panel, hover, selection, Solo and the history's HEAD chip.
+            for background in [
+                p.panel,
+                mix(p.accent, p.panel, 0.1),
+                p.selection,
+                mix(p.warning, p.panel, 0.12),
+                p.accent_soft,
+            ] {
+                for text in [p.muted, p.warning] {
+                    // Values, then the dimmed values of a refresh.
+                    for (color, minimum) in [(text, 4.5), (p.dimmed(text), 3.)] {
+                        let ratio = contrast(color, background);
+                        assert!(
+                            ratio >= minimum,
+                            "{}: {color:06x} at {ratio:.2}:1 on {background:06x}",
+                            theme.label()
+                        );
+                    }
+                    assert!(contrast(p.dimmed(text), p.panel) < contrast(text, p.panel) / 1.4);
+                }
             }
         }
     }
