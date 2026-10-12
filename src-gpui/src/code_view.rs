@@ -3046,6 +3046,7 @@ mod tests {
             content: content.into(),
         };
         FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,
@@ -3149,6 +3150,7 @@ mod tests {
         use std::sync::Arc;
         let diff = || {
             Arc::new(FileDiff {
+                sources: None,
                 binary: false,
                 oversized: None,
                 truncated: false,
@@ -3229,6 +3231,7 @@ mod tests {
         // 200 blocks of two edited pairs, each followed by a context line:
         // unified row 1 + 5n is a deletion shown on split row 1 + 3n.
         let edited = Arc::new(FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,

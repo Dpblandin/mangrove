@@ -1662,6 +1662,7 @@ mod tests {
     fn prepared() -> PreparedDiff {
         PreparedDiff {
             diff: Arc::new(FileDiff {
+                sources: None,
                 binary: false,
                 oversized: None,
                 truncated: false,
@@ -1809,6 +1810,7 @@ mod tests {
     #[test]
     fn line_counts_are_unknown_only_for_patches_skipped_by_size() {
         let mut diff = FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,

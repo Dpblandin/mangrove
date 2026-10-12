@@ -3354,6 +3354,7 @@ mod tests {
     use std::sync::Arc;
     fn diff(bytes: usize) -> super::PreparedDiff {
         let diff = Arc::new(FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,

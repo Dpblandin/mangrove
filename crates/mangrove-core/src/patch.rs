@@ -8,7 +8,7 @@ use git2::{Delta, Diff, DiffDelta, DiffFile, DiffOptions, FileMode, Odb, Patch, 
 
 use crate::{
     file_browser::object_error,
-    model::{DiffHunk, DiffLine, FileDiff, PreviewLimit},
+    model::{DiffHunk, DiffLine, DiffSources, FileDiff, PreviewLimit},
     Result, MAX_PATCH_SIZE,
 };
 
@@ -174,7 +174,13 @@ fn stream_blobs(repository: &Repository, delta: &DiffDelta<'_>) -> Result<FileDi
     if binary.get() {
         return Ok(FileDiff::binary());
     }
-    Ok(shown.into_inner().diff)
+    Ok(FileDiff {
+        sources: DiffSources::of(
+            old.as_ref().map_or(&[], |blob| blob.content()),
+            new.as_ref().map_or(&[], |blob| blob.content()),
+        ),
+        ..shown.into_inner().diff
+    })
 }
 
 /// The shown part of a materialized patch, whose contents were read within
@@ -304,6 +310,66 @@ mod tests {
             Delta::Modified,
         ] {
             assert!(statuses.contains(&status), "{status:?} in {statuses:?}");
+        }
+    }
+
+    /// Syntax analysis reads each shown line at its number in its side.
+    fn assert_lines_match_sources(diff: &FileDiff) {
+        let sources = diff.sources.as_ref().unwrap();
+        for line in diff.hunks.iter().flat_map(|hunk| &hunk.lines) {
+            let (text, number) = match line.kind.as_str() {
+                "deletion" => (&sources.old, line.old_line),
+                "annotation" => continue,
+                _ => (&sources.new, line.new_line),
+            };
+            let shown = text.lines().nth(number.unwrap() as usize - 1).unwrap();
+            assert_eq!(shown.trim_end_matches('\r'), line.content);
+        }
+    }
+
+    #[test]
+    fn text_patches_keep_their_sources_within_the_source_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = Repository::init_bare(directory.path()).unwrap();
+        let large = vec![b'a'; crate::model::MAX_SOURCE_BYTES + 1];
+        let old: &[(&[u8], &[u8], i32)] = &[
+            (
+                b"edited.php",
+                b"<?php\n\nnamespace App;\n\nfinal class A {}\n",
+                0o100644,
+            ),
+            (b"crlf.txt", b"one\r\ntwo\r\n", 0o100644),
+            (b"deleted.txt", b"gone\n", 0o100644),
+            (b"newline.txt", b"no final newline", 0o100644),
+            (b"large.txt", &large, 0o100644),
+            (b"binary.bin", b"\0\x01old", 0o100644),
+        ];
+        let new: &[(&[u8], &[u8], i32)] = &[
+            (
+                b"edited.php",
+                b"<?php\n\nnamespace App;\n\nfinal class B {}\n",
+                0o100644,
+            ),
+            (b"crlf.txt", b"one\r\n2\r\n", 0o100644),
+            (b"added.txt", b"new\n", 0o100644),
+            (b"newline.txt", b"no final newline, edited", 0o100644),
+            (b"large.txt", b"small\n", 0o100644),
+            (b"binary.bin", b"\0\x01new", 0o100644),
+        ];
+        let parent = commit(&repository, &[], old);
+        let id = commit(&repository, &[parent], new);
+        let (_, diff, _) = crate::commit_diff(&repository, &id.to_string()).unwrap();
+        for index in 0..diff.deltas().len() {
+            let delta = diff.get_delta(index).unwrap();
+            let path = delta.new_file().path_bytes().unwrap();
+            let shown = render_bounded(&repository, &diff, index, PreviewLimit::MIN).unwrap();
+            match path {
+                b"large.txt" | b"binary.bin" => assert!(shown.sources.is_none(), "{path:?}"),
+                _ => assert_lines_match_sources(&shown),
+            }
+            if path == b"added.txt" {
+                assert_eq!(shown.sources.as_ref().unwrap().old, "");
+            }
         }
     }
 

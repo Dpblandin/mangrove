@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -276,6 +278,34 @@ pub struct FileDiff {
     pub hunks: Vec<DiffHunk>,
     /// Set, with `truncated` and no hunks, when the patch was not computed.
     pub oversized: Option<Oversized>,
+    /// Both compared texts, when the patch was read from them and each is
+    /// within `MAX_SOURCE_BYTES`: syntax analysis reads every shown line in
+    /// its whole file instead of in a hunk without its context.
+    #[serde(skip)]
+    pub sources: Option<Arc<DiffSources>>,
+}
+
+/// Sides above this size keep no source: their lines are analyzed per hunk.
+pub const MAX_SOURCE_BYTES: usize = 256 * 1024;
+
+/// The texts a patch compares, decoded like its lines. An absent side, such
+/// as the old side of an added file, is empty.
+#[derive(Debug)]
+pub struct DiffSources {
+    pub old: String,
+    pub new: String,
+}
+
+impl DiffSources {
+    /// `None` when a side is above `MAX_SOURCE_BYTES`.
+    pub(crate) fn of(old: &[u8], new: &[u8]) -> Option<Arc<Self>> {
+        (old.len() <= MAX_SOURCE_BYTES && new.len() <= MAX_SOURCE_BYTES).then(|| {
+            Arc::new(Self {
+                old: String::from_utf8_lossy(old).into_owned(),
+                new: String::from_utf8_lossy(new).into_owned(),
+            })
+        })
+    }
 }
 
 impl FileDiff {

@@ -787,6 +787,7 @@ mod tests {
 
     fn dispersed_diff(hunks: usize) -> FileDiff {
         FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,
@@ -839,6 +840,7 @@ mod tests {
             assert!(tokenize_side(language, &[source], "", deadline).is_none());
             assert!(content_tokens_with_deadline(path, &[source.into()], deadline).is_none());
             let diff = FileDiff {
+                sources: None,
                 binary: false,
                 oversized: None,
                 truncated: false,
@@ -881,6 +883,7 @@ mod tests {
             new_line: None,
         };
         let diff = FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,
