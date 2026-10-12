@@ -2,6 +2,13 @@
 
 Évolutions notables de Mangrove, regroupées par version. Chaque section est générée depuis les commits par `scripts/release.sh`, relue avant le tag, puis reprise telle quelle dans la release GitHub.
 
+## [0.4.1](https://github.com/Dpblandin/mangrove/releases/tag/v0.4.1) - 2026-10-12
+
+### Corrections
+
+- *(syntax)* Color diff lines within their whole files
+- *(syntax)* Read PHP hunks below the opening tag as code
+
 ## [0.4.0](https://github.com/Dpblandin/mangrove/releases/tag/v0.4.0) - 2026-10-11
 
 ### Nouveautés
