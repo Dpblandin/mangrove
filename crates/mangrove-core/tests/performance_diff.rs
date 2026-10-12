@@ -397,6 +397,31 @@ fn normal_renames_and_stale_local_selections_keep_their_content_and_source_uncha
 }
 
 #[test]
+fn unstaged_patches_keep_the_index_and_disk_texts_they_compare() {
+    let fixture = Fixture::new();
+    fixture.commit(None, &[("edited.php", b"<?php\n\nnamespace App;\n")]);
+    fixture
+        .repository
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    fs::write(
+        fixture.source.join("edited.php"),
+        b"<?php\n\nnamespace App\\Edited;\n",
+    )
+    .unwrap();
+    let info = fixture.open();
+    let status = fixture.workspace.working_tree_status(&info.id).unwrap();
+    let edited = &status.unstaged[0];
+    let patch = fixture
+        .workspace
+        .working_tree_diff(&info.id, "unstaged", &edited.key, PreviewLimit::MIN)
+        .unwrap();
+    let sources = patch.sources.as_ref().unwrap();
+    assert_eq!(sources.old, "<?php\n\nnamespace App;\n");
+    assert_eq!(sources.new, "<?php\n\nnamespace App\\Edited;\n");
+}
+
+#[test]
 fn cached_local_selection_does_not_read_unrelated_rename_candidates() {
     let fixture = Fixture::new();
     let renamed_contents = b"unrelated rename baseline\nsecond line\n";

@@ -15,7 +15,7 @@ use gpui_kit::{
     component::highlighter::{LanguageRegistry, SyntaxHighlighter},
     rgb,
 };
-use mangrove_core::model::FileDiff;
+use mangrove_core::model::{DiffLine, DiffSources, FileDiff};
 use tree_sitter::{InputEdit, Point};
 
 use crate::diff::{LineKind, strip_line_ending};
@@ -142,14 +142,16 @@ const HIGHLIGHT_BUDGET: Duration = Duration::from_millis(500);
 pub fn cached_diff_tokens_cancellable(
     path: &str,
     diff: &FileDiff,
+    sources: Option<&DiffSources>,
     should_cancel: impl Fn() -> bool,
 ) -> Option<Tokens> {
-    cached_diff_tokens_within(path, diff, HIGHLIGHT_BUDGET, should_cancel)
+    cached_diff_tokens_within(path, diff, sources, HIGHLIGHT_BUDGET, should_cancel)
 }
 
 fn cached_diff_tokens_within(
     path: &str,
     diff: &FileDiff,
+    sources: Option<&DiffSources>,
     budget: Duration,
     should_cancel: impl Fn() -> bool,
 ) -> Option<Tokens> {
@@ -158,6 +160,10 @@ fn cached_diff_tokens_within(
     }
     let mut fingerprint = DefaultHasher::new();
     "diff".hash(&mut fingerprint);
+    if let Some(sources) = sources {
+        sources.old.hash(&mut fingerprint);
+        sources.new.hash(&mut fingerprint);
+    }
     for hunk in &diff.hunks {
         if should_cancel() {
             return None;
@@ -169,7 +175,7 @@ fn cached_diff_tokens_within(
         }
     }
     cached(path, fingerprint.finish(), &should_cancel, || {
-        diff_tokens_with_cancellation(path, diff, Instant::now() + budget, &should_cancel)
+        diff_tokens_with_cancellation(path, diff, sources, Instant::now() + budget, &should_cancel)
     })
 }
 
@@ -289,6 +295,9 @@ fn grammar(language: &str, source: &str, header: &str) -> (&'static str, String)
         "scss" | "less" => ("css", String::new()),
         "jsonc" | "json5" => ("json", String::new()),
         "xml" => ("html", String::new()),
+        // PHP code starts after its opening tag: before it, the grammar reads
+        // template text. A hunk below that tag only has code or HTML.
+        "php" if !source.trim_start().starts_with('<') => ("php", "<?php\n".into()),
         "vue" | "svelte" | "astro" => {
             let first = source.trim_start();
             // A hunk often starts within a script/style block. Inspect its
@@ -397,6 +406,23 @@ impl<'a> AnalysisContext<'a> {
         lines: &[&str],
         header: &str,
     ) -> Option<Vec<Vec<Token>>> {
+        self.tokenize_rows(
+            language,
+            lines,
+            header,
+            std::slice::from_ref(&(0..lines.len())),
+        )
+    }
+
+    /// The tokens of each line, styled only within the `rows` ranges of line
+    /// indexes: the whole text is parsed, but other lines stay plain.
+    fn tokenize_rows(
+        &mut self,
+        language: &str,
+        lines: &[&str],
+        header: &str,
+        rows: &[Range<usize>],
+    ) -> Option<Vec<Vec<Token>>> {
         if self.stopped() {
             return None;
         }
@@ -459,7 +485,17 @@ impl<'a> AnalysisContext<'a> {
                     if Instant::now() >= self.deadline || (self.should_cancel)() {
                         return None;
                     }
-                    for (range, style) in highlighter.styles(&(0..source.len()), &Markers) {
+                    let mut starts = Vec::with_capacity(lines.len() + 1);
+                    starts.push(prefix.len());
+                    for line in lines {
+                        starts.push(starts.last().unwrap() + line.len() + 1);
+                    }
+                    let styles = rows.iter().flat_map(|rows| {
+                        // A range covers its last line's ending, not the next line.
+                        let range = starts[rows.start]..starts[rows.end] - 1;
+                        highlighter.styles(&range, &Markers)
+                    });
+                    for (range, style) in styles {
                         let kind = [
                             Kind::Keyword,
                             Kind::String,
@@ -659,12 +695,90 @@ fn diff_tokens_with_deadline(
     diff: &FileDiff,
     deadline: Instant,
 ) -> Option<Vec<Vec<Token>>> {
-    diff_tokens_with_cancellation(path, diff, deadline, &|| false)
+    diff_tokens_with_cancellation(path, diff, None, deadline, &|| false)
+}
+
+/// The lines of a compared text, as a patch shows them, within the bounds of
+/// one analysis.
+fn source_lines(text: &str) -> Option<Vec<&str>> {
+    let lines: Vec<_> = text
+        .strip_suffix('\n')
+        .unwrap_or(text)
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    (lines.len() <= MAX_LINES
+        && lines.iter().all(|line| line.len() <= MAX_LINE_BYTES)
+        && lines.iter().map(|line| line.len()).sum::<usize>() <= MAX_BYTES)
+        .then_some(lines)
+}
+
+#[derive(Clone, Copy)]
+enum Side {
+    Old,
+    New,
+}
+
+/// The side a row shows and its line index there: the new side for an
+/// addition or context row, the old side for a deletion.
+fn position(line: &DiffLine) -> Option<(Side, usize)> {
+    let (side, number) = match LineKind::of(&line.kind) {
+        LineKind::Addition | LineKind::Context => (Side::New, line.new_line),
+        LineKind::Deletion => (Side::Old, line.old_line),
+        _ => return None,
+    };
+    Some((side, (number? as usize).checked_sub(1)?))
+}
+
+/// The ranges of line indexes each hunk shows, per side: only they are styled.
+fn shown_rows(diff: &FileDiff) -> [Vec<Range<usize>>; 2] {
+    let mut rows = [Vec::new(), Vec::new()];
+    for hunk in &diff.hunks {
+        let mut spans: [Option<Range<usize>>; 2] = [None, None];
+        for (side, index) in hunk.lines.iter().filter_map(position) {
+            spans[side as usize].get_or_insert(index..index).end = index + 1;
+        }
+        for (rows, span) in rows.iter_mut().zip(spans) {
+            rows.extend(span);
+        }
+    }
+    rows
+}
+
+/// Both sides of `diff` as lines, when every shown line is found at its
+/// number. A side no row reads is left empty, and thus never analyzed.
+fn whole_sides<'a>(
+    diff: &FileDiff,
+    sources: &'a DiffSources,
+    rows: &[Vec<Range<usize>>; 2],
+) -> Option<[Vec<&'a str>; 2]> {
+    let lines = |text, rows: &[Range<usize>]| {
+        if rows.is_empty() {
+            Some(Vec::new())
+        } else {
+            source_lines(text)
+        }
+    };
+    let sides = [
+        lines(&sources.old, &rows[0])?,
+        lines(&sources.new, &rows[1])?,
+    ];
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .all(|line| match position(line) {
+            Some((side, index)) => {
+                sides[side as usize].get(index) == Some(&strip_line_ending(&line.content))
+            }
+            None => LineKind::of(&line.kind) == LineKind::Annotation,
+        })
+        .then_some(sides)
 }
 
 fn diff_tokens_with_cancellation(
     path: &str,
     diff: &FileDiff,
+    sources: Option<&DiffSources>,
     deadline: Instant,
     should_cancel: &dyn Fn() -> bool,
 ) -> Option<Vec<Vec<Token>>> {
@@ -693,6 +807,33 @@ fn diff_tokens_with_cancellation(
     }
     let mut result = Vec::with_capacity(lines + diff.hunks.len());
     let mut total = 0;
+    // A hunk lacks the context of its first line: an open comment or string,
+    // an embedded block, a PHP opening tag. Whole files have it.
+    let whole = sources.and_then(|sources| {
+        let rows = shown_rows(diff);
+        Some((whole_sides(diff, sources, &rows)?, rows))
+    });
+    if let Some(([old, new], rows)) = whole {
+        let sides = [
+            analysis.tokenize_rows(language, &old, "", &rows[0])?,
+            analysis.tokenize_rows(language, &new, "", &rows[1])?,
+        ];
+        for hunk in &diff.hunks {
+            result.push(Vec::new());
+            for line in &hunk.lines {
+                let tokens = position(line)
+                    .and_then(|(side, index)| sides[side as usize].get(index))
+                    .cloned()
+                    .unwrap_or_default();
+                total += tokens.len();
+                if total > MAX_TOKENS {
+                    return None;
+                }
+                result.push(tokens);
+            }
+        }
+        return (!analysis.stopped()).then_some(result);
+    }
     for hunk in &diff.hunks {
         if analysis.stopped() {
             return None;
@@ -783,10 +924,11 @@ fn content_tokens_with_cancellation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mangrove_core::model::{DiffHunk, DiffLine};
+    use mangrove_core::model::DiffHunk;
 
     fn dispersed_diff(hunks: usize) -> FileDiff {
         FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,
@@ -839,6 +981,7 @@ mod tests {
             assert!(tokenize_side(language, &[source], "", deadline).is_none());
             assert!(content_tokens_with_deadline(path, &[source.into()], deadline).is_none());
             let diff = FileDiff {
+                sources: None,
                 binary: false,
                 oversized: None,
                 truncated: false,
@@ -872,6 +1015,155 @@ mod tests {
         }
         assert_eq!(language("notes.txt"), None);
     }
+    /// One hunk of `old` and `new`, which differ on `changed` (1-based) and
+    /// share `context` lines around it.
+    fn hunk_of(old: &str, new: &str, changed: u32, context: u32) -> FileDiff {
+        let (old_lines, new_lines): (Vec<_>, Vec<_>) =
+            (old.lines().collect(), new.lines().collect());
+        let line = |kind: &str, content: &str, old_line, new_line| DiffLine {
+            kind: kind.into(),
+            content: content.into(),
+            old_line,
+            new_line,
+        };
+        let first = changed.saturating_sub(context).max(1);
+        let last = (changed + context).min(new_lines.len() as u32);
+        let mut lines = Vec::new();
+        for number in first..=last {
+            let index = number as usize - 1;
+            if number == changed {
+                lines.push(line("deletion", old_lines[index], Some(number), None));
+                lines.push(line("addition", new_lines[index], None, Some(number)));
+            } else {
+                lines.push(line(
+                    "context",
+                    new_lines[index],
+                    Some(number),
+                    Some(number),
+                ));
+            }
+        }
+        FileDiff {
+            sources: None,
+            binary: false,
+            oversized: None,
+            truncated: false,
+            additions: 1,
+            deletions: 1,
+            hunks: vec![DiffHunk {
+                header: format!("@@ -{first} +{first} @@"),
+                lines,
+            }],
+        }
+    }
+
+    fn whole(old: &str, new: &str) -> DiffSources {
+        DiffSources {
+            old: old.into(),
+            new: new.into(),
+        }
+    }
+
+    #[test]
+    fn rows_read_with_their_files_match_the_files_contents() {
+        let old = "<?php\n\nnamespace App;\n\n/**\n * Totals\n */\nfinal class Totals\n{\n    private const TYPES = ['card'];\n}\n";
+        let new = old.replace("['card']", "['card', 'cash']");
+        let diff = hunk_of(old, &new, 10, 2);
+        let sources = whole(old, &new);
+        let rows = diff_tokens_with_cancellation(
+            "Totals.php",
+            &diff,
+            Some(&sources),
+            semantic_deadline(),
+            &|| false,
+        )
+        .unwrap();
+        let file = |text: &str| {
+            content_tokens_with_deadline(
+                "Totals.php",
+                &text.lines().map(str::to_owned).collect::<Vec<_>>(),
+                semantic_deadline(),
+            )
+            .unwrap()
+        };
+        let (old_file, new_file) = (file(old), file(&new));
+        for (line, tokens) in diff.hunks[0].lines.iter().zip(&rows[1..]) {
+            let expected = match line.kind.as_str() {
+                "deletion" => &old_file[line.old_line.unwrap() as usize - 1],
+                _ => &new_file[line.new_line.unwrap() as usize - 1],
+            };
+            assert_eq!(tokens, expected, "{}", line.content);
+        }
+        assert!(
+            rows.iter()
+                .flatten()
+                .any(|token| token.kind == Kind::Keyword)
+        );
+    }
+
+    #[test]
+    fn a_hunk_inside_a_comment_reads_it_as_a_comment_from_its_file() {
+        let old = "/*\n * Totals of a period:\n * paid and remaining.\n */\nconst limit = 1;\n";
+        let new = old.replace("remaining", "unpaid");
+        let diff = hunk_of(old, &new, 3, 0);
+        let sources = whole(old, &new);
+        let rows = diff_tokens_with_cancellation(
+            "totals.ts",
+            &diff,
+            Some(&sources),
+            semantic_deadline(),
+            &|| false,
+        )
+        .unwrap();
+        for tokens in &rows[1..] {
+            assert!(
+                tokens.iter().all(|token| token.kind == Kind::Comment),
+                "{tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn php_hunks_below_the_opening_tag_are_code_without_their_file() {
+        let old = "<?php\n\nnamespace App;\n\nfinal class Totals\n{\n    private const TYPES = ['card'];\n}\n";
+        let new = old.replace("['card']", "['card', 'cash']");
+        let diff = hunk_of(old, &new, 7, 2);
+        let rows = diff_tokens_with_deadline("Totals.php", &diff, semantic_deadline()).unwrap();
+        for (line, tokens) in diff.hunks[0].lines.iter().zip(&rows[1..]) {
+            let restored: String = tokens
+                .iter()
+                .map(|token| &line.content[token.range.clone()])
+                .collect();
+            assert_eq!(restored, line.content);
+        }
+        for row in [3, 4] {
+            assert!(
+                rows[row].iter().any(|token| token.kind == Kind::Keyword),
+                "{:?}",
+                rows[row]
+            );
+        }
+    }
+
+    #[test]
+    fn sources_that_differ_from_the_shown_lines_fall_back_to_the_hunks() {
+        let old = "const a = 1;\nconst b = 2;\n";
+        let new = "const a = 1;\nconst b = 3;\n";
+        let diff = hunk_of(old, new, 2, 1);
+        let stale = whole("/*\nconst b = 2;\n", "/*\nconst b = 3;\n");
+        let rows = diff_tokens_with_cancellation(
+            "a.ts",
+            &diff,
+            Some(&stale),
+            semantic_deadline(),
+            &|| false,
+        )
+        .unwrap();
+        let fragments = diff_tokens_with_deadline("a.ts", &diff, semantic_deadline()).unwrap();
+        assert_eq!(rows, fragments);
+        assert!(rows[1].iter().any(|token| token.kind == Kind::Keyword));
+    }
+
     #[test]
     fn old_and_new_multiline_comments_are_independent() {
         let line = |kind: &str, content: &str| DiffLine {
@@ -881,6 +1173,7 @@ mod tests {
             new_line: None,
         };
         let diff = FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,
@@ -1052,15 +1345,17 @@ mod tests {
         let diff = dispersed_diff(150);
         let checks = std::cell::Cell::new(0);
         let cancelled =
-            cached_diff_tokens_within("cancel-many-hunks.ts", &diff, SEMANTIC_BUDGET, || {
+            cached_diff_tokens_within("cancel-many-hunks.ts", &diff, None, SEMANTIC_BUDGET, || {
                 checks.set(checks.get() + 1);
                 checks.get() > diff.hunks.len() + 450 + 10
             });
         assert!(cancelled.is_none());
         assert!(checks.get() > diff.hunks.len() + 450);
         let retried =
-            cached_diff_tokens_within("cancel-many-hunks.ts", &diff, SEMANTIC_BUDGET, || false)
-                .unwrap();
+            cached_diff_tokens_within("cancel-many-hunks.ts", &diff, None, SEMANTIC_BUDGET, || {
+                false
+            })
+            .unwrap();
         assert_eq!(retried.len(), 600);
         assert!(retried[2].iter().any(|token| token.kind == Kind::Keyword));
     }

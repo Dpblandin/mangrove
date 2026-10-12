@@ -19,7 +19,9 @@ use gpui_kit::component::input::{Copy, SelectAll};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{assets::IconName, prelude::*, *};
-use mangrove_core::model::{FileBlame, FileContent, FileDiff, Oversized, PreviewLimit};
+use mangrove_core::model::{
+    DiffSources, FileBlame, FileContent, FileDiff, Oversized, PreviewLimit,
+};
 
 use crate::{
     diff::{self, LineKind},
@@ -388,7 +390,12 @@ pub struct Highlights {
 impl Highlights {
     /// Pairs and changed words, then syntax, of a patch: the inspector and
     /// the file browser publish them all or none. `None` means cancellation.
-    pub fn of_diff(path: &str, diff: &FileDiff, should_cancel: impl Fn() -> bool) -> Option<Self> {
+    pub fn of_diff(
+        path: &str,
+        diff: &FileDiff,
+        sources: Option<&DiffSources>,
+        should_cancel: impl Fn() -> bool,
+    ) -> Option<Self> {
         #[cfg(feature = "app-benchmark")]
         let words_start = std::time::Instant::now();
         let (kinds, texts) = diff::rows(diff);
@@ -398,7 +405,7 @@ impl Highlights {
         crate::perf::record_operation("inline", words_start.elapsed());
         #[cfg(feature = "app-benchmark")]
         let syntax_start = std::time::Instant::now();
-        let tokens = syntax::cached_diff_tokens_cancellable(path, diff, &should_cancel)?;
+        let tokens = syntax::cached_diff_tokens_cancellable(path, diff, sources, &should_cancel)?;
         #[cfg(feature = "app-benchmark")]
         crate::perf::record_operation("syntax", syntax_start.elapsed());
         Some(Self {
@@ -3046,6 +3053,7 @@ mod tests {
             content: content.into(),
         };
         FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,
@@ -3076,7 +3084,7 @@ mod tests {
     fn highlights_index_the_rows_of_a_patch_and_leave_other_rows_plain() {
         let diff = edited_patch();
         let rows = super::diff_rows(&diff);
-        let highlights = super::Highlights::of_diff("a.rs", &diff, || false).unwrap();
+        let highlights = super::Highlights::of_diff("a.rs", &diff, None, || false).unwrap();
         let (words, tokens) = (&highlights.words, &highlights.tokens);
         assert_eq!((words.len(), tokens.len()), (rows.len(), rows.len()));
         for (row, ranges) in rows.iter().zip(words.iter()) {
@@ -3102,7 +3110,7 @@ mod tests {
             .1
         });
         let diff = Arc::new(edited_patch());
-        let highlights = Highlights::of_diff("a.txt", &diff, || false).unwrap();
+        let highlights = Highlights::of_diff("a.txt", &diff, None, || false).unwrap();
         cx.update_window(cx.windows()[0], |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.set_prepared_diff(diff, "a.rs".into(), highlights, window, cx)
@@ -3149,6 +3157,7 @@ mod tests {
         use std::sync::Arc;
         let diff = || {
             Arc::new(FileDiff {
+                sources: None,
                 binary: false,
                 oversized: None,
                 truncated: false,
@@ -3229,6 +3238,7 @@ mod tests {
         // 200 blocks of two edited pairs, each followed by a context line:
         // unified row 1 + 5n is a deletion shown on split row 1 + 3n.
         let edited = Arc::new(FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,

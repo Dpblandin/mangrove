@@ -578,6 +578,7 @@ mod tests {
 
     fn patch(lines: Vec<DiffLine>) -> FileDiff {
         FileDiff {
+            sources: None,
             binary: false,
             oversized: None,
             truncated: false,

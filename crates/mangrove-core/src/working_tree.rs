@@ -14,7 +14,7 @@ use git2::{Delta, Diff, DiffDelta, DiffOptions, ErrorCode, Repository};
 use crate::{
     changed_file,
     model::{
-        FileDiff, FileImageData, FileImages, Oversized, PreviewLimit, WorkingTreeFile,
+        DiffSources, FileDiff, FileImageData, FileImages, Oversized, PreviewLimit, WorkingTreeFile,
         WorkingTreeStatus,
     },
     patch::render_patch,
@@ -571,15 +571,24 @@ fn worktree_patch(
         .path_bytes()
         .map(relative_path)
         .transpose()?;
+    let old = old.as_ref().map_or(&[][..], |blob| blob.content());
     let patch = git2::Patch::from_buffers(
-        old.as_ref().map_or(&[], |blob| blob.content()),
+        old,
         old_path.as_deref(),
         &new,
         Some(path),
         Some(&mut options),
     )
     .map_err(|error| error.to_string())?;
-    render_patch(patch)
+    let diff = render_patch(patch)?;
+    Ok(FileDiff {
+        sources: if diff.binary {
+            None
+        } else {
+            DiffSources::of(old, &new)
+        },
+        ..diff
+    })
 }
 
 #[cfg(all(test, unix))]
