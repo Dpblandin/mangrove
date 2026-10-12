@@ -295,6 +295,9 @@ fn grammar(language: &str, source: &str, header: &str) -> (&'static str, String)
         "scss" | "less" => ("css", String::new()),
         "jsonc" | "json5" => ("json", String::new()),
         "xml" => ("html", String::new()),
+        // PHP code starts after its opening tag: before it, the grammar reads
+        // template text. A hunk below that tag only has code or HTML.
+        "php" if !source.trim_start().starts_with('<') => ("php", "<?php\n".into()),
         "vue" | "svelte" | "astro" => {
             let first = source.trim_start();
             // A hunk often starts within a script/style block. Inspect its
@@ -1116,6 +1119,28 @@ mod tests {
             assert!(
                 tokens.iter().all(|token| token.kind == Kind::Comment),
                 "{tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn php_hunks_below_the_opening_tag_are_code_without_their_file() {
+        let old = "<?php\n\nnamespace App;\n\nfinal class Totals\n{\n    private const TYPES = ['card'];\n}\n";
+        let new = old.replace("['card']", "['card', 'cash']");
+        let diff = hunk_of(old, &new, 7, 2);
+        let rows = diff_tokens_with_deadline("Totals.php", &diff, semantic_deadline()).unwrap();
+        for (line, tokens) in diff.hunks[0].lines.iter().zip(&rows[1..]) {
+            let restored: String = tokens
+                .iter()
+                .map(|token| &line.content[token.range.clone()])
+                .collect();
+            assert_eq!(restored, line.content);
+        }
+        for row in [3, 4] {
+            assert!(
+                rows[row].iter().any(|token| token.kind == Kind::Keyword),
+                "{:?}",
+                rows[row]
             );
         }
     }
