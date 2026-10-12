@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "mangrove-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -4202,7 +4202,7 @@ dependencies = [
 
 [[package]]
 name = "mangrove-gpui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "accesskit",
  "chrono",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "mangrove-remote"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
@@ -4244,7 +4244,7 @@ dependencies = [
 
 [[package]]
 name = "mangrove-update"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "minisign-verify",
