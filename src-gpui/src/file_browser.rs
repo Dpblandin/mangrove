@@ -38,13 +38,17 @@ pub struct FileTarget {
 #[derive(Clone)]
 pub struct PreparedDiff {
     pub diff: Arc<FileDiff>,
+    /// The compared texts, read until the highlights are ready: a prepared
+    /// patch can stay cached long after, and never needs them again.
+    pub sources: Option<Arc<DiffSources>>,
     pub highlights: Highlights,
     pub highlights_ready: bool,
 }
 impl PreparedDiff {
-    pub fn raw(diff: Arc<FileDiff>) -> Self {
+    pub fn raw(mut diff: FileDiff) -> Self {
         Self {
-            diff,
+            sources: diff.sources.take(),
+            diff: Arc::new(diff),
             highlights: Highlights::default(),
             highlights_ready: false,
         }
@@ -950,10 +954,12 @@ impl FileBrowser {
             let (request, highlights) = cx
                 .background_executor()
                 .spawn(async move {
-                    let highlights =
-                        Highlights::of_diff(&request.target.path, &request.diff, || {
-                            live_generation.load(Ordering::Acquire) != request.generation
-                        });
+                    let highlights = Highlights::of_diff(
+                        &request.target.path,
+                        &request.diff,
+                        request.diff.sources.as_deref(),
+                        || live_generation.load(Ordering::Acquire) != request.generation,
+                    );
                     (request, highlights)
                 })
                 .await;
@@ -1661,6 +1667,7 @@ mod tests {
 
     fn prepared() -> PreparedDiff {
         PreparedDiff {
+            sources: None,
             diff: Arc::new(FileDiff {
                 sources: None,
                 binary: false,
@@ -1731,7 +1738,11 @@ mod tests {
     #[test]
     fn raw_source_has_no_completed_highlights_and_keeps_its_single_color_owner() {
         let patch = prepared();
-        let raw = PreparedDiff::raw(patch.diff.clone());
+        let raw = PreparedDiff {
+            highlights: Highlights::default(),
+            highlights_ready: false,
+            ..patch.clone()
+        };
         let mut source = FilePresentation::ready(1, target("selected"), raw);
         assert!(source.highlights().is_none());
         assert!(source.owns_diff(&patch.diff));
@@ -1958,6 +1969,7 @@ mod tests {
             content: content.into(),
         };
         let edited = PreparedDiff {
+            sources: None,
             diff: Arc::new(FileDiff {
                 hunks: vec![DiffHunk {
                     header: "@@ -1,2 +1,2 @@".into(),

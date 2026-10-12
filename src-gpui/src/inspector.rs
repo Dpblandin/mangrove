@@ -227,6 +227,10 @@ impl DiffCache {
             .iter()
             .map(|h| h.header.len() + h.lines.iter().map(|l| l.content.len()).sum::<usize>())
             .sum::<usize>()
+            + prepared
+                .sources
+                .as_ref()
+                .map_or(0, |sources| sources.old.len() + sources.new.len())
             + tokens * std::mem::size_of::<syntax::Token>()
             + words * std::mem::size_of::<Range<usize>>()
             + pairs * std::mem::size_of::<(usize, usize)>();
@@ -1543,7 +1547,7 @@ impl InspectorView {
                                     *limit,
                                 ),
                             }
-                            .map(|value| ReadResult::Diff(PreparedDiff::raw(Arc::new(value)))),
+                            .map(|value| ReadResult::Diff(PreparedDiff::raw(value))),
                         };
                         #[cfg(feature = "app-benchmark")]
                         {
@@ -1609,14 +1613,19 @@ impl InspectorView {
             let (request, colored) = cx
                 .background_executor()
                 .spawn(async move {
-                    let highlights =
-                        Highlights::of_diff(&request.file.path, &request.prepared.diff, || {
+                    let highlights = Highlights::of_diff(
+                        &request.file.path,
+                        &request.prepared.diff,
+                        request.prepared.sources.as_deref(),
+                        || {
                             !request
                                 .current(*live_revision.lock().unwrap_or_else(|p| p.into_inner()))
-                        });
+                        },
+                    );
                     let colored = if let Some(highlights) = highlights {
                         request.prepared.highlights = highlights;
                         request.prepared.highlights_ready = true;
+                        request.prepared.sources = None;
                         true
                     } else {
                         false
@@ -3371,6 +3380,7 @@ mod tests {
             }],
         });
         super::PreparedDiff {
+            sources: None,
             diff,
             highlights: super::Highlights::default(),
             highlights_ready: true,
@@ -3410,7 +3420,7 @@ mod tests {
                 },
             };
             // The preference became 8 Mio while this read ran at 2 Mio.
-            let read = super::PreparedDiff::raw(Arc::new(FileDiff::default()));
+            let read = super::PreparedDiff::raw(FileDiff::default());
             view.accept(request, Ok(super::ReadResult::Diff(read)), cx);
             assert!(view.snapshot.is_none());
             assert_eq!(queued_limit(view), Some(PreviewLimit::from_mib(8)));
@@ -3774,11 +3784,11 @@ mod tests {
         let repo = workspace.open_repository(path.to_str().unwrap()).unwrap();
         let details = workspace.commit_details_shared(&repo.id, &sha).unwrap();
         let first = super::preview_choice(&details, None).unwrap();
-        let raw = super::PreparedDiff::raw(Arc::new(
+        let raw = super::PreparedDiff::raw(
             workspace
                 .file_diff(&repo.id, &sha, first.index, PreviewLimit::MIN)
                 .unwrap(),
-        ));
+        );
         assert_eq!(details.sha, sha);
         assert_eq!(first.path, details.files[0].path);
         assert_eq!(first.path, "a.rs");

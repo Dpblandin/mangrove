@@ -46,12 +46,22 @@ fn main() -> Result<(), String> {
         let diff = engine.file_diff(&repository.id, &sha, file.index, limit)?;
         let read_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = Instant::now();
-        let tokens =
-            syntax::cached_diff_tokens_cancellable(&file.path, &diff, || false).unwrap_or_default();
+        let tokens = syntax::cached_diff_tokens_cancellable(
+            &file.path,
+            &diff,
+            diff.sources.as_deref(),
+            || false,
+        )
+        .unwrap_or_default();
         let syntax_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = Instant::now();
-        let cached_tokens =
-            syntax::cached_diff_tokens_cancellable(&file.path, &diff, || false).unwrap_or_default();
+        let cached_tokens = syntax::cached_diff_tokens_cancellable(
+            &file.path,
+            &diff,
+            diff.sources.as_deref(),
+            || false,
+        )
+        .unwrap_or_default();
         let syntax_cached_ms = started.elapsed().as_secs_f64() * 1000.;
         let started = Instant::now();
         let (kinds, texts) = diff::rows(&diff);
@@ -62,6 +72,7 @@ fn main() -> Result<(), String> {
             "path": file.path,
             "read_ms": read_ms,
             "syntax_ms": syntax_ms,
+            "whole_sources": diff.sources.is_some(),
             "syntax_cached_ms": syntax_cached_ms,
             "syntax_cache_reused": std::sync::Arc::ptr_eq(&tokens, &cached_tokens),
             "words_ms": words_ms,
