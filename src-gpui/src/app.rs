@@ -1611,7 +1611,9 @@ impl Render for Mangrove {
                     .render_empty_sidebar()
                     .into_any_element()
             };
-            let footer = self.chrome.read(cx).render_sidebar_footer();
+            let footer = self.chrome.update(cx, |chrome, cx| {
+                chrome.render_sidebar_footer(layout.left, window, cx)
+            });
             let divider = self.chrome.update(cx, |chrome, cx| {
                 chrome.render_divider(Pane::Left, width, window, cx)
             });
