@@ -177,8 +177,8 @@ impl Chrome {
                 this.integration_event(event, window, cx)
             }),
             cx.subscribe(&recent_filter, |_, _, _: &InputEvent, cx| cx.notify()),
-            // Downloads report their progress five times a second; the top
-            // bar and the palette only follow the badge and running work.
+            // Downloads report their progress five times a second; the version
+            // line and the palette only follow the badge and running work.
             cx.observe(&updater, |this, updater, cx| {
                 let updater = updater.read(cx);
                 let shown = (updater.badge(), updater.busy());
@@ -917,9 +917,6 @@ impl Chrome {
                     .when(self.busy_visible, |view| {
                         view.child(icon(IconName::LoaderCircle, 16., p.accent))
                     })
-                    .when_some(self.updater.read(cx).badge(), |view, badge| {
-                        view.child(update_badge(badge, p, offset, cx))
-                    })
                     .when(self.has_remotes, |view| {
                         view.child(
                             Button::new("fetch")
@@ -1008,25 +1005,32 @@ impl Chrome {
             )
             .into_any_element()
     }
-    pub fn render_sidebar_footer(&self) -> AnyElement {
+    pub fn render_sidebar_footer(
+        &self,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = self.preferences.palette();
         let offset = self.preferences.font_size_offset;
-        div()
+        let padding = if self.preferences.left_width < 210. {
+            14.
+        } else {
+            20.
+        };
+        let badge = self.updater.read(cx).badge();
+        let compact = badge.is_some_and(|badge| {
+            labelled_badge_overflows(badge, p, offset, width - 2. * padding, window)
+        });
+        version_line(badge, compact, p, offset, cx)
             .mt_auto()
-            .h(px(40.))
+            .min_h(px(40.))
             .flex_none()
-            .flex()
-            .items_center()
-            .px(px(if self.preferences.left_width < 210. {
-                14.
-            } else {
-                20.
-            }))
+            .justify_between()
+            .py(px(6.))
+            .px(px(padding))
             .border_t_1()
             .border_color(rgb(p.border))
-            .text_size(px(11. + offset))
-            .text_color(rgb(p.muted))
-            .child(version_label())
             .into_any_element()
     }
     pub fn repository_browser_open(&self) -> bool {
@@ -1340,6 +1344,7 @@ impl Chrome {
             .active()
             .map(|profile| profile.favorites.as_slice())
             .unwrap_or_default();
+        let badge = self.updater.read(cx).badge();
         let section = |title: &'static str| {
             div()
                 .w_full()
@@ -1584,12 +1589,10 @@ impl Chrome {
                 )
             })
             .child(
-                div()
+                version_line(badge, false, p, offset, cx)
                     .mt_auto()
                     .pt(px(32.))
-                    .text_size(px(11. + offset))
-                    .text_color(rgb(p.muted))
-                    .child(version_label()),
+                    .justify_center(),
             );
         div()
             .id("welcome")
@@ -1976,48 +1979,137 @@ struct RepositoryRow {
     nested: bool,
 }
 
-/// A newer version, installed or available, beside the top bar's buttons.
-fn update_badge(
-    badge: UpdateBadge,
+/// The running version, then the newer one to look at or restart into.
+/// `compact` keeps only the button's icon; the line still wraps when even
+/// that does not fit.
+fn version_line(
+    badge: Option<UpdateBadge>,
+    compact: bool,
     p: Palette,
     offset: f32,
     cx: &mut Context<Chrome>,
-) -> NativeButton {
-    let (id, glyph, label, tooltip, event) = match badge {
+) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(11. + offset))
+        .text_color(rgb(p.muted))
+        .child(version_label())
+        .when_some(badge, |view, badge| {
+            view.child(update_badge(badge, compact, p, offset, cx))
+        })
+}
+
+fn version_label() -> String {
+    format!("Version {}", env!("CARGO_PKG_VERSION"))
+}
+
+fn badge_label(badge: UpdateBadge) -> &'static str {
+    match badge {
+        UpdateBadge::Ready(_) => "Redémarrer",
+        UpdateBadge::Available(_) => "Mise à jour",
+    }
+}
+
+/// Whether the version and the labelled button need more than `width`.
+fn labelled_badge_overflows(
+    badge: UpdateBadge,
+    p: Palette,
+    offset: f32,
+    width: f32,
+    window: &Window,
+) -> bool {
+    let measure = |text: &str, weight| {
+        let run = TextRun {
+            len: text.len(),
+            font: Font {
+                weight,
+                ..font(p.font)
+            },
+            color: rgb(p.text).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .layout_line(text, px(11. + offset), &[run], None)
+            .width
+    };
+    // The line's gap, then the button's border, padding, icon and its gap.
+    measure(&version_label(), FontWeight::NORMAL)
+        + px(40.)
+        + measure(badge_label(badge), FontWeight::MEDIUM)
+        > px(width)
+}
+
+/// A newer version, installed or available; the tooltip names it. Compact,
+/// a round icon button whose pastille tells the two apart.
+fn update_badge(
+    badge: UpdateBadge,
+    compact: bool,
+    p: Palette,
+    offset: f32,
+    cx: &mut Context<Chrome>,
+) -> AnyElement {
+    let (id, glyph, tooltip, event) = match badge {
         UpdateBadge::Ready(version) => (
             "update-restart",
             IconName::RotateCw,
-            "Redémarrer pour mettre à jour".to_string(),
-            format!("Mangrove {version} est installé"),
+            format!("Redémarrer pour passer à Mangrove {version}"),
             ChromeEvent::RestartToUpdate,
         ),
         UpdateBadge::Available(version) => (
             "update-available",
             IconName::CircleFadingArrowUp,
-            format!("Mangrove {version} disponible"),
-            "Ouvrir les mises à jour".to_string(),
+            format!("Mangrove {version} disponible : ouvrir les mises à jour"),
             ChromeEvent::ShowUpdates,
         ),
     };
     let ready = matches!(badge, UpdateBadge::Ready(_));
+    let button = NativeButton::new(id)
+        .flex_none()
+        .border_1()
+        .cursor_pointer()
+        .accessibility_label(tooltip.clone())
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())));
+    if compact {
+        // A sibling of the button: GPUI paints borders over their children.
+        return div()
+            .relative()
+            .flex_none()
+            .child(
+                button
+                    .size(px(28.))
+                    .justify_center()
+                    .rounded_full()
+                    .border_color(rgb(p.border))
+                    .bg(rgb(p.bg))
+                    .hover(move |style| style.bg(rgb(p.hover)))
+                    .focus_visible(move |style| style.border_color(rgb(p.accent)))
+                    .child(icon(glyph, 14., p.text)),
+            )
+            .child(pastille(ready, p))
+            .into_any_element();
+    }
     let (fill, text) = if ready {
         (p.accent, p.on_accent)
     } else {
         (p.bg, p.accent)
     };
-    NativeButton::new(id)
-        .h(px(28.))
-        .px(px(10.))
-        .gap(px(6.))
-        .flex_none()
+    button
+        .h(px(24.))
+        .px(px(8.))
+        .gap(px(4.))
         .rounded(RADIUS_MD)
-        .border_1()
         .border_color(rgb(if ready { p.accent } else { p.border }))
         .bg(rgb(fill))
         .text_size(px(11. + offset))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(text))
-        .cursor_pointer()
         .hover(move |style| {
             style.bg(rgb(if ready {
                 mix(p.accent, p.text, 0.85)
@@ -2026,15 +2118,42 @@ fn update_badge(
             }))
         })
         .focus_visible(move |style| style.border_color(rgb(if ready { p.text } else { p.accent })))
-        .accessibility_label(label.clone())
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .child(icon(glyph, 14., text))
-        .child(label)
-        .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())))
+        .child(icon(glyph, 12., text))
+        .child(badge_label(badge))
+        .into_any_element()
 }
 
-fn version_label() -> String {
-    format!("Version {}", env!("CARGO_PKG_VERSION"))
+/// A dot for a newer version, a check for an installed one, on the compact
+/// button's corner. A disc of the sidebar's colour detaches it.
+fn pastille(ready: bool, p: Palette) -> Div {
+    let (outer, inner) = if ready { (16., 12.) } else { (10., 6.) };
+    div()
+        .absolute()
+        .map(|disc| {
+            if ready {
+                disc.bottom(px(-4.)).right(px(-4.))
+            } else {
+                disc.top(px(-1.)).right(px(-1.))
+            }
+        })
+        .size(px(outer))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(p.panel))
+        .child(
+            div()
+                .size(px(inner))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(p.accent))
+                .when(ready, |mark| {
+                    mark.child(icon(IconName::Check, 9., p.on_accent))
+                }),
+        )
 }
 
 fn logo(size: f32) -> AnyElement {

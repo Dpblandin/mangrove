@@ -1,6 +1,6 @@
 //! Automatic updates, shared by every profile: a check at launch and every six
 //! hours, the download and installation of a newer release, then a restart
-//! into it. The settings and the top bar show where the update stands.
+//! into it. The settings and the version line show where the update stands.
 use crate::preferences::{Preferences, save_json};
 use gpui_kit::{App, Context, Task};
 use mangrove_update::{
@@ -134,7 +134,7 @@ impl UpdateStatus {
     }
 }
 
-/// What the top bar shows: a newer version to restart into or to look at.
+/// What the version line shows: a newer version to restart into or to look at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateBadge {
     Ready(Version),
