@@ -22,7 +22,7 @@ Screenshots of Mangrove on macOS, using a demo repository with sample data.
 - **History**: branch and merge graph, references column, and search by message, author, SHA, or reference.
 - **Branches**: local and remote branches, tags, collapsible folders, filtering, and **Solo** mode; ahead/behind counts relative to the upstream branch; worktrees and stashes ([details](docs/repository-context.md)).
 - **Commits**: details, changed files, unified or side-by-side diffs with syntax highlighting and highlighted word changes, and before/after image previews.
-- **Files**: contents at a given revision, history that follows renames, and blame ([details](docs/file-browser.md)).
+- **Files**: contents at a given revision, history that follows renames with each change's diff beside the list, and blame; any file of HEAD can be found by fuzzy search from the command palette ([details](docs/file-browser.md)).
 - **Local changes**: read-only views of staged, unstaged, and untracked files.
 - **Fetch**: manual or automatic, with error summaries and detailed Git output.
 - **Updates**: checks at startup and every six hours, background installation of signed releases, and one-click restart, configurable in settings ([details](docs/releases.md#mises-à-jour-intégrées)).
