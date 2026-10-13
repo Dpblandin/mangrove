@@ -2,6 +2,18 @@
 
 Évolutions notables de Mangrove, regroupées par version. Chaque section est générée depuis les commits par `scripts/release.sh`, relue avant le tag, puis reprise telle quelle dans la release GitHub.
 
+## [0.5.0](https://github.com/Dpblandin/mangrove/releases/tag/v0.5.0) - 2026-10-13
+
+### Nouveautés
+
+- *(palette)* Historique d’un fichier : la palette de commandes retrouve tout fichier de HEAD par recherche floue, puis ouvre son historique [#23](https://github.com/Dpblandin/mangrove/issues/23)
+- *(file-browser)* L’historique d’un fichier montre la liste de ses changements à côté du diff ou du contenu du changement sélectionné, avec la navigation au clavier et le chargement des changements suivants au fil du défilement [#23](https://github.com/Dpblandin/mangrove/issues/23)
+
+### Corrections
+
+- *(core)* Un fichier de plus de 2 Mio dans un commit n’interrompt plus l’historique ni les diffs des autres fichiers de ce commit [#23](https://github.com/Dpblandin/mangrove/issues/23)
+- *(file-browser)* Une actualisation du dépôt, après un fetch ou au retour sur la fenêtre, ne ramène plus la consultation d’un fichier à sa révision initiale [#23](https://github.com/Dpblandin/mangrove/issues/23)
+
 ## [0.4.1](https://github.com/Dpblandin/mangrove/releases/tag/v0.4.1) - 2026-10-12
 
 ### Corrections
