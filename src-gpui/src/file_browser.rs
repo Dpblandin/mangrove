@@ -120,6 +120,8 @@ enum PresentationState {
 enum PresentationChange {
     Ignored,
     Replaced,
+    /// The same revision, read through the new session of a refreshed repository.
+    Rekeyed,
     Updated,
 }
 
@@ -188,9 +190,15 @@ impl FilePresentation {
         if next.revision < self.revision {
             return PresentationChange::Ignored;
         }
+        let rekeyed = match (&self.target, &next.target) {
+            (Some(old), Some(new)) => old.session_id != new.session_id && old.same_revision(new),
+            _ => false,
+        };
         let replaced = next.revision != self.revision || next.target != self.target;
         *self = next;
-        if replaced {
+        if rekeyed {
+            PresentationChange::Rekeyed
+        } else if replaced {
             PresentationChange::Replaced
         } else {
             PresentationChange::Updated
@@ -487,8 +495,14 @@ impl FileBrowser {
     pub fn present(&mut self, presentation: FilePresentation, cx: &mut Context<Self>) {
         let was_loading = self.source.loading_source();
         let change = self.source.accept(presentation);
-        if change == PresentationChange::Ignored {
-            return;
+        match change {
+            PresentationChange::Ignored => return,
+            PresentationChange::Rekeyed => {
+                if let Some(session) = self.source.target.as_ref().map(|t| t.session_id.clone()) {
+                    self.rekey(&session, cx);
+                }
+            }
+            _ => {}
         }
         let target = self.source.target.clone();
         let diff = self
@@ -513,6 +527,44 @@ impl FileBrowser {
             self.load_retained_view(cx);
         }
         cx.notify();
+    }
+    /// Follows the shown revisions into the new session of a refreshed
+    /// repository. Reads queued or running for the old session start again.
+    pub fn rekey(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        for target in [
+            self.source.target.as_mut(),
+            self.target.as_mut(),
+            self.history.as_mut().map(|history| &mut history.root),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            target.session_id = session_id.to_owned();
+        }
+        // Reads that failed with the closed session are read again too.
+        let failed = self.error.take().is_some();
+        let reading = (self.loading || failed) && self.target != self.source.target;
+        let paging = self.history_loading || self.history_error.is_some();
+        let inspecting = self.inspection_sha.take();
+        self.cancel_reads();
+        self.cancel_history_reads();
+        self.pending_inspection = None;
+        // A hidden view reads once shown; the end of the list asks for its page.
+        if !self.visible {
+            return;
+        }
+        if reading || !self.source.loading_source() {
+            self.load(cx);
+        }
+        if paging {
+            self.load_more(cx);
+        }
+        if let Some(sha) = inspecting {
+            self.inspect_commit(sha, cx);
+        }
+        if self.diff.is_some() && self.diff_highlights.is_none() {
+            self.resume_diff_color(cx);
+        }
     }
     /// The view of the shown revision: the history shows its selected change.
     fn view(&self) -> FileView {
@@ -2347,6 +2399,37 @@ mod tests {
     }
 
     #[test]
+    fn a_refreshed_session_keeps_the_revision_but_a_new_choice_restarts_it() {
+        let original = target("a");
+        let mut source = FilePresentation::ready(1, original.clone(), prepared());
+        let moved = FileTarget {
+            session_id: "refreshed-session".into(),
+            ..original.clone()
+        };
+        assert!(
+            source.accept(FilePresentation::loading(2, moved.clone(), None))
+                == PresentationChange::Rekeyed
+        );
+        assert!(
+            source.accept(FilePresentation::ready(2, moved.clone(), prepared()))
+                == PresentationChange::Updated
+        );
+        // Choosing the same file again in the same session restarts its view.
+        assert!(
+            source.accept(FilePresentation::loading(3, moved.clone(), None))
+                == PresentationChange::Replaced
+        );
+        let other = FileTarget {
+            session_id: "other-session".into(),
+            ..target("b")
+        };
+        assert!(
+            source.accept(FilePresentation::ready(4, other, prepared()))
+                == PresentationChange::Replaced
+        );
+    }
+
+    #[test]
     fn history_pages_accumulate_until_a_long_run_without_change() {
         let mut history = FileHistory::new(target("a"));
         assert_eq!(history.next_page(), Some(None));
@@ -2574,6 +2657,49 @@ mod tests {
             let history = view.history.as_ref().unwrap();
             assert_eq!(history.root, target("b"));
             assert!(history.entries.is_empty());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_inspector_revision_keeps_its_history_when_the_repository_is_refreshed(
+        cx: &mut TestAppContext,
+    ) {
+        let (_root, browser) = browser(cx);
+        browser.update(cx, |view, cx| {
+            let selected = FileTarget {
+                sha: "c3".into(),
+                ..target("a")
+            };
+            view.present(FilePresentation::ready(1, selected.clone(), prepared()), cx);
+            view.set_visible(true, cx);
+            view.show(FileView::History, cx);
+            view.history_loading = false;
+            let changes = vec![change("c3", "a"), change("c2", "a")];
+            view.append_history(page(changes, Some("next"), 2), cx);
+            // The selected commit's own change keeps the inspector's patch.
+            assert_eq!(view.history.as_ref().unwrap().selected, Some(0));
+            assert!(view.diff.is_some());
+            view.select_change(1, cx);
+            // Reads that failed while the old session closed are read again.
+            view.loading = false;
+            view.error = Some("Ce dépôt a été fermé ou actualisé.".into());
+            view.history_error = Some("Ce dépôt a été fermé ou actualisé.".into());
+            let moved = FileTarget {
+                session_id: "refreshed-session".into(),
+                ..selected
+            };
+            view.present(FilePresentation::loading(2, moved.clone(), None), cx);
+            assert!(view.error.is_none() && view.history_error.is_none());
+            assert!(view.loading && view.history_loading);
+            view.present(FilePresentation::ready(2, moved, prepared()), cx);
+            let history = view.history.as_ref().unwrap();
+            assert_eq!(history.selected, Some(1));
+            assert_eq!(history.root.session_id, "refreshed-session");
+            assert_eq!(view.target.as_ref().unwrap().sha, "c2");
+            assert_eq!(
+                view.target.as_ref().unwrap().session_id,
+                "refreshed-session"
+            );
         });
     }
 

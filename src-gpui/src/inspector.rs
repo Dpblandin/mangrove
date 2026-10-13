@@ -677,7 +677,26 @@ impl InspectorView {
         }
         self.error = None;
         self.viewer_dirty = true;
-        let presentation = FilePresentation::empty(self.revision.file);
+        let id = self
+            .repository
+            .as_ref()
+            .map(|r| r.id.clone())
+            .unwrap_or_default();
+        // The same commit's file keeps its view across the new session.
+        let presentation = match (&self.selection, &self.snapshot) {
+            (Selection::Commit(sha), Some(snapshot)) if same_path && !sha.is_empty() => {
+                let target = FileTarget {
+                    session_id: id,
+                    sha: sha.clone(),
+                    file_key: snapshot.file.key.clone(),
+                    path: snapshot.file.path.clone(),
+                    old_path: snapshot.file.old_path.clone(),
+                    status: snapshot.file.status.clone(),
+                };
+                snapshot.presentation(self.revision.file, target, true)
+            }
+            _ => FilePresentation::empty(self.revision.file),
+        };
         self.browser
             .update(cx, |view, cx| view.present(presentation, cx));
         self.pump(cx);
