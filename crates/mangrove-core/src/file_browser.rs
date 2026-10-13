@@ -329,7 +329,8 @@ pub(crate) fn revision_diff(
         None
     };
     let mut diff = metadata_diff(repository, parent.as_ref(), &tree)?;
-    find_renames(repository, &mut diff, &mut BlobBudget::default())?;
+    // As in commit details: large candidates limit the detection, never the file's own patch.
+    crate::similarity::find_renames(repository, &mut diff, false)?;
     match diff.deltas().position(|delta| {
         delta.new_file().path_bytes() == Some(path.as_slice())
             || delta.old_file().path_bytes() == Some(path.as_slice())
@@ -397,14 +398,11 @@ struct HistoryStep {
     entry: Option<FileHistoryEntry>,
     next: Option<Oid>,
     reached_root: bool,
+    /// A creation whose rename detection was limited may hide an older path.
+    limitation: Option<String>,
 }
 
-fn history_step(
-    repository: &Repository,
-    id: Oid,
-    path: &mut Vec<u8>,
-    budget: &mut BlobBudget,
-) -> Result<HistoryStep> {
+fn history_step(repository: &Repository, id: Oid, path: &mut Vec<u8>) -> Result<HistoryStep> {
     let revision = repository.find_commit(id).map_err(object_error)?;
     let tree = revision.tree().map_err(object_error)?;
     let parent = if revision.parent_count() > 0 {
@@ -428,6 +426,7 @@ fn history_step(
         entry: None,
         next: parent.as_ref().map(|parent| parent.id()),
         reached_root: parent.is_none(),
+        limitation: None,
     };
     if current == previous {
         return Ok(step);
@@ -441,9 +440,10 @@ fn history_step(
     };
     let mut old_path = None;
     let selected_path = path.clone();
+    let mut limited = None;
     if current.is_some() && previous.is_none() && parent.is_some() {
         let mut diff = metadata_diff(repository, parent_tree.as_ref(), &tree)?;
-        find_renames(repository, &mut diff, budget)?;
+        limited = crate::similarity::find_renames(repository, &mut diff, false)?;
         if let Some(delta) = diff.deltas().find(|delta| {
             delta.status() == Delta::Renamed
                 && delta.new_file().path_bytes() == Some(path.as_slice())
@@ -469,6 +469,12 @@ fn history_step(
     });
     if status == "added" {
         step.next = None;
+        step.limitation = limited.map(|reason| {
+            format!(
+                "Création apparente au commit {} : un renommage n’a pas pu être vérifié. {reason}",
+                &id.to_string()[..7]
+            )
+        });
     }
     Ok(step)
 }
@@ -501,10 +507,9 @@ pub(crate) fn history(
         limitation: None,
     };
     let started = Instant::now();
-    let mut budget = BlobBudget::default();
     while let Some(id) = next {
         result.scanned += 1;
-        let step = match history_step(repository, id, &mut path, &mut budget) {
+        let step = match history_step(repository, id, &mut path) {
             Ok(step) => step,
             Err(error) => {
                 // Keep the already-read page when a later ancestor or rename object is absent.
@@ -514,6 +519,9 @@ pub(crate) fn history(
         };
         if let Some(entry) = step.entry {
             result.entries.push(entry);
+        }
+        if step.limitation.is_some() {
+            result.limitation = step.limitation;
         }
         next = step.next;
         if step.reached_root && repository.is_shallow() {

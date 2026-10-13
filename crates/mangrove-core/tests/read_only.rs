@@ -3574,6 +3574,88 @@ fn file_history_keeps_completed_entries_when_an_ancestor_tree_is_missing() {
 }
 
 #[test]
+fn large_rename_candidates_limit_detection_without_failing_history_or_diffs() {
+    let fixture = Fixture::new();
+    let repository = &fixture.repository;
+    let huge = vec![b'x'; 2 * 1024 * 1024 + 1];
+    let other = vec![b'y'; 2 * 1024 * 1024 + 1];
+    let initial = commit(
+        repository,
+        "initial",
+        &[],
+        &[
+            ("old.txt", b"one\ntwo\nthree\nfour\n"),
+            ("kept.txt", b"same\n"),
+            ("notes.txt", b"a\n"),
+        ],
+        Some("HEAD"),
+    );
+    // One commit edits a moved file, moves another unchanged and adds a large file.
+    let moved = commit(
+        repository,
+        "move",
+        &[initial],
+        &[
+            ("new.txt", b"one\ntwo\nthree\nfour\nfive\n"),
+            ("same.txt", b"same\n"),
+            ("notes.txt", b"b\n"),
+            ("large.bin", &huge),
+        ],
+        Some("HEAD"),
+    );
+    let edited = commit(
+        repository,
+        "edit",
+        &[moved],
+        &[
+            ("new.txt", b"one\ntwo\nthree\nfour\nfive\nsix\n"),
+            ("same.txt", b"same\n"),
+            ("notes.txt", b"b\n"),
+            ("large.bin", &other),
+        ],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let history = workspace
+        .file_history(&info.id, &edited.to_string(), &working_key("new.txt"), None)
+        .unwrap();
+    let statuses: Vec<_> = history.entries.iter().map(|e| e.status.as_str()).collect();
+    assert_eq!(statuses, ["modified", "added"]);
+    let limitation = history.limitation.unwrap();
+    assert!(limitation.contains("2 Mio"), "{limitation}");
+    assert!(history.next_cursor.is_none());
+    // Identical contents are still followed without reading the large blob.
+    let history = workspace
+        .file_history(
+            &info.id,
+            &edited.to_string(),
+            &working_key("same.txt"),
+            None,
+        )
+        .unwrap();
+    let paths: Vec<_> = history
+        .entries
+        .iter()
+        .map(|e| (e.status.as_str(), e.path.as_str()))
+        .collect();
+    assert_eq!(paths, [("renamed", "same.txt"), ("added", "kept.txt")]);
+    // The other files of that commit keep their patches.
+    let diff = workspace
+        .file_revision_diff(
+            &info.id,
+            &moved.to_string(),
+            &working_key("notes.txt"),
+            PreviewLimit::MIN,
+        )
+        .unwrap();
+    assert_eq!((diff.additions, diff.deletions), (1, 1));
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
 fn file_history_marks_an_apparent_creation_at_a_shallow_boundary() {
     let fixture = Fixture::new();
     let initial = commit(
