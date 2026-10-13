@@ -8,6 +8,7 @@ mod code_view;
 mod command_palette;
 mod diff;
 mod file_browser;
+mod file_search;
 mod format;
 mod graph;
 mod history;

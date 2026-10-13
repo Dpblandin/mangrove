@@ -528,6 +528,21 @@ impl FileBrowser {
         }
         cx.notify();
     }
+    /// Shows a file chosen by path rather than from the inspector's selection.
+    pub fn open_file(&mut self, target: FileTarget, mode: FileView, cx: &mut Context<Self>) {
+        self.source = FilePresentation {
+            revision: self.source.revision,
+            target: Some(target.clone()),
+            prepared: None,
+            state: PresentationState::Ready,
+        };
+        self.select_target(Some(target), None, cx);
+        self.mode = mode;
+        if self.visible {
+            self.load(cx);
+        }
+        cx.notify();
+    }
     /// Follows the shown revisions into the new session of a refreshed
     /// repository. Reads queued or running for the old session start again.
     pub fn rekey(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -2700,6 +2715,30 @@ mod tests {
                 view.target.as_ref().unwrap().session_id,
                 "refreshed-session"
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_file_opened_by_path_lists_its_history(cx: &mut TestAppContext) {
+        let (_root, browser) = browser(cx);
+        browser.update(cx, |view, cx| {
+            view.set_visible(true, cx);
+            view.present(FilePresentation::ready(1, target("a"), prepared()), cx);
+            let head = FileTarget {
+                status: "unmodified".into(),
+                ..target("b")
+            };
+            view.open_file(head.clone(), FileView::History, cx);
+            assert_eq!(view.mode, FileView::History);
+            assert_eq!(view.source.target.as_ref(), Some(&head));
+            assert!(view.history_loading);
+            assert_eq!(view.history.as_ref().unwrap().root, head);
+            // The view chosen for the inspector's files stays theirs.
+            assert_eq!(view.preferred, FileView::Diff);
+            // The selection's next file replaces it.
+            view.present(FilePresentation::ready(1, target("c"), prepared()), cx);
+            assert_eq!(view.mode, FileView::Diff);
+            assert_eq!(view.target, Some(target("c")));
         });
     }
 

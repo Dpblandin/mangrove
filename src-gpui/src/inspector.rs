@@ -412,6 +412,10 @@ pub struct InspectorView {
     viewer: Entity<CodeView>,
     image_preview: Entity<ImagePreview>,
     browser: Entity<FileBrowser>,
+    /// A file opened by path, shown instead of the selection's file.
+    opened_file: Option<FileTarget>,
+    /// The selection's latest file, held while an opened file is shown.
+    presented: FilePresentation,
     viewer_dirty: bool,
     pending: Option<ReadRequest>,
     pending_status: bool,
@@ -532,6 +536,8 @@ impl InspectorView {
             viewer,
             image_preview,
             browser,
+            opened_file: None,
+            presented: FilePresentation::empty(0),
             viewer_dirty: true,
             pending: None,
             pending_status: false,
@@ -598,8 +604,7 @@ impl InspectorView {
         self.status_error = None;
         self.viewer_dirty = true;
         let presentation = FilePresentation::empty(self.revision.file);
-        self.browser
-            .update(cx, |view, cx| view.present(presentation, cx));
+        self.present_file(presentation, cx);
         self.close_workspace(cx);
         cx.notify();
     }
@@ -682,6 +687,10 @@ impl InspectorView {
             .as_ref()
             .map(|r| r.id.clone())
             .unwrap_or_default();
+        if let Some(file) = &mut self.opened_file {
+            file.session_id = id.clone();
+            self.browser.update(cx, |view, cx| view.rekey(&id, cx));
+        }
         // The same commit's file keeps its view across the new session.
         let presentation = match (&self.selection, &self.snapshot) {
             (Selection::Commit(sha), Some(snapshot)) if same_path && !sha.is_empty() => {
@@ -697,10 +706,63 @@ impl InspectorView {
             }
             _ => FilePresentation::empty(self.revision.file),
         };
-        self.browser
-            .update(cx, |view, cx| view.present(presentation, cx));
+        self.present_file(presentation, cx);
         self.pump(cx);
         cx.notify();
+    }
+    /// The selection's file reaches the browser unless a file opened by path is shown.
+    fn present_file(&mut self, presentation: FilePresentation, cx: &mut Context<Self>) {
+        self.presented = presentation.clone();
+        if self.opened_file.is_none() {
+            self.browser
+                .update(cx, |view, cx| view.present(presentation, cx));
+        }
+    }
+    /// Shows the history of a file chosen by path in the central view.
+    pub fn open_file_history(
+        &mut self,
+        target: FileTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .repository
+            .as_ref()
+            .is_none_or(|r| r.id != target.session_id)
+        {
+            return;
+        }
+        self.opened_file = Some(target.clone());
+        self.browser
+            .update(cx, |view, cx| view.open_file(target, FileView::History, cx));
+        let was_active = self.central_active();
+        self.compact = false;
+        self.workspace_open = true;
+        self.restore_open = None;
+        self.preload_task = None;
+        self.viewer_dirty = true;
+        if !was_active {
+            self.mode_changed(true, cx);
+        }
+        self.browser.update(cx, |view, cx| view.focus(window, cx));
+        cx.notify();
+    }
+    /// Gives the central view back to the selection's file.
+    fn release_opened_file(&mut self, cx: &mut Context<Self>) {
+        if self.opened_file.take().is_some() {
+            let presentation = self.presented.clone();
+            self.browser
+                .update(cx, |view, cx| view.present(presentation, cx));
+        }
+    }
+    /// The selection's file is gone: its central view closes, not a file opened by path.
+    fn close_selection_file(&mut self, cx: &mut Context<Self>) {
+        if self.opened_file.is_none() {
+            self.close_workspace(cx);
+        }
+    }
+    pub fn has_opened_file(&self) -> bool {
+        self.opened_file.is_some()
     }
     pub fn set_theme(&mut self, palette: Palette, cx: &mut Context<Self>) {
         if self.palette == palette {
@@ -821,7 +883,7 @@ impl InspectorView {
         InspectorViewState {
             sha: Some(sha.clone()).filter(|sha| !sha.is_empty()),
             file_key: self.intent.choice().map(|file| file.key.clone()),
-            open: self.workspace_open,
+            open: self.workspace_open && self.opened_file.is_none(),
             reading: self
                 .central_active()
                 .then(|| self.browser.read(cx).reading_position(cx))
@@ -839,6 +901,9 @@ impl InspectorView {
         [self.revision.selection, self.revision.file]
     }
     pub fn command_file(&self) -> Option<(&str, bool)> {
+        if let Some(file) = &self.opened_file {
+            return Some((&file.path, true));
+        }
         let choice = self.intent.choice()?;
         if self.details_loading || self.diff_loading || self.status_loading {
             return None;
@@ -865,7 +930,9 @@ impl InspectorView {
     }
     /// Hunk navigation in the visible diff, central or compact.
     fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if self.central_active() && matches!(self.selection, Selection::Commit(_)) {
+        if self.central_active()
+            && (matches!(self.selection, Selection::Commit(_)) || self.opened_file.is_some())
+        {
             self.browser
                 .update(cx, |view, cx| view.jump_hunk(forward, cx));
         } else {
@@ -1092,10 +1159,11 @@ impl InspectorView {
         } else {
             FilePresentation::empty(self.revision.file)
         };
-        self.browser
-            .update(cx, |view, cx| view.present(presentation, cx));
+        self.present_file(presentation, cx);
         if !unchanged_panel {
-            self.close_workspace(cx);
+            // A restored or emptied selection leaves a file opened by path;
+            // explicit navigations close it first.
+            self.close_selection_file(cx);
         }
         !unchanged_panel
     }
@@ -1214,6 +1282,7 @@ impl InspectorView {
     }
     pub fn close_workspace(&mut self, cx: &mut Context<Self>) {
         let was_active = self.central_active();
+        self.release_opened_file(cx);
         self.workspace_open = false;
         self.restore_open = None;
         self.preload_task = None;
@@ -1313,6 +1382,13 @@ impl InspectorView {
         };
         self.choose(file, cx);
     }
+    /// A file the user picks takes the central view back from a file opened by path.
+    fn choose_explicitly(&mut self, file: FileChoice, cx: &mut Context<Self>) {
+        if !self.details_loading {
+            self.opened_file = None;
+        }
+        self.choose(file, cx);
+    }
     fn choose(&mut self, file: FileChoice, cx: &mut Context<Self>) {
         if self.details_loading {
             return;
@@ -1359,8 +1435,7 @@ impl InspectorView {
                 status: file.status.clone(),
             };
             let presentation = FilePresentation::loading(self.revision.file, target, None);
-            self.browser
-                .update(cx, |view, cx| view.present(presentation, cx));
+            self.present_file(presentation, cx);
         }
         if !self.compact {
             self.mode_changed(true, cx);
@@ -1442,8 +1517,7 @@ impl InspectorView {
                 status: snapshot.file.status.clone(),
             };
             let presentation = snapshot.presentation(self.revision.file, target, false);
-            self.browser
-                .update(cx, |view, cx| view.present(presentation, cx));
+            self.present_file(presentation, cx);
         }
         self.snapshot = Some(snapshot);
         self.diff_loading = false;
@@ -1745,7 +1819,7 @@ impl InspectorView {
                                     self.diff_loading = false;
                                     self.pending = None;
                                     self.viewer_dirty = true;
-                                    self.close_workspace(cx);
+                                    self.close_selection_file(cx);
                                 }
                                 RefreshedIntent::Stale | RefreshedIntent::Empty => {}
                             }
@@ -1817,8 +1891,7 @@ impl InspectorView {
                                 };
                                 let presentation =
                                     FilePresentation::loading(self.revision.file, target, None);
-                                self.browser
-                                    .update(cx, |view, cx| view.present(presentation, cx));
+                                self.present_file(presentation, cx);
                             }
                             self.pending = Some(ReadRequest {
                                 revision: self.revision,
@@ -1833,8 +1906,7 @@ impl InspectorView {
                         } else {
                             self.diff_loading = false;
                             let presentation = FilePresentation::empty(self.revision.file);
-                            self.browser
-                                .update(cx, |view, cx| view.present(presentation, cx));
+                            self.present_file(presentation, cx);
                             if let Some(open) = self.restore_open.take() {
                                 let was_active = self.central_active();
                                 self.workspace_open = open;
@@ -1866,8 +1938,7 @@ impl InspectorView {
                         self.intent.clear();
                         self.viewer_dirty = true;
                         let presentation = FilePresentation::empty(self.revision.file);
-                        self.browser
-                            .update(cx, |view, cx| view.present(presentation, cx));
+                        self.present_file(presentation, cx);
                     }
                     _ => {}
                 }
@@ -1896,7 +1967,7 @@ impl InspectorView {
                         self.intent.clear();
                         self.snapshot = None;
                         self.restore_open = None;
-                        self.close_workspace(cx);
+                        self.close_selection_file(cx);
                     }
                 }
                 self.schedule_preload(cx);
@@ -2100,7 +2171,7 @@ impl InspectorView {
         crate::perf::record_operation("ui_prepare", prepare_start.elapsed());
     }
     pub fn render_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if matches!(self.selection, Selection::Commit(_)) {
+        if matches!(self.selection, Selection::Commit(_)) || self.opened_file.is_some() {
             return div()
                 .size_full()
                 .min_w_0()
@@ -2392,7 +2463,7 @@ impl InspectorView {
                         window.focus(&focus, cx);
                         view.active_file[list] = index;
                         view.scroll[list].scroll_to_item(index, ScrollStrategy::Nearest);
-                        view.choose(choice.clone(), cx);
+                        view.choose_explicitly(choice.clone(), cx);
                     }))
                     .into_any_element()
             })
@@ -2526,7 +2597,7 @@ impl InspectorView {
         };
         self.active_file[list] = target;
         self.scroll[list].scroll_to_item(target, ScrollStrategy::Nearest);
-        self.choose(files[target].clone(), cx);
+        self.choose_explicitly(files[target].clone(), cx);
     }
     fn compact_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.viewer.update(cx, |v, cx| v.set_split_host(false, cx));
