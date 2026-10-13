@@ -23,6 +23,7 @@ const MAX_FILE_KEY_LENGTH: usize = 32 * 1024;
 const MAX_DIFF_FILES: usize = 5_000;
 const MAX_RENAME_CANDIDATES: usize = 200;
 const MAX_BLAME_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_TREE_FILES: usize = 100_000;
 const SHALLOW_LIMITATION: &str = "Frontière shallow atteinte ; les révisions plus anciennes peuvent être absentes. Aucun fetch automatique.";
 
 pub(crate) fn path_bytes(key: &str) -> Result<Vec<u8>> {
@@ -75,6 +76,46 @@ fn entry(repository: &Repository, tree: &Tree<'_>, path: &[u8]) -> Result<Option
         current = repository.find_tree(id).map_err(object_error)?;
     }
     Ok(None)
+}
+
+/// Blobs and links of a revision, keyed by their raw tree names. A
+/// directory lists its files before its subdirectories.
+pub(crate) fn tree_files(repository: &Repository, sha: &str, max: usize) -> Result<TreeFiles> {
+    let revision = commit(repository, sha)?;
+    let mut result = TreeFiles {
+        sha: revision.id().to_string(),
+        files: vec![],
+        truncated: false,
+    };
+    let mut pending = vec![(Vec::new(), revision.tree_id())];
+    while let Some((prefix, id)) = pending.pop() {
+        let tree = repository.find_tree(id).map_err(object_error)?;
+        let mut directories = Vec::new();
+        for item in tree.iter() {
+            let mut path = prefix.clone();
+            if !path.is_empty() {
+                path.push(b'/');
+            }
+            path.extend_from_slice(item.name_bytes());
+            match item.kind() {
+                Some(ObjectType::Tree) => directories.push((path, item.id())),
+                Some(ObjectType::Blob) => {
+                    if result.files.len() == max {
+                        result.truncated = true;
+                        return Ok(result);
+                    }
+                    result.files.push(TreeFile {
+                        file_key: file_key(&path),
+                        path: String::from_utf8_lossy(&path).into_owned(),
+                    });
+                }
+                // A submodule's commit belongs to another repository.
+                _ => {}
+            }
+        }
+        pending.extend(directories.into_iter().rev());
+    }
+    Ok(result)
 }
 
 pub(crate) fn content(
@@ -631,4 +672,38 @@ pub(crate) fn blame(repository: &Repository, sha: &str, key: &str) -> Result<Fil
         groups,
         limitation: limitation.filter(|_| reached_boundary),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tree_files;
+    use git2::{Repository, Signature};
+
+    #[test]
+    fn tree_listing_stops_at_its_bound_and_says_so() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = Repository::init(root.path()).unwrap();
+        let blob = repository.blob(b"text\n").unwrap();
+        let mut builder = repository.treebuilder(None).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            builder.insert(name, blob, 0o100644).unwrap();
+        }
+        let tree = repository.find_tree(builder.write().unwrap()).unwrap();
+        let signature = Signature::now("Test", "test@example.org").unwrap();
+        let id = repository
+            .commit(None, &signature, &signature, "files", &tree, &[])
+            .unwrap()
+            .to_string();
+        let whole = tree_files(&repository, &id, 3).unwrap();
+        assert_eq!(whole.files.len(), 3);
+        assert!(!whole.truncated);
+        let bounded = tree_files(&repository, &id, 2).unwrap();
+        let paths: Vec<_> = bounded
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+        assert!(bounded.truncated);
+    }
 }

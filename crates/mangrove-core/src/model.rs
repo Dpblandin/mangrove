@@ -398,6 +398,23 @@ pub struct FileHistoryPage {
     pub limitation: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeFile {
+    pub path: String,
+    pub file_key: String,
+}
+
+/// Files of one revision, without its submodules.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeFiles {
+    pub sha: String,
+    pub files: Vec<TreeFile>,
+    /// The listing stopped at its bound; later directories are missing.
+    pub truncated: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlameGroup {
