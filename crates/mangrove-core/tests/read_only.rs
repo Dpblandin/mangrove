@@ -2888,6 +2888,60 @@ fn file_views_use_revision_objects_and_preserve_every_source_file() {
 }
 
 #[test]
+fn tree_files_list_raw_paths_of_a_revision_without_submodules_or_worktree_reads() {
+    let fixture = Fixture::new();
+    let repository = &fixture.repository;
+    let blob = repository.blob(b"text\n").unwrap();
+    let mut nested = repository.treebuilder(None).unwrap();
+    nested.insert("deep.rs", blob, 0o100644).unwrap();
+    nested
+        .insert(b"raw-\xff.txt".as_slice(), blob, 0o100644)
+        .unwrap();
+    let nested = nested.write().unwrap();
+    let mut root = repository.treebuilder(None).unwrap();
+    root.insert("src", nested, 0o040000).unwrap();
+    root.insert("README.md", blob, 0o100644).unwrap();
+    root.insert("link", repository.blob(b"README.md").unwrap(), 0o120000)
+        .unwrap();
+    // A gitlink names a commit of another repository.
+    root.insert("vendor", Oid::from_str(&"1".repeat(40)).unwrap(), 0o160000)
+        .unwrap();
+    let tree = repository.find_tree(root.write().unwrap()).unwrap();
+    let signature = Signature::now("Test", "test@example.org").unwrap();
+    let id = repository
+        .commit(Some("HEAD"), &signature, &signature, "tree", &tree, &[])
+        .unwrap();
+    let before = snapshot(&fixture.source);
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    let listing = workspace.tree_files(&info.id, &id.to_string()).unwrap();
+    assert_eq!(listing.sha, id.to_string());
+    assert!(!listing.truncated);
+    let paths: Vec<_> = listing
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        ["README.md", "link", "src/deep.rs", "src/raw-\u{fffd}.txt"]
+    );
+    // The lossy label never identifies the file: its key keeps the raw byte.
+    let raw = &listing.files[3];
+    let raw_key: String = b"src/raw-\xff.txt"
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(raw.file_key, raw_key);
+    let content = workspace
+        .file_content(&info.id, &id.to_string(), &raw.file_key, PreviewLimit::MIN)
+        .unwrap();
+    assert_eq!(content.lines, ["text"]);
+    assert!(workspace.tree_files(&info.id, &"0".repeat(40)).is_err());
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
 fn file_history_follows_a_rename_over_a_former_directory() {
     let fixture = Fixture::new();
     let signature = Signature::now("Author", "author@example.org").unwrap();
@@ -3516,6 +3570,88 @@ fn file_history_keeps_completed_entries_when_an_ancestor_tree_is_missing() {
         )
         .unwrap_err();
     assert!(absent_commit.contains("Objet Git absent"));
+    assert_eq!(before, snapshot(&fixture.source));
+}
+
+#[test]
+fn large_rename_candidates_limit_detection_without_failing_history_or_diffs() {
+    let fixture = Fixture::new();
+    let repository = &fixture.repository;
+    let huge = vec![b'x'; 2 * 1024 * 1024 + 1];
+    let other = vec![b'y'; 2 * 1024 * 1024 + 1];
+    let initial = commit(
+        repository,
+        "initial",
+        &[],
+        &[
+            ("old.txt", b"one\ntwo\nthree\nfour\n"),
+            ("kept.txt", b"same\n"),
+            ("notes.txt", b"a\n"),
+        ],
+        Some("HEAD"),
+    );
+    // One commit edits a moved file, moves another unchanged and adds a large file.
+    let moved = commit(
+        repository,
+        "move",
+        &[initial],
+        &[
+            ("new.txt", b"one\ntwo\nthree\nfour\nfive\n"),
+            ("same.txt", b"same\n"),
+            ("notes.txt", b"b\n"),
+            ("large.bin", &huge),
+        ],
+        Some("HEAD"),
+    );
+    let edited = commit(
+        repository,
+        "edit",
+        &[moved],
+        &[
+            ("new.txt", b"one\ntwo\nthree\nfour\nfive\nsix\n"),
+            ("same.txt", b"same\n"),
+            ("notes.txt", b"b\n"),
+            ("large.bin", &other),
+        ],
+        Some("HEAD"),
+    );
+    let workspace = fixture.workspace();
+    let info = fixture.open(&workspace);
+    finish(&workspace, &info.id);
+    let before = snapshot(&fixture.source);
+    let history = workspace
+        .file_history(&info.id, &edited.to_string(), &working_key("new.txt"), None)
+        .unwrap();
+    let statuses: Vec<_> = history.entries.iter().map(|e| e.status.as_str()).collect();
+    assert_eq!(statuses, ["modified", "added"]);
+    let limitation = history.limitation.unwrap();
+    assert!(limitation.contains("2 Mio"), "{limitation}");
+    assert!(history.next_cursor.is_none());
+    // Identical contents are still followed without reading the large blob.
+    let history = workspace
+        .file_history(
+            &info.id,
+            &edited.to_string(),
+            &working_key("same.txt"),
+            None,
+        )
+        .unwrap();
+    let paths: Vec<_> = history
+        .entries
+        .iter()
+        .map(|e| (e.status.as_str(), e.path.as_str()))
+        .collect();
+    assert_eq!(paths, [("renamed", "same.txt"), ("added", "kept.txt")]);
+    // The other files of that commit keep their patches.
+    let diff = workspace
+        .file_revision_diff(
+            &info.id,
+            &moved.to_string(),
+            &working_key("notes.txt"),
+            PreviewLimit::MIN,
+        )
+        .unwrap();
+    assert_eq!((diff.additions, diff.deletions), (1, 1));
     assert_eq!(before, snapshot(&fixture.source));
 }
 

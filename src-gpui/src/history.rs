@@ -400,14 +400,14 @@ pub(crate) fn fold(text: &str) -> String {
 }
 
 /// Folded text, mapped back to whole source characters.
-struct Folded {
-    text: String,
+pub(crate) struct Folded {
+    pub(crate) text: String,
     /// Source character of each folded byte; ASCII text maps to itself.
     sources: Option<Vec<Range<usize>>>,
 }
 
 impl Folded {
-    fn new(text: &str) -> Self {
+    pub(crate) fn new(text: &str) -> Self {
         if text.is_ascii() {
             return Self {
                 text: text.to_ascii_lowercase(),
@@ -421,7 +421,7 @@ impl Folded {
         }
     }
 
-    fn source(&self, folded: Range<usize>) -> Range<usize> {
+    pub(crate) fn source(&self, folded: Range<usize>) -> Range<usize> {
         match &self.sources {
             Some(sources) => sources[folded.start].start..sources[folded.end - 1].end,
             None => folded,

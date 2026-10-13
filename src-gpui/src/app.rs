@@ -23,6 +23,7 @@ use std::{collections::HashMap, sync::Arc};
 mod commands;
 mod fetch;
 
+use commands::FileSearch;
 use fetch::FetchFeedback;
 
 actions!(
@@ -185,6 +186,7 @@ pub struct Mangrove {
     command_palette: Entity<CommandPalette>,
     palette_open: bool,
     palette_previous_focus: Option<FocusHandle>,
+    file_search: FileSearch,
     open_task: Option<Task<()>>,
     open_lane: RepositoryOpenLane,
     fetch_task: Option<Task<()>>,
@@ -237,6 +239,10 @@ impl Mangrove {
                 |view, _, event, window, cx| match event {
                     PaletteEvent::Close => view.close_palette(window, cx),
                     PaletteEvent::Execute(entry) => view.execute_command(entry, window, cx),
+                    PaletteEvent::OpenFile { request, file } => {
+                        view.choose_searched_file(*request, file.clone(), window, cx)
+                    }
+                    PaletteEvent::Back => view.open_palette(window, cx),
                 },
             ),
             cx.observe(&inspector, |view, _, cx| view.sync_palette(cx)),
@@ -295,6 +301,7 @@ impl Mangrove {
             command_palette,
             palette_open: false,
             palette_previous_focus: None,
+            file_search: FileSearch::default(),
             open_task: None,
             open_lane: RepositoryOpenLane::default(),
             fetch_task: None,
@@ -965,8 +972,16 @@ impl Mangrove {
             .find(|reference| reference.name == name)
         {
             let sha = reference.sha.clone();
+            self.close_opened_file(cx);
             self.history
                 .update(cx, |view, cx| view.jump_to(sha, window, cx));
+        }
+    }
+    /// An explicit navigation shows the repository history over a file opened by path.
+    fn close_opened_file(&mut self, cx: &mut Context<Self>) {
+        if self.inspector.read(cx).has_opened_file() {
+            self.inspector
+                .update(cx, |inspector, cx| inspector.close_workspace(cx));
         }
     }
     fn sync_selection(&mut self, cx: &mut Context<Self>) {
@@ -1028,6 +1043,7 @@ impl Mangrove {
             SidebarEvent::ToggleSolo(name) => self.toggle_solo(Some(name.clone()), window, cx),
             SidebarEvent::OpenWorktree(path) => self.open(path.clone(), false, None, window, cx),
             SidebarEvent::SelectStash(sha) => {
+                self.close_opened_file(cx);
                 self.history.update(cx, |view, cx| view.clear_selection(cx));
                 self.inspector
                     .update(cx, |view, cx| view.select_stash(sha.clone(), cx));
@@ -1076,9 +1092,11 @@ impl Mangrove {
                 }
                 cx.notify();
             }
-            InspectorEvent::NavigateCommit(sha) => self
-                .history
-                .update(cx, |view, cx| view.jump_to(sha.clone(), window, cx)),
+            InspectorEvent::NavigateCommit(sha) => {
+                self.close_opened_file(cx);
+                self.history
+                    .update(cx, |view, cx| view.jump_to(sha.clone(), window, cx));
+            }
             InspectorEvent::WorkingTreeSummary {
                 available,
                 staged,

@@ -943,6 +943,12 @@ impl Workspace {
         file_browser::history(&repository, sha, file_key, cursor)
     }
 
+    pub fn tree_files(&self, id: &str, sha: &str) -> Result<TreeFiles> {
+        let session = self.session(id)?;
+        let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;
+        file_browser::tree_files(&repository, sha, file_browser::MAX_TREE_FILES)
+    }
+
     pub fn file_blame(&self, id: &str, sha: &str, file_key: &str) -> Result<FileBlame> {
         let session = self.session(id)?;
         let repository = Repository::open(&session.source).map_err(|e| e.to_string())?;

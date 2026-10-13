@@ -3,7 +3,8 @@
 use super::*;
 use crate::{
     command_palette::{Command, CommandEntry},
-    file_browser::FileView,
+    file_browser::{FileTarget, FileView},
+    file_search::FileIndex,
     format::{control_shortcut_label, display_path, short_sha, shortcut_label},
     preferences::DiffLayout,
     settings::SettingsSection,
@@ -11,6 +12,18 @@ use crate::{
     theme::ThemeId,
     updates::UpdateStatus,
 };
+use mangrove_core::model::TreeFile;
+
+/// The palette's search among the files of HEAD.
+#[derive(Default)]
+pub(super) struct FileSearch {
+    request: u64,
+    /// Repository path and revision listed for the current request.
+    scope: Option<(String, String)>,
+    /// The last listing of a repository path, reused while HEAD stays.
+    cached: Option<(String, Arc<FileIndex>)>,
+    task: Option<Task<()>>,
+}
 
 impl Mangrove {
     pub(super) fn guard_palette<A: Action>(
@@ -356,6 +369,19 @@ impl Mangrove {
                 "Git",
                 "stash modifications sauvegardées",
             ),
+            CommandEntry::new(
+                Command::FileHistory,
+                "Historique d’un fichier…",
+                "Fichiers",
+                "history log file chercher rechercher",
+            )
+            .detail("Recherche parmi les fichiers de HEAD")
+            .unavailable(
+                self.repository
+                    .as_ref()
+                    .is_some_and(|repo| repo.head.is_none())
+                    .then_some("Aucun commit sur HEAD"),
+            ),
         ];
         entries.push(
             CommandEntry::new(
@@ -499,19 +525,22 @@ impl Mangrove {
                         );
                     }
                 }
-                repository_commands.push(
-                    CommandEntry::new(
-                        Command::Compact(!inspector.compact()),
-                        if inspector.compact() {
-                            "Afficher le diff dans la zone centrale"
-                        } else {
-                            "Afficher le diff dans le panneau des détails"
-                        },
-                        "Affichage",
-                        "diff compact inspecteur",
-                    )
-                    .detail(path),
-                );
+                // The compact view shows the selection's file, not a file opened by path.
+                if !inspector.has_opened_file() {
+                    repository_commands.push(
+                        CommandEntry::new(
+                            Command::Compact(!inspector.compact()),
+                            if inspector.compact() {
+                                "Afficher le diff dans la zone centrale"
+                            } else {
+                                "Afficher le diff dans le panneau des détails"
+                            },
+                            "Affichage",
+                            "diff compact inspecteur",
+                        )
+                        .detail(path),
+                    );
+                }
             }
             if inspector.central_active() {
                 repository_commands.push(
@@ -554,6 +583,7 @@ impl Mangrove {
             self.palette_previous_focus = window.focused(cx);
         }
         self.palette_open = true;
+        self.end_file_search();
         let entries = self.command_entries(cx);
         self.command_palette
             .update(cx, |palette, cx| palette.open(entries, window, cx));
@@ -565,6 +595,7 @@ impl Mangrove {
             return;
         }
         self.palette_open = false;
+        self.end_file_search();
         // The workspace root carries no keyboard behavior of its own.
         match self
             .palette_previous_focus
@@ -602,8 +633,133 @@ impl Mangrove {
             self.sync_palette(cx);
             return;
         }
+        if entry.command == Command::FileHistory {
+            // The palette stays open to search the file.
+            self.search_files(window, cx);
+            return;
+        }
         self.close_palette(window, cx);
         self.run_command(entry.command.clone(), window, cx);
+    }
+    fn end_file_search(&mut self) {
+        self.file_search.request += 1;
+        self.file_search.scope = None;
+        self.file_search.task = None;
+    }
+    /// Lists the files of HEAD in the palette, read once per revision.
+    fn search_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.repository.clone() else {
+            return;
+        };
+        let Some(head) = repo.head.clone() else {
+            return;
+        };
+        if !self.palette_open {
+            self.open_palette(window, cx);
+        }
+        self.end_file_search();
+        let request = self.file_search.request;
+        self.file_search.scope = Some((repo.path.clone(), head.clone()));
+        self.command_palette
+            .update(cx, |palette, cx| palette.search_files(request, window, cx));
+        if let Some((_, index)) = self
+            .file_search
+            .cached
+            .as_ref()
+            .filter(|(path, index)| *path == repo.path && index.sha == head)
+        {
+            let index = index.clone();
+            self.command_palette
+                .update(cx, |palette, cx| palette.set_files(request, Ok(index), cx));
+            return;
+        }
+        self.read_files(request, repo, head, cx);
+    }
+    fn read_files(
+        &mut self,
+        request: u64,
+        repo: Arc<RepositoryInfo>,
+        head: String,
+        cx: &mut Context<Self>,
+    ) {
+        let engine = self.engine.clone();
+        self.file_search.task = Some(cx.spawn(async move |this, cx| {
+            let id = repo.id.clone();
+            let sha = head.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    engine
+                        .tree_files(&id, &sha)
+                        .map(|listing| Arc::new(FileIndex::new(listing)))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                let Some(current) = view.repository.clone().filter(|r| r.path == repo.path) else {
+                    return;
+                };
+                if let Ok(index) = &result {
+                    view.file_search.cached = Some((repo.path.clone(), index.clone()));
+                }
+                if view.file_search.request != request {
+                    return;
+                }
+                // A refresh replaced the session during the read: read it again there.
+                if result.is_err() && current.id != repo.id {
+                    view.read_files(request, current, head, cx);
+                    return;
+                }
+                view.command_palette
+                    .update(cx, |palette, cx| palette.set_files(request, result, cx));
+            });
+        }));
+    }
+    /// Opens the history of a file chosen in the palette's search.
+    pub(super) fn choose_searched_file(
+        &mut self,
+        request: u64,
+        file: TreeFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.palette_open || request != self.file_search.request {
+            return;
+        }
+        let Some((path, sha)) = self.file_search.scope.clone() else {
+            return;
+        };
+        self.close_palette(window, cx);
+        self.open_file_history(path, sha, file, window, cx);
+    }
+    fn open_file_history(
+        &mut self,
+        path: String,
+        sha: String,
+        file: TreeFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let retry = (path.clone(), sha.clone(), file.clone());
+        if self.confirm_leave_clone(window, cx, move |view, window, cx| {
+            let (path, sha, file) = retry;
+            view.open_file_history(path, sha, file, window, cx)
+        }) {
+            return;
+        }
+        let Some(repo) = self.repository.clone().filter(|repo| repo.path == path) else {
+            return;
+        };
+        self.show_workspace(window, cx);
+        let target = FileTarget {
+            session_id: repo.id.clone(),
+            sha,
+            file_key: file.file_key,
+            path: file.path,
+            old_path: None,
+            status: "unmodified".into(),
+        };
+        self.inspector
+            .update(cx, |view, cx| view.open_file_history(target, window, cx));
     }
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         // These show the workspace over the clone screen or quit; the other
@@ -735,9 +891,11 @@ impl Mangrove {
             Command::CopySha(sha) => cx.write_to_clipboard(ClipboardItem::new_string(sha.clone())),
             Command::NavigateCommit(sha) => {
                 self.show_workspace(window, cx);
+                self.close_opened_file(cx);
                 self.history
                     .update(cx, |view, cx| view.jump_to(sha.clone(), window, cx));
             }
+            Command::FileHistory => self.search_files(window, cx),
             Command::FileView(mode) => {
                 self.show_workspace(window, cx);
                 self.inspector

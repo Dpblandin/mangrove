@@ -1,7 +1,9 @@
 //! Searchable commands carry their context so a queued click cannot target a
-//! different repository or file. Only visible rows are rendered.
+//! different repository or file. Only visible rows are rendered. A file search
+//! replaces the commands until a file is chosen or the search is left.
 use crate::{
     file_browser::FileView,
+    file_search::{FileIndex, FileMatch, ranges_within},
     history::fold,
     preferences::{DiffLayout, Pane},
     settings::SettingsSection,
@@ -17,6 +19,8 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+use mangrove_core::model::TreeFile;
+use std::{ops::Range, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -41,6 +45,7 @@ pub enum Command {
     ToggleSolo(String),
     ClearSolo,
     FileView(FileView),
+    FileHistory,
     CloseFile,
     Compact(bool),
     CopySha(String),
@@ -197,11 +202,52 @@ impl Results {
 pub enum PaletteEvent {
     Close,
     Execute(Box<CommandEntry>),
+    /// A file chosen in the file search started by `request`.
+    OpenFile {
+        request: u64,
+        file: TreeFile,
+    },
+    /// Backspace in an empty file search returns to the commands.
+    Back,
+}
+
+/// Files of HEAD while they are read, then the matches of the query.
+struct FileResults {
+    request: u64,
+    index: Option<Arc<FileIndex>>,
+    error: Option<String>,
+    matches: Vec<FileMatch>,
+    selected: usize,
+}
+impl FileResults {
+    fn filter(&mut self, query: &str) {
+        self.matches = self
+            .index
+            .as_ref()
+            .map(|index| index.search(query))
+            .unwrap_or_default();
+        self.selected = 0;
+    }
+    fn navigate(&mut self, direction: isize) {
+        if !self.matches.is_empty() {
+            self.selected = self
+                .selected
+                .saturating_add_signed(direction)
+                .min(self.matches.len() - 1);
+        }
+    }
+    fn selected(&self) -> Option<&TreeFile> {
+        let index = self.index.as_ref()?;
+        self.matches
+            .get(self.selected)
+            .map(|found| index.file(found.index))
+    }
 }
 
 pub struct CommandPalette {
     input: Entity<InputState>,
     results: Results,
+    files: Option<FileResults>,
     scroll: UniformListScrollHandle,
     palette: Palette,
     font_offset: f32,
@@ -214,7 +260,11 @@ impl CommandPalette {
             cx.new(|cx| InputState::new(window, cx).placeholder("Rechercher une commande…"));
         let subscription = cx.subscribe(&input, |view, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                view.results.filter(input.read(cx).value().as_ref());
+                let query = input.read(cx).value();
+                match &mut view.files {
+                    Some(files) => files.filter(&query),
+                    None => view.results.filter(&query),
+                }
                 view.reveal_selection();
                 cx.notify();
             }
@@ -222,6 +272,7 @@ impl CommandPalette {
         Self {
             input,
             results: Results::default(),
+            files: None,
             scroll: UniformListScrollHandle::new(),
             palette: Palette::default(),
             font_offset: 1.,
@@ -234,13 +285,49 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.files = None;
         self.results.entries = entries;
         self.results.filter("");
         self.reveal_selection();
         self.input.update(cx, |input, cx| {
+            input.set_placeholder("Rechercher une commande…", window, cx);
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
+        cx.notify();
+    }
+    /// Replaces the commands with a search among files read for `request`.
+    pub fn search_files(&mut self, request: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.files = Some(FileResults {
+            request,
+            index: None,
+            error: None,
+            matches: Vec::new(),
+            selected: 0,
+        });
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder("Rechercher un fichier de HEAD…", window, cx);
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+    pub fn set_files(
+        &mut self,
+        request: u64,
+        files: Result<Arc<FileIndex>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.input.read(cx).value();
+        let Some(results) = self.files.as_mut().filter(|files| files.request == request) else {
+            return;
+        };
+        match files {
+            Ok(index) => results.index = Some(index),
+            Err(error) => results.error = Some(error),
+        }
+        results.filter(&query);
+        self.reveal_selection();
         cx.notify();
     }
     pub fn sync(
@@ -261,11 +348,21 @@ impl CommandPalette {
         }
     }
     fn reveal_selection(&self) {
+        let selected = match &self.files {
+            Some(files) => files.selected,
+            None => self.results.selected,
+        };
         self.scroll
-            .scroll_to_item(self.results.selected, ScrollStrategy::Nearest);
+            .scroll_to_item(selected, ScrollStrategy::Nearest);
+    }
+    fn navigate(&mut self, direction: isize) {
+        match &mut self.files {
+            Some(files) => files.navigate(direction),
+            None => self.results.navigate(direction),
+        }
     }
     fn move_selection(&mut self, direction: isize, cx: &mut Context<Self>) {
-        self.results.navigate(direction);
+        self.navigate(direction);
         self.reveal_selection();
         cx.stop_propagation();
         cx.notify();
@@ -356,7 +453,98 @@ impl CommandPalette {
             }))
             .into_any_element()
     }
+    fn render_file(&self, index: usize, row_height: f32, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
+        let offset = self.font_offset;
+        let Some((files, found)) = self
+            .files
+            .as_ref()
+            .and_then(|files| Some((files, files.matches.get(index)?)))
+        else {
+            return div().into_any_element();
+        };
+        let Some(file) = files.index.as_ref().map(|index| index.file(found.index)) else {
+            return div().into_any_element();
+        };
+        let selected = index == files.selected;
+        let name_start = file.path.rfind('/').map_or(0, |slash| slash + 1);
+        let highlight = HighlightStyle {
+            color: Some(rgb(p.accent).into()),
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let styled = |text: &str, span: Range<usize>| {
+            StyledText::new(text.to_owned()).with_highlights(
+                ranges_within(&found.ranges, span)
+                    .into_iter()
+                    .map(|range| (range, highlight)),
+            )
+        };
+        let name = styled(&file.path[name_start..], name_start..file.path.len());
+        let directory = name_start
+            .checked_sub(1)
+            .map(|end| styled(&file.path[..end], 0..end));
+        let request = files.request;
+        let chosen = file.clone();
+        div()
+            .id(("palette-file", index))
+            .role(Role::ListBoxOption)
+            .aria_label(file.path.clone())
+            .aria_selected(selected)
+            .aria_position_in_set(index + 1)
+            .aria_size_of_set(files.matches.len())
+            .when(selected, |row| row.aria_active_descendant())
+            .h(px(row_height))
+            .w_full()
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .bg(rgb(if selected { p.selection } else { p.panel }))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(p.hover)))
+            .text_color(rgb(p.text))
+            .child(icon(IconName::FileText, 14., p.muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().text_size(px(12. + offset)).child(name))
+                    .children(directory.map(|directory| {
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_start()
+                            .text_size(px(11. + offset))
+                            .text_color(rgb(p.muted))
+                            .child(directory)
+                    })),
+            )
+            .on_click(cx.listener(move |view, _, _, cx| {
+                if let Some(files) = &mut view.files {
+                    files.selected = index;
+                }
+                cx.emit(PaletteEvent::OpenFile {
+                    request,
+                    file: chosen.clone(),
+                });
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
     fn execute(&self, cx: &mut Context<Self>) {
+        if let Some(files) = &self.files {
+            if let Some(file) = files.selected() {
+                cx.emit(PaletteEvent::OpenFile {
+                    request: files.request,
+                    file: file.clone(),
+                });
+            }
+            return;
+        }
         if let Some(entry) = self
             .results
             .selected()
@@ -371,9 +559,12 @@ impl CommandPalette {
             return;
         }
         match key.key.as_str() {
-            "up" => self.results.navigate(-1),
-            "down" => self.results.navigate(1),
+            "up" => self.navigate(-1),
+            "down" => self.navigate(1),
             "enter" => self.execute(cx),
+            "backspace" if self.files.is_some() && self.input.read(cx).value().is_empty() => {
+                cx.emit(PaletteEvent::Back)
+            }
             "escape" => cx.emit(PaletteEvent::Close),
             "tab" => {
                 // Keep keyboard focus in the search field; results use an
@@ -394,6 +585,31 @@ impl Render for CommandPalette {
         let size = window.viewport_size();
         let height = (f32::from(size.height) - 155.).clamp(64., 390.);
         let row_height = 48. + offset.max(0.) * 2.;
+        let files = self.files.as_ref();
+        let count = match files {
+            Some(files) => files.matches.len(),
+            None => self.results.matches.len(),
+        };
+        let empty = match files {
+            Some(FileResults {
+                error: Some(error), ..
+            }) => error.clone(),
+            Some(FileResults { index: None, .. }) => "Lecture des fichiers de HEAD…".into(),
+            Some(_) => "Aucun fichier trouvé".into(),
+            None => "Aucune commande trouvée".into(),
+        };
+        let truncated = files
+            .and_then(|files| files.index.as_ref())
+            .is_some_and(|index| index.truncated);
+        let hints: &[(&str, &str)] = if files.is_some() {
+            &[
+                ("↑↓", "Naviguer"),
+                ("Entrée", "Ouvrir l’historique"),
+                ("⌫", "Commandes"),
+            ]
+        } else {
+            &[("↑↓", "Naviguer"), ("Entrée", "Exécuter")]
+        };
         div()
             .id("command-palette-overlay")
             .absolute()
@@ -457,7 +673,11 @@ impl Render for CommandPalette {
                             .child(
                                 Input::new(&self.input)
                                     .id("command-palette-search")
-                                    .aria_label("Rechercher une commande")
+                                    .aria_label(if files.is_some() {
+                                        "Rechercher un fichier"
+                                    } else {
+                                        "Rechercher une commande"
+                                    })
                                     .appearance(false)
                                     .bordered(false)
                                     .focus_bordered(false)
@@ -471,33 +691,45 @@ impl Render for CommandPalette {
                         div()
                             .id("command-palette-results")
                             .role(Role::ListBox)
-                            .aria_label("Commandes")
+                            .aria_label(if files.is_some() {
+                                "Fichiers"
+                            } else {
+                                "Commandes"
+                            })
                             .relative()
-                            .h(px(height.min(
-                                (self.results.matches.len().max(1) as f32) * row_height,
-                            )))
+                            .h(px(height.min((count.max(1) as f32) * row_height)))
                             .min_h_0()
                             .flex()
                             .flex_col()
-                            .when(self.results.matches.is_empty(), |view| {
+                            .when(count == 0, |view| {
                                 view.child(
                                     div()
                                         .p(px(20.))
                                         .text_size(px(13. + offset))
                                         .text_color(rgb(p.muted))
-                                        .child("Aucune commande trouvée"),
+                                        .child(empty),
                                 )
                             })
-                            .when(!self.results.matches.is_empty(), |view| {
+                            .when(count > 0, |view| {
                                 view.child(
                                     uniform_list(
-                                        "command-palette-list",
-                                        self.results.matches.len(),
+                                        if files.is_some() {
+                                            "command-palette-files"
+                                        } else {
+                                            "command-palette-list"
+                                        },
+                                        count,
                                         cx.processor(
                                             move |view, range: std::ops::Range<usize>, _, cx| {
                                                 range
                                                     .map(|index| {
-                                                        view.render_command(index, row_height, cx)
+                                                        if view.files.is_some() {
+                                                            view.render_file(index, row_height, cx)
+                                                        } else {
+                                                            view.render_command(
+                                                                index, row_height, cx,
+                                                            )
+                                                        }
                                                     })
                                                     .collect()
                                             },
@@ -524,16 +756,24 @@ impl Render for CommandPalette {
                             .border_color(rgb(p.border))
                             .text_size(px(11. + offset))
                             .text_color(rgb(p.muted))
-                            .children([("↑↓", "Naviguer"), ("Entrée", "Exécuter")].map(
-                                |(key, action)| {
+                            .children(hints.iter().map(|(key, action)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(key_hint(*key, p, offset))
+                                    .child(*action)
+                            }))
+                            .when(truncated, |footer| {
+                                footer.child(
                                     div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.))
-                                        .child(key_hint(key, p, offset))
-                                        .child(action)
-                                },
-                            )),
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_right()
+                                        .child("Limité aux 100 000 premiers fichiers"),
+                                )
+                            }),
                     ),
             )
     }
@@ -554,7 +794,10 @@ pub fn key_hint(label: impl Into<SharedString>, p: Palette, offset: f32) -> Div 
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, CommandEntry, Results};
+    use super::{Command, CommandEntry, FileResults, Results};
+    use crate::file_search::FileIndex;
+    use mangrove_core::model::{TreeFile, TreeFiles};
+    use std::sync::Arc;
     fn entry(label: &str, keywords: &str) -> CommandEntry {
         CommandEntry::new(Command::OpenRecent(label.into()), label, "Dépôts", keywords)
     }
@@ -607,6 +850,38 @@ mod tests {
         results.filter("");
         results.navigate(-20);
         assert_eq!(results.selected, 0);
+    }
+    #[test]
+    fn file_search_selects_within_its_matches_and_waits_for_its_files() {
+        let mut files = FileResults {
+            request: 1,
+            index: None,
+            error: None,
+            matches: Vec::new(),
+            selected: 0,
+        };
+        files.filter("main");
+        files.navigate(1);
+        assert!(files.selected().is_none());
+        files.index = Some(Arc::new(FileIndex::new(TreeFiles {
+            sha: "head".into(),
+            truncated: false,
+            files: ["src/main.rs", "src/lib.rs", "docs/main.md"]
+                .map(|path| TreeFile {
+                    path: path.into(),
+                    file_key: String::new(),
+                })
+                .into(),
+        })));
+        files.filter("main");
+        assert_eq!(files.matches.len(), 2);
+        files.navigate(5);
+        assert_eq!(files.selected().unwrap().path, "docs/main.md");
+        // A new query starts again from its best match.
+        files.filter("lib");
+        assert_eq!(files.selected().unwrap().path, "src/lib.rs");
+        files.navigate(-3);
+        assert_eq!(files.selected, 0);
     }
     #[test]
     fn rejects_queued_commands_after_context_change_or_disable() {
